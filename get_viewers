@@ -55,7 +55,42 @@ class twitchchatlogger:
             time.sleep(0.5)  #dont abuse the API
 
         return user_logins[:limit]
+    
+    def get_channels_above_viewer_no(self, min_viewers=100, max_pages=5000): #sets minimum viewer count
+        url = 'https://api.twitch.tv/helix/streams'
+        user_logins = []
+        cursor = None
+        pages = 0
 
+        while pages < max_pages:
+            params = {'first': 100}
+            if cursor:
+                params['after'] = cursor
+
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            batch = data.get('data', [])
+            if not batch:
+                break
+
+            for stream in batch:
+                viewer_count = stream['viewer_count']
+                if viewer_count <= min_viewers:
+                    print(f"Stopped at {stream['user_login']} with {viewer_count} viewers")
+                    return user_logins
+                user_logins.append(stream['user_login'])
+
+            pages += 1
+            cursor = data.get('pagination', {}).get('cursor')
+            if not cursor:
+                break
+
+            time.sleep(0.4)  # Be kind to Twitch
+
+        return user_logins
+    
     def fetch_chatters(self, channel): #get chatters using the TMI endpoint.
         url = f"https://tmi.twitch.tv/group/user/{channel}/chatters"
         try:
@@ -71,7 +106,7 @@ class twitchchatlogger:
         except requests.RequestException:
             return []
 
-    def collect_data(self, channels: List[str]): #Collects chatter data from given channels."""
+    def collect_data(self, channels: List[str]): #Collects chatter data from given channels
         self.data.clear()
         timestamp = datetime.datetime.now().isoformat(timespec='seconds')
 
