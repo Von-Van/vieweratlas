@@ -1,0 +1,128 @@
+import requests
+import datetime
+import time
+import os
+import csv
+from typing import List
+
+class twitchchatlogger:
+    def __init__(self, client_id: str, client_secret: str):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.access_token = self.get_access_token()
+        self.headers = {
+            'Client-ID': self.client_id,
+            'Authorization': f'Bearer {self.access_token}'
+        }
+        self.data = []
+
+    def get_access_token(self) -> str: #Get an OAuth token using client ID and secret.
+        url = 'https://id.twitch.tv/oauth2/token'
+        params = {
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
+            'grant_type': 'client_credentials'
+        }
+        response = requests.post(url, params=params)
+        response.raise_for_status()
+        return response.json()['access_token']
+
+    def get_top_channels(self, limit=1000) -> List[str]: #Fetch top live channels by viewer count
+        url = 'https://api.twitch.tv/helix/streams'
+        user_logins = []
+        cursor = None
+        total_fetched = 0
+
+        while total_fetched < limit:
+            params = {'first': 100}
+            if cursor:
+                params['after'] = cursor
+
+            response = requests.get(url, headers=self.headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+
+            for stream in data['data']:
+                user_logins.append(stream['user_login'])
+
+            total_fetched += len(data['data'])
+
+            if 'pagination' in data and 'cursor' in data['pagination']:
+                cursor = data['pagination']['cursor']
+            else:
+                break
+
+            time.sleep(0.5)  #dont abuse the API
+
+        return user_logins[:limit]
+
+    def fetch_chatters(self, channel): #get chatters using the TMI endpoint.
+        url = f"https://tmi.twitch.tv/group/user/{channel}/chatters"
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                chatters = []
+                for role, users in data["chatters"].items():
+                    chatters.extend(users)
+                return chatters
+            else:
+                return []
+        except requests.RequestException:
+            return []
+
+    def collect_data(self, channels: List[str]): #Collects chatter data from given channels."""
+        self.data.clear()
+        timestamp = datetime.datetime.now().isoformat(timespec='seconds')
+
+        for i, channel in enumerate(channels, start=1):
+            chatters = self.fetch_chatters(channel)
+            self.data.append({
+                "channel": channel,
+                "timestamp": timestamp,
+                "viewer_count": len(chatters),
+                "chatters": chatters})
+            
+            print(f"[{i}/{len(channels)}] {channel} - {len(chatters)} chatters")
+            time.sleep(0.25)  # Avoid hammering the endpoint
+
+    def save_to_csv(self, filename="chatters_log.csv"): #Save collected data to a CSV file.
+        if not self.data:
+            print("No data to save.")
+            return
+
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+
+        # Write to CSV
+        with open(filename, mode='w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+            writer.writerow(["timestamp", "channel", "viewer_count", "username"])
+
+            for entry in self.data:
+                for username in entry["chatters"]:
+                    writer.writerow([
+                        entry["timestamp"],
+                        entry["channel"],
+                        entry["viewer_count"],
+                        username])
+
+    def print_report(self):
+        for entry in self.data:
+            print(f"\nChannel: {entry['channel']}")
+            print(f"Time: {entry['timestamp']}")
+            print(f"Viewers: {entry['viewer_count']}")
+            for user in sorted(entry['chatters']):
+                print(f"  - {user}")
+
+if __name__ == "__main__": # Set via env vars or hardcode here
+    CLIENT_ID = os.getenv("TWITCH_CLIENT_ID") or "your_client_id"
+    CLIENT_SECRET = os.getenv("TWITCH_CLIENT_SECRET") or "your_client_secret"
+
+    logger = twitchchatlogger(CLIENT_ID, CLIENT_SECRET)
+
+    top_channels = logger.get_top_channels(limit=1000)
+    logger.collect_data(top_channels[:100])  #limit this for dev
+    logger.print_report()
+    logger.save_to_csv("chatters_log.csv")
+    print("Saved chat data to chatters_log.csv")
