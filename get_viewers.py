@@ -74,7 +74,17 @@ class ChatLogger(commands.Bot):
             title = stream_info["title"] if stream_info else "Unavailable"
             started_at = stream_info["started_at"] if stream_info else "Unknown"
 
-            print(f"\n #{channel} Stream Info:")
+            # Store in-memory summary for optional reuse
+            self.stream_data[channel] = {
+                "timestamp": timestamp,
+                "viewer_count": viewer_count,
+                "game_name": game_name,
+                "title": title,
+                "started_at": started_at,
+                "chatters": list(users)
+            }
+
+            print(f"\n#{channel} Stream Info:")
             print(f"  Title       : {title}")
             print(f"  Game        : {game_name}")
             print(f"  Viewers     : {viewer_count}")
@@ -87,15 +97,7 @@ class ChatLogger(commands.Bot):
 
             # Save JSON
             with open(json_path, "w") as f:
-                json.dump({
-                    "timestamp": timestamp,
-                    "channel": channel,
-                    "viewer_count": viewer_count,
-                    "game_name": game_name,
-                    "title": title,
-                    "started_at": started_at,
-                    "chatters": list(users)
-                }, f, indent=2)
+                json.dump(self.stream_data[channel], f, indent=2)
 
             # Save CSV
             with open(csv_path, "w", newline="") as f:
@@ -110,4 +112,4 @@ class ChatLogger(commands.Bot):
                         game_name, title, started_at, user
                     ])
 
-            print(f"📁 Saved log for #{channel}: {csv_path}, {json_path}")
+            print(f"Saved log for #{channel}: {csv_path}, {json_path}")
