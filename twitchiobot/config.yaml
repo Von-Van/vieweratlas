@@ -1,0 +1,72 @@
+# ViewerAtlas Pipeline Configuration
+# Save this file and reference it: python main.py analyze config.yaml
+# Environment variables override these settings
+
+collection:
+  # Directory for log files (JSON snapshots + CSV chatter logs)
+  logs_dir: "logs"
+  
+  # How often to collect data (seconds)
+  collection_interval: 3600  # 1 hour
+  
+analysis:
+  # Minimum viewers to count as overlap (edges with fewer are removed)
+  overlap_threshold: 1
+  
+  # Minimum size of communities to report
+  min_community_size: 2
+  
+  # Resolution parameter for Louvain algorithm
+  # Higher = more communities, Lower = fewer communities
+  resolution: 1.0
+  
+  # Game name threshold (%) for automatic tagging
+  game_threshold: 60
+  
+  # Language threshold (%) for automatic tagging
+  language_threshold: 40
+  
+  # Directory for analysis outputs
+  output_dir: "community_analysis"
+  
+  # Directory for log files
+  logs_dir: "logs"
+
+# Logging configuration
+log_level: "INFO"
+log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# ============================================
+# Preset configurations (uncomment to use)
+# ============================================
+
+# RIGOROUS MODE: TwitchAtlas-style filtering
+# rigorous:
+#   collection:
+#     collection_interval: 3600
+#   analysis:
+#     overlap_threshold: 300      # High threshold for strong overlaps
+#     min_community_size: 10      # Larger communities only
+#     resolution: 0.8             # Fewer, larger communities
+#     game_threshold: 70
+#     language_threshold: 50
+#   log_level: "INFO"
+
+# EXPLORATORY MODE: Fine-grained communities
+# explorer:
+#   analysis:
+#     overlap_threshold: 1
+#     min_community_size: 2
+#     resolution: 2.0             # Many small communities
+#     game_threshold: 50
+#     language_threshold: 30
+#   log_level: "DEBUG"
+
+# DEBUG MODE: Small dataset, verbose logging
+# debug:
+#   collection:
+#     collection_interval: 60     # Collect every minute
+#   analysis:
+#     overlap_threshold: 1
+#     output_dir: "community_analysis_debug"
+#   log_level: "DEBUG"
