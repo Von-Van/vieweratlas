@@ -1,0 +1,80 @@
+{
+  "family": "vieweratlas-collector",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "containerDefinitions": [
+    {
+      "name": "collector",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-collector:latest",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vieweratlas-collector",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "collector"
+        }
+      },
+      "environment": [
+        {
+          "name": "STORAGE_TYPE",
+          "value": "s3"
+        },
+        {
+          "name": "S3_BUCKET",
+          "value": "${S3_BUCKET}"
+        },
+        {
+          "name": "S3_PREFIX",
+          "value": "vieweratlas/"
+        },
+        {
+          "name": "S3_REGION",
+          "value": "${AWS_REGION}"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "TWITCH_OAUTH_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token"
+        },
+        {
+          "name": "TWITCH_CLIENT_ID",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "test -d /app/logs || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "channels",
+          "containerPath": "/app/channels.txt",
+          "readOnly": true
+        }
+      ]
+    }
+  ],
+  "volumes": [
+    {
+      "name": "channels",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "${EFS_ID}",
+        "rootDirectory": "/channels",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ],
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-collector-task-role",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-collector-execution-role"
+}

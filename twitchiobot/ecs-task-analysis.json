@@ -1,0 +1,54 @@
+{
+  "family": "vieweratlas-analysis",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "containerDefinitions": [
+    {
+      "name": "analysis",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-analysis:latest",
+      "essential": true,
+      "command": ["python", "-u", "main.py", "analyze", "rigorous"],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vieweratlas-analysis",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "analysis"
+        }
+      },
+      "environment": [
+        {
+          "name": "STORAGE_TYPE",
+          "value": "s3"
+        },
+        {
+          "name": "S3_BUCKET",
+          "value": "${S3_BUCKET}"
+        },
+        {
+          "name": "S3_PREFIX",
+          "value": "vieweratlas/"
+        },
+        {
+          "name": "S3_REGION",
+          "value": "${AWS_REGION}"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c 'import networkx, matplotlib' || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      }
+    }
+  ],
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-analysis-task-role",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-analysis-execution-role"
+}

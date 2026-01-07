@@ -1,18 +1,27 @@
 """
 Data Aggregator Module
 
-Loads chat snapshots from logs/ directory and builds cumulative viewer data
+Loads chat snapshots from logs/ directory or S3 and builds cumulative viewer data
 structures for overlap analysis. Provides methods to aggregate viewer data
 across multiple snapshots and time windows.
+
+Supports both local filesystem and S3 storage backends.
 """
 
 import json
 import csv
 import os
 from collections import defaultdict
-from typing import Dict, Set, List, Tuple
+from typing import Dict, Set, List, Tuple, Optional
 from pathlib import Path
 from datetime import datetime
+
+# Import storage abstraction
+try:
+    from storage import get_storage, BaseStorage
+    HAS_STORAGE = True
+except ImportError:
+    HAS_STORAGE = False
 
 
 class DataAggregator:
@@ -25,78 +34,131 @@ class DataAggregator:
     - snapshots: List of raw snapshot data with timestamps
     """
     
-    def __init__(self, logs_dir: str = "logs"):
+    def __init__(self, logs_dir: str = "logs", storage: Optional[BaseStorage] = None):
         """
-        Initialize aggregator with logs directory path.
+        Initialize aggregator with logs directory path or storage backend.
         
         Args:
-            logs_dir: Path to directory containing JSON/CSV log files
+            logs_dir: Path to directory containing log files (used for FileStorage)
+            storage: Optional storage backend (auto-detects if None)
         """
         self.logs_dir = Path(logs_dir)
         self.channel_viewers: Dict[str, Set[str]] = defaultdict(set)
         self.channel_metadata: Dict[str, dict] = {}
         self.snapshots: List[dict] = []
         
+        # Initialize storage backend
+        if storage is not None:
+            self.storage = storage
+        elif HAS_STORAGE:
+            self.storage = get_storage()
+        else:
+            self.storage = None
+        
     def load_json_snapshots(self) -> int:
         """
-        Load all JSON snapshot files from logs directory.
+        Load all JSON snapshot files from storage backend.
         
         JSON format: {
             "channel": str,
             "timestamp": str,
-            "viewers": int,
-            "game": str,
+            "viewer_count": int,
+            "game_name": str,
             "title": str,
-            "uptime": str,
+            "started_at": str,
             "chatters": [str, str, ...]
         }
         
         Returns:
             Number of JSON files loaded
         """
-        if not self.logs_dir.exists():
-            print(f"Logs directory {self.logs_dir} does not exist")
-            return 0
-        
-        json_files = list(self.logs_dir.glob("*.json"))
-        count = 0
-        
-        for json_file in json_files:
-            try:
-                with open(json_file, 'r') as f:
-                    data = json.load(f)
-                
-                # Handle both single snapshot and array of snapshots
-                if isinstance(data, list):
-                    snapshots = data
-                else:
-                    snapshots = [data]
-                
-                for snapshot in snapshots:
-                    channel = snapshot.get("channel", "").lower()
-                    if not channel:
+        if self.storage:
+            # Load from storage backend (supports S3)
+            json_files = self.storage.list_files(prefix="raw/snapshots", suffix=".json")
+            count = 0
+            
+            for json_key in json_files:
+                try:
+                    data = self.storage.download_json(json_key)
+                    if not data:
                         continue
                     
-                    # Add chatters to channel's viewer set
-                    chatters = snapshot.get("chatters", [])
-                    self.channel_viewers[channel].update(chatters)
+                    # Handle both single snapshot and array of snapshots
+                    if isinstance(data, list):
+                        snapshots = data
+                    else:
+                        snapshots = [data]
                     
-                    # Store latest metadata for this channel
-                    self.channel_metadata[channel] = {
-                        "viewers": snapshot.get("viewers", 0),
-                        "game": snapshot.get("game", "Unknown"),
-                        "title": snapshot.get("title", ""),
-                        "uptime": snapshot.get("uptime", ""),
-                        "timestamp": snapshot.get("timestamp", "")
-                    }
-                    
-                    self.snapshots.append(snapshot)
-                    count += 1
+                    for snapshot in snapshots:
+                        channel = snapshot.get("channel", "").lower()
+                        if not channel:
+                            continue
+                        
+                        # Add chatters to channel's viewer set
+                        chatters = snapshot.get("chatters", [])
+                        self.channel_viewers[channel].update(chatters)
+                        
+                        # Store latest metadata for this channel
+                        self.channel_metadata[channel] = {
+                            "viewer_count": snapshot.get("viewer_count", snapshot.get("viewers", 0)),
+                            "game_name": snapshot.get("game_name", snapshot.get("game", "Unknown")),
+                            "title": snapshot.get("title", ""),
+                            "started_at": snapshot.get("started_at", snapshot.get("uptime", "")),
+                            "timestamp": snapshot.get("timestamp", "")
+                        }
+                        
+                        self.snapshots.append(snapshot)
+                        count += 1
+                
+                except Exception as e:
+                    print(f"Error loading {json_key}: {e}")
             
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"Error loading {json_file}: {e}")
-        
-        return count
+            return count
+        else:
+            # Legacy local filesystem loading
+            if not self.logs_dir.exists():
+                print(f"Logs directory {self.logs_dir} does not exist")
+                return 0
+            
+            json_files = list(self.logs_dir.glob("*.json"))
+            count = 0
+            
+            for json_file in json_files:
+                try:
+                    with open(json_file, 'r') as f:
+                        data = json.load(f)
+                    
+                    # Handle both single snapshot and array of snapshots
+                    if isinstance(data, list):
+                        snapshots = data
+                    else:
+                        snapshots = [data]
+                    
+                    for snapshot in snapshots:
+                        channel = snapshot.get("channel", "").lower()
+                        if not channel:
+                            continue
+                        
+                        # Add chatters to channel's viewer set
+                        chatters = snapshot.get("chatters", [])
+                        self.channel_viewers[channel].update(chatters)
+                        
+                        # Store latest metadata for this channel
+                        self.channel_metadata[channel] = {
+                            "viewers": snapshot.get("viewers", 0),
+                            "game": snapshot.get("game", "Unknown"),
+                            "title": snapshot.get("title", ""),
+                            "uptime": snapshot.get("uptime", ""),
+                            "timestamp": snapshot.get("timestamp", "")
+                        }
+                        
+                        self.snapshots.append(snapshot)
+                        count += 1
+                
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"Error loading {json_file}: {e}")
+            
+            return count
     
     def load_csv_snapshots(self) -> int:
         """

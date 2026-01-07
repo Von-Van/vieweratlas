@@ -2,6 +2,23 @@
 # Save this file and reference it: python main.py analyze config.yaml
 # Environment variables override these settings
 
+# ============================================
+# Storage Configuration
+# ============================================
+# Options: 'file' (local filesystem) or 's3' (AWS S3)
+storage_type: "file"
+
+# S3 Settings (required if storage_type='s3')
+# s3_bucket: "vieweratlas-data-lake"
+# s3_prefix: "vieweratlas/"
+# s3_region: "us-east-1"
+
+# Environment variables for S3:
+# export STORAGE_TYPE=s3
+# export S3_BUCKET=your-bucket-name
+# export S3_PREFIX=vieweratlas/
+# export AWS_PROFILE=your-profile  # or use AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
+
 collection:
   # Directory for log files (JSON snapshots + CSV chatter logs)
   logs_dir: "logs"

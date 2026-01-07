@@ -109,6 +109,12 @@ class PipelineConfig:
     collection: CollectionConfig = None
     analysis: AnalysisConfig = None
     
+    # Storage backend
+    storage_type: str = "file"  # 'file' or 's3'
+    s3_bucket: Optional[str] = None  # Required if storage_type='s3'
+    s3_prefix: str = "vieweratlas/"  # S3 key prefix
+    s3_region: str = "us-east-1"  # AWS region
+    
     # Logging
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -123,6 +129,10 @@ class PipelineConfig:
             self.collection = CollectionConfig()
         if self.analysis is None:
             self.analysis = AnalysisConfig()
+        
+        # Validate S3 config
+        if self.storage_type == 's3' and not self.s3_bucket:
+            raise ValueError("s3_bucket required when storage_type='s3'")
 
 
 # Default configurations for different use cases
@@ -277,6 +287,10 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     return PipelineConfig(
         collection=collection_config,
         analysis=analysis_config,
+        storage_type=config_dict.get("storage_type", "file"),
+        s3_bucket=config_dict.get("s3_bucket"),
+        s3_prefix=config_dict.get("s3_prefix", "vieweratlas/"),
+        s3_region=config_dict.get("s3_region", "us-east-1"),
         log_level=config_dict.get("log_level", "INFO"),
         log_format=config_dict.get("log_format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"),
         verbose=config_dict.get("verbose", False)

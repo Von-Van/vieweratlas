@@ -9,6 +9,13 @@ from time import sleep
 from twitchio.ext import commands
 from dotenv import load_dotenv
 
+# Import storage abstraction
+try:
+    from storage import get_storage, BaseStorage
+    HAS_STORAGE = True
+except ImportError:
+    HAS_STORAGE = False
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -27,14 +34,25 @@ def load_channels():
     return [c.strip().lower() for c in env_channels.split(",") if c.strip()]
 
 class ChatLogger(commands.Bot):
-    def __init__(self, token, channels, output_dir="logs"):
+    def __init__(self, token, channels, output_dir="logs", storage=None):
         super().__init__(
             token=token,
             prefix="!",
             initial_channels=channels
         )
         self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Initialize storage backend
+        if storage is not None:
+            self.storage = storage
+        elif HAS_STORAGE:
+            # Auto-detect from environment
+            self.storage = get_storage()
+        else:
+            # Fallback to local files (legacy)
+            self.storage = None
+            os.makedirs(self.output_dir, exist_ok=True)
+        
         self.chatters = {channel: set() for channel in channels}
         self.start_time = None
         self.stream_data = {}
@@ -187,27 +205,53 @@ class ChatLogger(commands.Bot):
                 print(f"  Chatters    : {len(users)}")
 
                 filename_base = f"{channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                json_path = os.path.join(self.output_dir, f"{filename_base}.json")
-                csv_path = os.path.join(self.output_dir, f"{filename_base}.csv")
-
-                # Save JSON
-                with open(json_path, "w") as f:
-                    json.dump(self.stream_data[channel], f, indent=2)
-
-                # Save CSV
-                with open(csv_path, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        "timestamp", "channel", "viewer_count",
-                        "game_name", "title", "started_at", "username"
-                    ])
+                
+                # Use storage abstraction if available
+                if self.storage:
+                    # S3-friendly paths with date partitioning
+                    date_partition = datetime.now().strftime('%Y/%m/%d')
+                    json_key = f"raw/snapshots/{date_partition}/{filename_base}.json"
+                    csv_key = f"raw/chatter_logs/{date_partition}/{filename_base}.csv"
+                    
+                    # Upload JSON
+                    self.storage.upload_json(json_key, self.stream_data[channel])
+                    
+                    # Upload CSV
+                    csv_rows = []
                     for user in sorted(users):
-                        writer.writerow([
+                        csv_rows.append([
                             timestamp, channel, viewer_count,
                             game_name, title, started_at, user
                         ])
+                    headers = ["timestamp", "channel", "viewer_count", 
+                              "game_name", "title", "started_at", "username"]
+                    self.storage.upload_csv(csv_key, csv_rows, headers=headers)
+                    
+                    logger.info(f"[{channel}] Saved: {self.storage.get_uri(json_key)}")
+                else:
+                    # Legacy local file storage
+                    json_path = os.path.join(self.output_dir, f"{filename_base}.json")
+                    csv_path = os.path.join(self.output_dir, f"{filename_base}.csv")
 
-                logger.info(f"[{channel}] Saved: {csv_path}, {json_path}")
+                    # Save JSON
+                    with open(json_path, "w") as f:
+                        json.dump(self.stream_data[channel], f, indent=2)
+
+                    # Save CSV
+                    with open(csv_path, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            "timestamp", "channel", "viewer_count",
+                            "game_name", "title", "started_at", "username"
+                        ])
+                        for user in sorted(users):
+                            writer.writerow([
+                                timestamp, channel, viewer_count,
+                                game_name, title, started_at, user
+                            ])
+
+                    logger.info(f"[{channel}] Saved: {csv_path}, {json_path}")
+
                 self.collection_stats["successful"] += 1
                 
             except Exception as e:

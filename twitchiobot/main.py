@@ -41,6 +41,7 @@ from config import (
     get_debug_config,
     load_config_from_yaml
 )
+from storage import get_storage
 
 load_dotenv()
 
@@ -99,6 +100,24 @@ class PipelineRunner:
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"PipelineRunner initialized with log level {config.log_level}")
+        
+        # Initialize storage backend
+        self.storage = get_storage(
+            storage_type=config.storage_type,
+            bucket=config.s3_bucket,
+            prefix=config.s3_prefix,
+            region=config.s3_region
+        )
+        self.logger.info(f"Storage backend: {config.storage_type}")
+        
+        # Initialize storage backend
+        self.storage = get_storage(
+            storage_type=config.storage_type,
+            bucket=config.s3_bucket,
+            prefix=config.s3_prefix,
+            region=config.s3_region
+        )
+        self.logger.info(f"Storage backend: {config.storage_type}")
     
     def _validate_prerequisites(self, mode: str) -> bool:
         """
@@ -163,7 +182,7 @@ class PipelineRunner:
         # Process in batches
         for i, batch in enumerate(self._split_batches(all_channels), 1):
             self.logger.info(f"Processing batch {i}/{-(-len(all_channels)//self.config.collection.batch_size)}...")
-            bot = ChatLogger(token=oauth_token, channels=batch)
+            bot = ChatLogger(token=oauth_token, channels=batch, storage=self.storage)
             await bot.start()
             self.logger.info(f"  📡 Logging chatters in {len(batch)} channels")
             await asyncio.sleep(self.config.collection.duration_per_batch)
@@ -246,7 +265,7 @@ class PipelineRunner:
     
     def _step_aggregate(self) -> Optional[DataAggregator]:
         """Aggregation step."""
-        aggregator = DataAggregator(self.config.analysis.logs_dir)
+        aggregator = DataAggregator(self.config.analysis.logs_dir, storage=self.storage)
         json_count, csv_count = aggregator.load_all()
         self.logger.info(f"Loaded {json_count} JSON snapshots + {csv_count} CSV records")
         
@@ -399,9 +418,9 @@ class PipelineRunner:
         }
         
         if self.config.analysis.save_analysis_json:
-            with open(f"{self.config.analysis.output_dir}/analysis_results.json", 'w') as f:
-                json.dump(results, f, indent=2)
-            self.logger.info(f"✓ Results saved to {self.config.analysis.output_dir}/analysis_results.json")
+            results_key = "processed/analysis_results.json"
+            self.storage.upload_json(results_key, results)
+            self.logger.info(f"✓ Results saved to {self.storage.get_uri(results_key)}")
     
     def wait_until_next_hour(self):
         """Wait until top of hour (or configured interval)."""
