@@ -75,6 +75,9 @@ class AnalysisConfig:
     resolution: float = 1.0  # Louvain resolution (higher = more communities)
     min_community_size: int = 1  # Minimum channels in a community to include
     
+    # Continuous mode
+    analysis_interval_cycles: int = 24  # Run analysis every N collection cycles
+    
     # Visualization
     enable_static_viz: bool = True  # Generate PNG
     enable_interactive_viz: bool = True  # Generate HTML

@@ -2,7 +2,7 @@
 .env
 twitchiobot/.env
 twitchiobot/config/.env
-
+twitchiobot/docs
 # Specification documents (local only)
 vieweratlas scheme.txt
 vodintegr.txt

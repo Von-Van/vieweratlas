@@ -483,7 +483,7 @@ async def mode_continuous(config: PipelineConfig):
         return
     
     collection_cycles = 0
-    analysis_interval = 24  # Analyze every N cycles
+    analysis_interval = config.analysis.analysis_interval_cycles
     
     while True:
         await runner.run_collection_cycle()

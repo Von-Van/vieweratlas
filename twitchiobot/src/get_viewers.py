@@ -109,7 +109,11 @@ class ChatLogger(commands.Bot):
                 
                 if data:
                     logger.debug(f"[{channel_name}] Stream info fetched successfully")
-                    return data[0]
+                    stream_info = data[0]
+                    # Extract broadcaster_language for community tagging
+                    if \"language\" in stream_info:
+                        stream_info[\"broadcaster_language\"] = stream_info[\"language\"]
+                    return stream_info
                 else:
                     logger.warning(f"[{channel_name}] Stream offline or not found")
                     return None

@@ -223,15 +223,23 @@ class DataAggregator:
                 )
                 for key in parquet_keys:
                     try:
-                        import tempfile
-
-                        with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
-                            if not self.storage.download_file(key, tmp.name):
-                                continue
-                            df = pd.read_parquet(tmp.name)
-                            for record in df.to_dict(orient="records"):
-                                if self._ingest_snapshot(record, default_source="vod"):
-                                    count += 1
+                        # Try direct S3 URI reading first (more efficient)
+                        try:
+                            s3_uri = self.storage.get_uri(key)
+                            df = pd.read_parquet(s3_uri)
+                        except Exception:
+                            # Fallback to tempfile download for compatibility
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+                                if not self.storage.download_file(key, tmp.name):
+                                    continue
+                                df = pd.read_parquet(tmp.name)
+                                import os
+                                os.unlink(tmp.name)
+                        
+                        for record in df.to_dict(orient="records"):
+                            if self._ingest_snapshot(record, default_source="vod"):
+                                count += 1
                     except Exception as e:
                         print(f"Error loading {key}: {e}")
 

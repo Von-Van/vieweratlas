@@ -120,6 +120,19 @@ dashboard_config:
           stat: "Average"
           period: 300
 
+  # SNS Topic for Alerts
+  sns_topic:
+    name: "vieweratlas-alerts"
+    display_name: "ViewerAtlas Alerts"
+    subscriptions:
+      - protocol: "email"
+        endpoint: "${ALERT_EMAIL}"  # Set via environment variable
+      # Add additional subscriptions as needed:
+      # - protocol: "sms"
+      #   endpoint: "+1234567890"
+      # - protocol: "lambda"
+      #   endpoint: "arn:aws:lambda:region:account:function:notify"
+
   alarms:
     - name: "VODQueueBacklogHigh"
       description: "Alert when VOD queue pending count exceeds 1000"
@@ -129,6 +142,9 @@ dashboard_config:
       evaluation_periods: 2
       period: 300
       statistic: "Average"
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "notBreaching"
 
     - name: "VODFailureRateHigh"
       description: "Alert when VOD failure rate exceeds 20%"
@@ -143,6 +159,9 @@ dashboard_config:
       comparison: "GreaterThanThreshold"
       evaluation_periods: 2
       period: 3600
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "notBreaching"
 
     - name: "VODProcessingStalled"
       description: "Alert when no VODs processed in 6 hours"
@@ -152,6 +171,27 @@ dashboard_config:
       evaluation_periods: 1
       period: 21600  # 6 hours
       statistic: "Sum"
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "breaching"
+
+    - name: "ECSTaskFailures"
+      description: "Alert when ECS tasks fail repeatedly"
+      metric: "TasksStoppedReason"
+      namespace: "AWS/ECS"
+      dimensions:
+        - name: "ServiceName"
+          value: "vieweratlas-vod-collector"
+        - name: "ClusterName"
+          value: "vieweratlas-cluster"
+      threshold: 3
+      comparison: "GreaterThanThreshold"
+      evaluation_periods: 1
+      period: 900  # 15 minutes
+      statistic: "Sum"
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "notBreaching"
 
 # Python code to emit CloudWatch metrics from VOD collector
 """
