@@ -49,7 +49,55 @@ analysis:
   # Directory for log files
   logs_dir: "logs"
 
-# Logging configuration
+# ============================================
+# VOD (Video On Demand) Collection
+# ============================================
+# Optional: Supplement live data with historical VOD chat replay
+vod:
+  # Enable VOD collection (requires TwitchDownloaderCLI)
+  enabled: false
+  
+  # Time bucket window in seconds (should match live collection)
+  bucket_len_s: 60
+  
+  # Directory for raw VOD chat JSON files
+  raw_dir: "vod_raw"
+  
+  # VOD processing queue file
+  queue_file: "vod_queue.json"
+  
+  # Path to TwitchDownloaderCLI executable
+  # Download from: https://github.com/lay295/TwitchDownloader
+  cli_path: "TwitchDownloaderCLI"
+  
+  # Automatically discover recent VODs for channels in channels.txt
+  auto_discover: false
+  
+  # Number of recent VODs to queue per channel (max 100)
+  vod_limit_per_channel: 5
+  
+  # Maximum VOD age in days (prevents processing very old VODs)
+  max_age_days: 14
+  
+  # Minimum view count filter (0 = no filter)
+  min_views: 0
+
+# Usage:
+#  1. Manual VOD queueing:
+#     python vod_collector.py add --vod-id 1234567890 --channel xqc
+#
+#  2. Auto-discovery from channels.txt:
+#     python vod_collector.py discover --channels-file channels.txt --vod-limit 5
+#
+#  3. Process queue:
+#     python vod_collector.py process
+#
+#  4. Check queue status:
+#     python vod_collector.py stats
+
+# ============================================
+# Logging Configuration
+# ============================================
 log_level: "INFO"
 log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 

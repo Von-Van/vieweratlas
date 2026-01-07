@@ -46,6 +46,7 @@ class DataAggregator:
         self.channel_viewers: Dict[str, Set[str]] = defaultdict(set)
         self.channel_metadata: Dict[str, dict] = {}
         self.snapshots: List[dict] = []
+        self.snapshot_source_counts: Dict[str, int] = defaultdict(int)
         
         # Initialize storage backend
         if storage is not None:
@@ -54,6 +55,30 @@ class DataAggregator:
             self.storage = get_storage()
         else:
             self.storage = None
+
+    def _ingest_snapshot(self, snapshot: dict, default_source: str = "live") -> bool:
+        """Normalize and ingest a single snapshot into aggregator state."""
+        channel = snapshot.get("channel") or snapshot.get("channel_login") or ""
+        channel = channel.lower()
+        if not channel:
+            return False
+
+        chatters = snapshot.get("chatters", [])
+        self.channel_viewers[channel].update(chatters)
+
+        # Normalize metadata keys for downstream consumers
+        self.channel_metadata[channel] = {
+            "viewer_count": snapshot.get("viewer_count", snapshot.get("viewers", 0)),
+            "game_name": snapshot.get("game_name", snapshot.get("game", "Unknown")),
+            "title": snapshot.get("title", ""),
+            "started_at": snapshot.get("started_at", snapshot.get("uptime", "")),
+            "timestamp": snapshot.get("timestamp", "")
+        }
+
+        self.snapshots.append(snapshot)
+        source = snapshot.get("_source") or snapshot.get("source") or default_source
+        self.snapshot_source_counts[source] += 1
+        return True
         
     def load_json_snapshots(self) -> int:
         """
@@ -90,25 +115,8 @@ class DataAggregator:
                         snapshots = [data]
                     
                     for snapshot in snapshots:
-                        channel = snapshot.get("channel", "").lower()
-                        if not channel:
-                            continue
-                        
-                        # Add chatters to channel's viewer set
-                        chatters = snapshot.get("chatters", [])
-                        self.channel_viewers[channel].update(chatters)
-                        
-                        # Store latest metadata for this channel
-                        self.channel_metadata[channel] = {
-                            "viewer_count": snapshot.get("viewer_count", snapshot.get("viewers", 0)),
-                            "game_name": snapshot.get("game_name", snapshot.get("game", "Unknown")),
-                            "title": snapshot.get("title", ""),
-                            "started_at": snapshot.get("started_at", snapshot.get("uptime", "")),
-                            "timestamp": snapshot.get("timestamp", "")
-                        }
-                        
-                        self.snapshots.append(snapshot)
-                        count += 1
+                        if self._ingest_snapshot(snapshot, default_source="live"):
+                            count += 1
                 
                 except Exception as e:
                     print(f"Error loading {json_key}: {e}")
@@ -135,25 +143,8 @@ class DataAggregator:
                         snapshots = [data]
                     
                     for snapshot in snapshots:
-                        channel = snapshot.get("channel", "").lower()
-                        if not channel:
-                            continue
-                        
-                        # Add chatters to channel's viewer set
-                        chatters = snapshot.get("chatters", [])
-                        self.channel_viewers[channel].update(chatters)
-                        
-                        # Store latest metadata for this channel
-                        self.channel_metadata[channel] = {
-                            "viewers": snapshot.get("viewers", 0),
-                            "game": snapshot.get("game", "Unknown"),
-                            "title": snapshot.get("title", ""),
-                            "uptime": snapshot.get("uptime", ""),
-                            "timestamp": snapshot.get("timestamp", "")
-                        }
-                        
-                        self.snapshots.append(snapshot)
-                        count += 1
+                        if self._ingest_snapshot(snapshot, default_source="live"):
+                            count += 1
                 
                 except (json.JSONDecodeError, IOError) as e:
                     print(f"Error loading {json_file}: {e}")
@@ -205,17 +196,102 @@ class DataAggregator:
                 print(f"Error loading {csv_file}: {e}")
         
         return count
+
+    def load_vod_snapshots(self) -> int:
+        """
+        Load bucketized VOD presence snapshots.
+
+        Expected locations:
+        - Storage: curated/presence_snapshots/source=vod/**.json
+        - Storage: curated/presence_snapshots/source=vod/**.parquet
+        - Local: logs/vod_snapshots/**/snapshot_*.json
+        - Local: logs/vod_snapshots/**/part-*.parquet
+        """
+        count = 0
+
+        # Parquet first (preferred format)
+        try:
+            import pandas as pd
+        except ImportError:
+            pd = None
+
+        if self.storage:
+            if pd is not None:
+                parquet_keys = self.storage.list_files(
+                    prefix="curated/presence_snapshots/source=vod",
+                    suffix=".parquet"
+                )
+                for key in parquet_keys:
+                    try:
+                        import tempfile
+
+                        with tempfile.NamedTemporaryFile(suffix=".parquet") as tmp:
+                            if not self.storage.download_file(key, tmp.name):
+                                continue
+                            df = pd.read_parquet(tmp.name)
+                            for record in df.to_dict(orient="records"):
+                                if self._ingest_snapshot(record, default_source="vod"):
+                                    count += 1
+                    except Exception as e:
+                        print(f"Error loading {key}: {e}")
+
+            # JSON fallback
+            vod_files = self.storage.list_files(
+                prefix="curated/presence_snapshots/source=vod",
+                suffix=".json"
+            )
+            for vod_key in vod_files:
+                try:
+                    snapshot = self.storage.download_json(vod_key)
+                    if not snapshot:
+                        continue
+
+                    if self._ingest_snapshot(snapshot, default_source="vod"):
+                        count += 1
+                except Exception as e:
+                    print(f"Error loading {vod_key}: {e}")
+
+            return count
+
+        # Local filesystem fallback
+        base_dir = self.logs_dir / "vod_snapshots"
+        if base_dir.exists():
+            if pd is not None:
+                parquet_files = list(base_dir.rglob("part-*.parquet"))
+                for parquet_file in parquet_files:
+                    try:
+                        df = pd.read_parquet(parquet_file)
+                        for record in df.to_dict(orient="records"):
+                            if self._ingest_snapshot(record, default_source="vod"):
+                                count += 1
+                    except Exception as e:
+                        print(f"Error loading {parquet_file}: {e}")
+
+            vod_files = list(base_dir.rglob("snapshot_*.json"))
+            for vod_file in vod_files:
+                try:
+                    with open(vod_file, 'r') as f:
+                        snapshot = json.load(f)
+
+                    if self._ingest_snapshot(snapshot, default_source="vod"):
+                        count += 1
+
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"Error loading {vod_file}: {e}")
+
+        return count
     
-    def load_all(self) -> Tuple[int, int]:
+    def load_all(self) -> Tuple[int, int, int]:
         """
         Load all available snapshots (both JSON and CSV).
         
         Returns:
-            Tuple of (json_count, csv_count)
+            Tuple of (json_count, csv_count, vod_count)
         """
         json_count = self.load_json_snapshots()
         csv_count = self.load_csv_snapshots()
-        return json_count, csv_count
+        vod_count = self.load_vod_snapshots()
+        return json_count, csv_count, vod_count
     
     def get_channel_viewers(self) -> Dict[str, Set[str]]:
         """
@@ -259,7 +335,8 @@ class DataAggregator:
             "total_channels": total_channels,
             "total_unique_viewers_per_channel": total_unique_viewers,
             "total_unique_viewers_across_all": len(all_viewers),
-            "top_channels_by_viewers": channel_sizes[:10]
+            "top_channels_by_viewers": channel_sizes[:10],
+            "snapshot_sources": dict(self.snapshot_source_counts)
         }
     
     def filter_channels_by_size(self, min_viewers: int = 1) -> Dict[str, Set[str]]:
@@ -397,9 +474,9 @@ class DataAggregator:
 if __name__ == "__main__":
     # Test the aggregator
     aggregator = DataAggregator("logs")
-    json_count, csv_count = aggregator.load_all()
+    json_count, csv_count, vod_count = aggregator.load_all()
     
-    print(f"Loaded {json_count} JSON snapshots and {csv_count} CSV rows")
+    print(f"Loaded {json_count} JSON snapshots, {csv_count} CSV rows, and {vod_count} VOD snapshots")
     print("\nStatistics:")
     stats = aggregator.get_statistics()
     for key, value in stats.items():

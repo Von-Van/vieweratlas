@@ -1,0 +1,48 @@
+# ViewerAtlas VOD Collector - Docker Image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies and TwitchDownloaderCLI
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    wget \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install TwitchDownloaderCLI
+RUN wget https://github.com/lay295/TwitchDownloader/releases/latest/download/TwitchDownloaderCLI-LinuxX64.zip \
+    && unzip TwitchDownloaderCLI-LinuxX64.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/TwitchDownloaderCLI \
+    && rm TwitchDownloaderCLI-LinuxX64.zip
+
+# Copy requirements first (for better caching)
+COPY src/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/vod_collector.py .
+COPY src/storage.py .
+COPY src/config.py .
+COPY src/main.py .
+COPY src/update_channels.py .
+COPY src/get_viewers.py .
+COPY channels.txt ./
+
+# Create directories
+RUN mkdir -p /app/vod_raw /app/logs
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV VOD_RAW_DIR=/app/vod_raw
+ENV VOD_QUEUE_FILE=/app/vod_queue.json
+ENV TWITCH_DOWNLOADER_CLI=/usr/local/bin/TwitchDownloaderCLI
+
+# Health check
+HEALTHCHECK --interval=60s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import os; exit(0 if os.path.exists('/app/vod_queue.json') else 1)"
+
+# Run VOD collector
+CMD ["python", "-u", "main.py", "preprocess_vods", "config.yaml"]

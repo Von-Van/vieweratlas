@@ -1,2 +1,39 @@
+# Environment and secrets
 .env
+twitchiobot/.env
+twitchiobot/config/.env
+
+# Specification documents (local only)
 vieweratlas scheme.txt
+vodintegr.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Runtime data directories
+twitchiobot/logs/
+twitchiobot/vod_raw/
+twitchiobot/community_analysis/
+twitchiobot/vod_queue.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+twitchiobot/.dockerignore
+*.log

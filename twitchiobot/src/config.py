@@ -103,11 +103,53 @@ class AnalysisConfig:
 
 
 @dataclass
+class VODConfig:
+    """Configuration for VOD (Video On Demand) chatter collection."""
+    
+    # Enable/disable VOD collection
+    enabled: bool = False
+    
+    # Time bucketing
+    bucket_len_s: int = 60  # Bucket window size in seconds (must match live collection)
+    
+    # Storage
+    raw_dir: str = "vod_raw"  # Directory for raw VOD chat JSON
+    queue_file: str = "vod_queue.json"  # VOD processing queue
+    
+    # TwitchDownloaderCLI
+    cli_path: str = "TwitchDownloaderCLI"  # Path to executable
+    
+    # Auto-discovery
+    auto_discover: bool = False  # Automatically discover recent VODs
+    vod_limit_per_channel: int = 5  # Number of recent VODs to queue per channel
+    
+    # Filtering
+    max_age_days: int = 14  # Maximum VOD age in days (default 14)
+    min_views: int = 0  # Minimum view count to process (default 0)
+    
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.bucket_len_s <= 0:
+            raise ValueError("bucket_len_s must be positive")
+        if self.vod_limit_per_channel < 1:
+            raise ValueError("vod_limit_per_channel must be at least 1")
+        if self.max_age_days < 1:
+            raise ValueError("max_age_days must be at least 1")
+        if self.min_views < 0:
+            raise ValueError("min_views cannot be negative")
+        
+        # Create directories if they don't exist
+        if self.enabled:
+            Path(self.raw_dir).mkdir(exist_ok=True)
+
+
+@dataclass
 class PipelineConfig:
     """Combined configuration for entire pipeline."""
     
     collection: CollectionConfig = None
     analysis: AnalysisConfig = None
+    vod: VODConfig = None
     
     # Storage backend
     storage_type: str = "file"  # 'file' or 's3'
@@ -129,6 +171,8 @@ class PipelineConfig:
             self.collection = CollectionConfig()
         if self.analysis is None:
             self.analysis = AnalysisConfig()
+        if self.vod is None:
+            self.vod = VODConfig()
         
         # Validate S3 config
         if self.storage_type == 's3' and not self.s3_bucket:
@@ -264,6 +308,7 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     # Create configs from dict
     collection_dict = config_dict.get("collection", {})
     analysis_dict = config_dict.get("analysis", {})
+    vod_dict = config_dict.get("vod", {})
     
     collection_config = CollectionConfig(
         logs_dir=collection_dict.get("logs_dir", "logs"),
@@ -284,9 +329,22 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         min_community_size=analysis_dict.get("min_community_size", 2)
     )
     
+    vod_config = VODConfig(
+        enabled=vod_dict.get("enabled", False),
+        bucket_len_s=vod_dict.get("bucket_len_s", 60),
+        raw_dir=vod_dict.get("raw_dir", "vod_raw"),
+        queue_file=vod_dict.get("queue_file", "vod_queue.json"),
+        cli_path=vod_dict.get("cli_path", "TwitchDownloaderCLI"),
+        auto_discover=vod_dict.get("auto_discover", False),
+        vod_limit_per_channel=vod_dict.get("vod_limit_per_channel", 5),
+        max_age_days=vod_dict.get("max_age_days", 14),
+        min_views=vod_dict.get("min_views", 0)
+    )
+    
     return PipelineConfig(
         collection=collection_config,
         analysis=analysis_config,
+        vod=vod_config,
         storage_type=config_dict.get("storage_type", "file"),
         s3_bucket=config_dict.get("s3_bucket"),
         s3_prefix=config_dict.get("s3_prefix", "vieweratlas/"),

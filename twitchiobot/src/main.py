@@ -42,6 +42,7 @@ from config import (
     load_config_from_yaml
 )
 from storage import get_storage
+from vod_collector import VODCollector
 
 load_dotenv()
 
@@ -109,6 +110,15 @@ class PipelineRunner:
             region=config.s3_region
         )
         self.logger.info(f"Storage backend: {config.storage_type}")
+
+        if config.vod and config.vod.enabled:
+            if config.vod.bucket_len_s != config.collection.duration_per_batch:
+                self.logger.warning(
+                    "VOD bucket_len_s (%s) differs from live collection duration_per_batch (%s). "
+                    "Presence bucket windows should be consistent system-wide.",
+                    config.vod.bucket_len_s,
+                    config.collection.duration_per_batch
+                )
         
         # Initialize storage backend
         self.storage = get_storage(
@@ -266,8 +276,10 @@ class PipelineRunner:
     def _step_aggregate(self) -> Optional[DataAggregator]:
         """Aggregation step."""
         aggregator = DataAggregator(self.config.analysis.logs_dir, storage=self.storage)
-        json_count, csv_count = aggregator.load_all()
-        self.logger.info(f"Loaded {json_count} JSON snapshots + {csv_count} CSV records")
+        json_count, csv_count, vod_count = aggregator.load_all()
+        self.logger.info(
+            f"Loaded {json_count} JSON snapshots + {csv_count} CSV records + {vod_count} VOD snapshots"
+        )
         
         stats = aggregator.get_statistics()
         self.logger.info(f"Total channels: {stats['total_channels']}")
@@ -485,6 +497,41 @@ async def mode_continuous(config: PipelineConfig):
             runner.wait_until_next_hour()
 
 
+async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] = None):
+    """VOD preprocessing mode: discover, queue, and process VOD chats."""
+    logger = logging.getLogger(__name__)
+
+    if not config.vod.enabled:
+        logger.warning("VOD collection is disabled in config but preprocess_vods was requested. Proceeding anyway.")
+
+    storage = get_storage(
+        storage_type=config.storage_type,
+        bucket=config.s3_bucket,
+        prefix=config.s3_prefix,
+        region=config.s3_region
+    )
+
+    collector = VODCollector(
+        storage=storage,
+        queue_file=config.vod.queue_file,
+        raw_dir=config.vod.raw_dir,
+        bucket_len_s=config.vod.bucket_len_s,
+        cli_path=config.vod.cli_path,
+        max_age_days=config.vod.max_age_days,
+        min_views=config.vod.min_views
+    )
+
+    if config.vod.auto_discover:
+        channels = load_channels()
+        if channels:
+            logger.info(f"Auto-discovering VODs for {len(channels)} channels (limit {config.vod.vod_limit_per_channel} each)")
+            collector.add_vods_for_channels(channels, vod_limit=config.vod.vod_limit_per_channel)
+        else:
+            logger.warning("No channels found for auto-discovery; skipping queue population")
+
+    collector.process_all_pending(max_vods=max_vods)
+
+
 def main():
     """Main entry point. Supports preset configs or YAML file."""
     # Parse arguments
@@ -494,6 +541,12 @@ def main():
     else:
         mode = sys.argv[1]
         config_arg = sys.argv[2] if len(sys.argv) > 2 else "default"
+    max_vods = None
+    if mode == "preprocess_vods" and len(sys.argv) > 3:
+        try:
+            max_vods = int(sys.argv[3])
+        except ValueError:
+            print("Warning: max_vods argument must be an integer; ignoring")
     
     # Check if it's a YAML file
     if config_arg.endswith(".yaml") or config_arg.endswith(".yml"):
@@ -541,14 +594,17 @@ def main():
         asyncio.run(mode_analyze(config))
     elif mode == "continuous":
         asyncio.run(mode_continuous(config))
+    elif mode == "preprocess_vods":
+        asyncio.run(mode_preprocess_vods(config, max_vods=max_vods))
     else:
         print(f"Usage: python main.py [collect|analyze|continuous] [config_name_or_yaml_file]")
-        print(f"\nModes: collect, analyze, continuous")
+        print(f"\nModes: collect, analyze, continuous, preprocess_vods")
         print(f"\nPreset Configs: default, rigorous, explorer, debug")
         print(f"\nExamples:")
         print(f"  python main.py analyze                    # Default config")
         print(f"  python main.py analyze rigorous           # TwitchAtlas-style")
         print(f"  python main.py analyze config.yaml        # Custom YAML config")
+        print(f"  python main.py preprocess_vods config.yaml 5  # Process up to 5 queued VODs")
 
 
 if __name__ == "__main__":

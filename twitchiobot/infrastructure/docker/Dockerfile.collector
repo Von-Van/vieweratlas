@@ -11,15 +11,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (for better caching)
-COPY requirements.txt .
+COPY src/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY get_viewers.py .
-COPY update_channels.py .
-COPY storage.py .
-COPY config.py .
-COPY *.txt ./
+COPY src/get_viewers.py .
+COPY src/update_channels.py .
+COPY src/storage.py .
+COPY src/config.py .
+COPY channels.txt ./
 
 # Create logs directory
 RUN mkdir -p /app/logs

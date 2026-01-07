@@ -13,12 +13,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements
-COPY requirements.txt .
+COPY src/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application code
-COPY *.py ./
-COPY *.txt ./
+COPY src/*.py ./
+COPY channels.txt ./
 
 # Create output directory
 RUN mkdir -p /app/community_analysis

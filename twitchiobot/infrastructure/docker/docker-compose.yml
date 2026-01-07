@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  # Data Collector Service
+  collector:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.collector
+    container_name: vieweratlas-collector
+    environment:
+      - TWITCH_OAUTH_TOKEN=${TWITCH_OAUTH_TOKEN}
+      - TWITCH_CLIENT_ID=${TWITCH_CLIENT_ID}
+      - STORAGE_TYPE=${STORAGE_TYPE:-file}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_PREFIX=${S3_PREFIX:-vieweratlas/}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ../../logs:/app/logs
+      - ../../channels.txt:/app/channels.txt
+    restart: unless-stopped
+    networks:
+      - vieweratlas
+
+  # Analysis Pipeline Service
+  analysis:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.analysis
+    container_name: vieweratlas-analysis
+    environment:
+      - STORAGE_TYPE=${STORAGE_TYPE:-file}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_PREFIX=${S3_PREFIX:-vieweratlas/}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - LOG_LEVEL=INFO
+    volumes:
+      - ../../logs:/app/logs
+      - ../../community_analysis:/app/community_analysis
+    depends_on:
+      - collector
+    networks:
+      - vieweratlas
+
+  # VOD Collector Service
+  vod-collector:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.vod
+    container_name: vieweratlas-vod-collector
+    environment:
+      - TWITCH_OAUTH_TOKEN=${TWITCH_OAUTH_TOKEN}
+      - TWITCH_CLIENT_ID=${TWITCH_CLIENT_ID}
+      - STORAGE_TYPE=${STORAGE_TYPE:-file}
+      - S3_BUCKET=${S3_BUCKET}
+      - S3_PREFIX=${S3_PREFIX:-vieweratlas/}
+      - S3_REGION=${S3_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - LOG_LEVEL=INFO
+      - VOD_RAW_DIR=/app/vod_raw
+      - TWITCH_DOWNLOADER_CLI=/usr/local/bin/TwitchDownloaderCLI
+    volumes:
+      - ../../vod_raw:/app/vod_raw
+      - ../../logs:/app/logs
+      - ../../channels.txt:/app/channels.txt
+      - ../../config/config.yaml:/app/config.yaml
+      - ../../vod_queue.json:/app/vod_queue.json
+    restart: unless-stopped
+    networks:
+      - vieweratlas
+
+networks:
+  vieweratlas:
+    driver: bridge
+
+volumes:
+  logs:
+  community_analysis:

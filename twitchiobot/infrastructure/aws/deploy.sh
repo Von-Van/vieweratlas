@@ -49,7 +49,7 @@ check_prerequisites() {
 create_ecr_repos() {
     log_info "Creating ECR repositories..."
     
-    for repo in vieweratlas-collector vieweratlas-analysis; do
+    for repo in vieweratlas-collector vieweratlas-analysis vieweratlas-vod; do
         if ! aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" &> /dev/null; then
             log_info "Creating repository: $repo"
             aws ecr create-repository \
@@ -77,7 +77,7 @@ build_and_push() {
     local image_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/vieweratlas-$service:latest"
     
     log_info "Building $service image..."
-    docker build -t "vieweratlas-$service:latest" -f "$dockerfile" .
+    docker build -t "vieweratlas-$service:latest" -f "../docker/$dockerfile" ../..
     
     log_info "Tagging $service image..."
     docker tag "vieweratlas-$service:latest" "$image_uri"
@@ -92,7 +92,7 @@ build_and_push() {
 register_task_definitions() {
     log_info "Registering ECS task definitions..."
     
-    for task in collector analysis; do
+    for task in collector analysis vod-collector; do
         local task_def_file="ecs-task-$task.json"
         
         if [ ! -f "$task_def_file" ]; then
@@ -123,7 +123,7 @@ update_services() {
     
     log_info "Updating ECS services in cluster: $cluster"
     
-    for service in collector analysis; do
+    for service in collector analysis vod-collector; do
         if aws ecs describe-services --cluster "$cluster" --services "vieweratlas-$service" --region "$AWS_REGION" | grep -q "vieweratlas-$service"; then
             log_info "Updating service: vieweratlas-$service"
             aws ecs update-service \
@@ -150,6 +150,7 @@ main() {
     
     build_and_push "collector" "Dockerfile.collector"
     build_and_push "analysis" "Dockerfile.analysis"
+    build_and_push "vod" "Dockerfile.vod"
     
     register_task_definitions
     

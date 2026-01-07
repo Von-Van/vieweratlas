@@ -1,0 +1,93 @@
+{
+  "family": "vieweratlas-vod-collector",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [
+    {
+      "name": "vod-collector",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-vod:latest",
+      "essential": true,
+      "command": ["python", "-u", "main.py", "preprocess_vods", "config.yaml"],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vieweratlas-vod-collector",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "vod-collector"
+        }
+      },
+      "environment": [
+        {
+          "name": "STORAGE_TYPE",
+          "value": "s3"
+        },
+        {
+          "name": "S3_BUCKET",
+          "value": "${S3_BUCKET}"
+        },
+        {
+          "name": "S3_PREFIX",
+          "value": "vieweratlas/"
+        },
+        {
+          "name": "S3_REGION",
+          "value": "${AWS_REGION}"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        },
+        {
+          "name": "VOD_RAW_DIR",
+          "value": "/tmp/vod_raw"
+        },
+        {
+          "name": "VOD_QUEUE_FILE",
+          "value": "/app/vod_queue.json"
+        },
+        {
+          "name": "TWITCH_DOWNLOADER_CLI",
+          "value": "/usr/local/bin/TwitchDownloaderCLI"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "TWITCH_OAUTH_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token"
+        },
+        {
+          "name": "TWITCH_CLIENT_ID",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id"
+        }
+      ],
+      "healthCheck": {
+        "command": ["CMD-SHELL", "test -f /app/vod_queue.json || exit 1"],
+        "interval": 60,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 30
+      },
+      "mountPoints": [
+        {
+          "sourceVolume": "vod-queue",
+          "containerPath": "/app/vod_queue.json",
+          "readOnly": false
+        }
+      ]
+    }
+  ],
+  "volumes": [
+    {
+      "name": "vod-queue",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "${EFS_ID}",
+        "rootDirectory": "/vod_queue",
+        "transitEncryption": "ENABLED"
+      }
+    }
+  ],
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-vod-collector-task-role",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-vod-collector-execution-role"
+}
