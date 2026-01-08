@@ -4,6 +4,9 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "1024",
   "memory": "2048",
+  "ephemeralStorage": {
+    "sizeInGiB": 10
+  },
   "containerDefinitions": [
     {
       "name": "analysis",

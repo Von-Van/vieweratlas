@@ -4,6 +4,9 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
   "memory": "1024",
+  "ephemeralStorage": {
+    "sizeInGiB": 10
+  },
   "containerDefinitions": [
     {
       "name": "vod-collector",

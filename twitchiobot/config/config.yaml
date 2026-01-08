@@ -1,137 +1,68 @@
-# ViewerAtlas Pipeline Configuration
-# Save this file and reference it: python main.py analyze config.yaml
+# ViewerAtlas Pipeline Configuration (Conservative Defaults)
 # Environment variables override these settings
 
 # ============================================
 # Storage Configuration
 # ============================================
 # Options: 'file' (local filesystem) or 's3' (AWS S3)
-storage_type: "file"
+
 
 # S3 Settings (required if storage_type='s3')
-# s3_bucket: "vieweratlas-data-lake"
+# s3_bucket: "your-unique-bucket"
 # s3_prefix: "vieweratlas/"
 # s3_region: "us-east-1"
 
-# Environment variables for S3:
-# export STORAGE_TYPE=s3
-# export S3_BUCKET=your-bucket-name
-# export S3_PREFIX=vieweratlas/
-# export AWS_PROFILE=your-profile  # or use AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY
-
+# ============================================
+# Collection (Live) - Conservative
+# ============================================
 collection:
-  # Directory for log files (JSON snapshots + CSV chatter logs)
   logs_dir: "logs"
-  
-  # How often to collect data (seconds)
-  collection_interval: 3600  # 1 hour
-  
+  top_channels_limit: 500       # Lower channel cap for safety
+  batch_size: 50                # Fewer channels per batch
+  duration_per_batch: 45        # 45 seconds per batch
+  wait_for_hour_alignment: true
+  collection_interval_minutes: 60
+  # Cost protection
+  max_runtime_hours: 8          # Stop after 8 hours
+  max_collection_cycles: 24     # Stop after 24 cycles
+
+# ============================================
+# Analysis - Conservative
+# ============================================
 analysis:
-  # Minimum viewers to count as overlap (edges with fewer are removed)
-  overlap_threshold: 1
-  
-  # Minimum size of communities to report
-  min_community_size: 2
-  
-  # Resolution parameter for Louvain algorithm
-  # Higher = more communities, Lower = fewer communities
-  resolution: 1.0
-  
-  # Game name threshold (%) for automatic tagging
-  game_threshold: 60
-  
-  # Language threshold (%) for automatic tagging
-  language_threshold: 40
-  
-  # Directory for analysis outputs
-  output_dir: "community_analysis"
-  
-  # Directory for log files
   logs_dir: "logs"
+  output_dir: "community_analysis"
+  overlap_threshold: 10         # Drop very weak overlaps
+  min_community_size: 3
+  resolution: 1.2
+  analysis_interval_cycles: 24  # Run analysis daily if continuous mode
 
 # ============================================
-# VOD (Video On Demand) Collection
+# VOD Collection - Disabled by default, guarded
 # ============================================
-# Optional: Supplement live data with historical VOD chat replay
 vod:
-  # Enable VOD collection (requires TwitchDownloaderCLI)
   enabled: false
-  
-  # Time bucket window in seconds (should match live collection)
   bucket_len_s: 60
-  
-  # Directory for raw VOD chat JSON files
   raw_dir: "vod_raw"
-  
-  # VOD processing queue file
   queue_file: "vod_queue.json"
-  
-  # Path to TwitchDownloaderCLI executable
-  # Download from: https://github.com/lay295/TwitchDownloader
   cli_path: "TwitchDownloaderCLI"
-  
-  # Automatically discover recent VODs for channels in channels.txt
   auto_discover: false
-  
-  # Number of recent VODs to queue per channel (max 100)
-  vod_limit_per_channel: 5
-  
-  # Maximum VOD age in days (prevents processing very old VODs)
+  vod_limit_per_channel: 2      # Conservative default
   max_age_days: 14
-  
-  # Minimum view count filter (0 = no filter)
-  min_views: 0
-
-# Usage:
-#  1. Manual VOD queueing:
-#     python vod_collector.py add --vod-id 1234567890 --channel xqc
-#
-#  2. Auto-discovery from channels.txt:
-#     python vod_collector.py discover --channels-file channels.txt --vod-limit 5
-#
-#  3. Process queue:
-#     python vod_collector.py process
-#
-#  4. Check queue status:
-#     python vod_collector.py stats
+  min_views: 100                # Skip very small VODs
+  # Cost protection
+  max_vods_per_run: 10          # Hard stop per run
+  max_processing_hours: 2       # Stop VOD run after 2 hours
+  rate_limit_delay_s: 2         # Delay between API calls
 
 # ============================================
-# Logging Configuration
+# Logging
 # ============================================
 log_level: "INFO"
-log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+log_format: "% (asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# ============================================
-# Preset configurations (uncomment to use)
-# ============================================
-
-# RIGOROUS MODE: TwitchAtlas-style filtering
-# rigorous:
-#   collection:
-#     collection_interval: 3600
-#   analysis:
-#     overlap_threshold: 300      # High threshold for strong overlaps
-#     min_community_size: 10      # Larger communities only
-#     resolution: 0.8             # Fewer, larger communities
-#     game_threshold: 70
-#     language_threshold: 50
-#   log_level: "INFO"
-
-# EXPLORATORY MODE: Fine-grained communities
-# explorer:
-#   analysis:
-#     overlap_threshold: 1
-#     min_community_size: 2
-#     resolution: 2.0             # Many small communities
-#     game_threshold: 50
-#     language_threshold: 30
-#   log_level: "DEBUG"
-
-# DEBUG MODE: Small dataset, verbose logging
-# debug:
-#   collection:
-#     collection_interval: 60     # Collect every minute
-#   analysis:
-#     overlap_threshold: 1
-#     output_dir: "community_analysis_debug"
-#   log_level: "DEBUG"
+# Notes:
+# - Switch storage_type to "s3" and set s3_bucket/prefix/region before cloud deploy
+# - Limits are conservative to prevent accidental spend; raise gradually after testing
+# - VOD is off by default; enable once comfortable with costs
+  

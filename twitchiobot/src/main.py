@@ -460,8 +460,31 @@ async def mode_collect(config: PipelineConfig):
     if not runner._validate_prerequisites('collect'):
         return
     
+    start_time = time.time()
+    cycle_count = 0
+    
     while True:
+        # Cost protection: check runtime limit
+        if config.collection.max_runtime_hours:
+            elapsed_hours = (time.time() - start_time) / 3600
+            if elapsed_hours >= config.collection.max_runtime_hours:
+                runner.logger.warning(
+                    f"⏱️ Max runtime reached: {elapsed_hours:.1f}h / {config.collection.max_runtime_hours}h. Stopping collection."
+                )
+                break
+        
+        # Cost protection: check cycle limit
+        if config.collection.max_collection_cycles:
+            if cycle_count >= config.collection.max_collection_cycles:
+                runner.logger.warning(
+                    f"🔄 Max cycles reached: {cycle_count} / {config.collection.max_collection_cycles}. Stopping collection."
+                )
+                break
+        
         await runner.run_collection_cycle()
+        cycle_count += 1
+        runner.logger.info(f"Completed cycle {cycle_count}, runtime: {(time.time() - start_time)/3600:.2f}h")
+        
         if config.collection.wait_for_hour_alignment:
             runner.wait_until_next_hour()
 
@@ -484,14 +507,34 @@ async def mode_continuous(config: PipelineConfig):
     
     collection_cycles = 0
     analysis_interval = config.analysis.analysis_interval_cycles
+    start_time = time.time()
     
     while True:
+        # Cost protection: check runtime limit
+        if config.collection.max_runtime_hours:
+            elapsed_hours = (time.time() - start_time) / 3600
+            if elapsed_hours >= config.collection.max_runtime_hours:
+                runner.logger.warning(
+                    f"⏱️ Max runtime reached: {elapsed_hours:.1f}h / {config.collection.max_runtime_hours}h. Stopping."
+                )
+                break
+        
+        # Cost protection: check cycle limit
+        if config.collection.max_collection_cycles:
+            if collection_cycles >= config.collection.max_collection_cycles:
+                runner.logger.warning(
+                    f"🔄 Max cycles reached: {collection_cycles} / {config.collection.max_collection_cycles}. Stopping."
+                )
+                break
+        
         await runner.run_collection_cycle()
         collection_cycles += 1
         
         if collection_cycles % analysis_interval == 0:
             runner.logger.info(f"Running periodic analysis (cycle {collection_cycles})...")
             runner.run_analysis_pipeline()
+        
+        runner.logger.info(f"Completed cycle {collection_cycles}, runtime: {(time.time() - start_time)/3600:.2f}h")
         
         if config.collection.wait_for_hour_alignment:
             runner.wait_until_next_hour()
@@ -508,6 +551,54 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
         storage_type=config.storage_type,
         bucket=config.s3_bucket,
         prefix=config.s3_prefix,
+        region=config.s3_region
+    )
+
+    # Initialize VOD collector
+    collector = VODCollector(
+        config.vod.raw_dir,
+        config.vod.queue_file,
+        config.vod.cli_path,
+        storage=storage,
+        bucket_len_s=config.vod.bucket_len_s
+    )
+
+    # Cost protection: limit VODs to process
+    effective_max = max_vods or config.vod.max_vods_per_run
+    if effective_max:
+        logger.warning(f"\u26a0\ufe0f  Cost Protection: Max {effective_max} VODs will be processed this run")
+    
+    start_time = time.time()
+    processed_count = 0
+
+    # Process pending VODs
+    pending = collector.queue.get_pending()
+    logger.info(f"Found {len(pending)} pending VODs in queue")
+    
+    for vod_id in pending:
+        # Cost protection: check VOD count limit
+        if effective_max and processed_count >= effective_max:
+            logger.warning(f\"\ud83d\udea8 Reached max VOD limit ({processed_count}/{effective_max}). Stopping.\")
+            break
+        
+        # Cost protection: check runtime limit
+        if config.vod.max_processing_hours:
+            elapsed_hours = (time.time() - start_time) / 3600
+            if elapsed_hours >= config.vod.max_processing_hours:
+                logger.warning(f\"\u23f1\ufe0f Max runtime reached: {elapsed_hours:.1f}h. Stopping VOD processing.\")
+                break
+        
+        # Rate limiting protection
+        if config.vod.rate_limit_delay_s > 0 and processed_count > 0:
+            logger.debug(f\"Rate limit delay: {config.vod.rate_limit_delay_s}s\")
+            time.sleep(config.vod.rate_limit_delay_s)
+        
+        success = collector.process_vod(vod_id)
+        if success:
+            processed_count += 1
+            logger.info(f\"Progress: {processed_count} VODs processed, {(time.time()-start_time)/60:.1f} min elapsed\")
+
+    logger.info(f\"VOD preprocessing complete: {processed_count} VODs processed in {(time.time()-start_time)/60:.1f} min\")
         region=config.s3_region
     )
 

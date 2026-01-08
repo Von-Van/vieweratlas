@@ -39,6 +39,10 @@ class CollectionConfig:
     wait_for_hour_alignment: bool = True  # Sync to top of hour
     collection_interval_minutes: int = 60  # Minutes between cycles
     
+    # Cost Protection
+    max_runtime_hours: Optional[int] = 24  # Auto-stop after N hours (None = unlimited)
+    max_collection_cycles: Optional[int] = 100  # Auto-stop after N cycles (None = unlimited)
+    
     # File settings
     logs_dir: str = "logs"
     
@@ -129,6 +133,11 @@ class VODConfig:
     # Filtering
     max_age_days: int = 14  # Maximum VOD age in days (default 14)
     min_views: int = 0  # Minimum view count to process (default 0)
+    
+    # Cost Protection
+    max_vods_per_run: Optional[int] = 50  # Max VODs to process per execution (None = unlimited)
+    max_processing_hours: Optional[int] = 4  # Auto-stop after N hours (None = unlimited)
+    rate_limit_delay_s: int = 2  # Delay between API calls to avoid rate limits
     
     def __post_init__(self):
         """Validate configuration."""

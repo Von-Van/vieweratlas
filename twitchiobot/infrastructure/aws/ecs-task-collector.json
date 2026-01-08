@@ -4,6 +4,9 @@
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "256",
   "memory": "512",
+  "ephemeralStorage": {
+    "sizeInGiB": 10
+  },
   "containerDefinitions": [
     {
       "name": "collector",
