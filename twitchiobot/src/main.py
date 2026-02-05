@@ -119,15 +119,6 @@ class PipelineRunner:
                     config.vod.bucket_len_s,
                     config.collection.duration_per_batch
                 )
-        
-        # Initialize storage backend
-        self.storage = get_storage(
-            storage_type=config.storage_type,
-            bucket=config.s3_bucket,
-            prefix=config.s3_prefix,
-            region=config.s3_region
-        )
-        self.logger.info(f"Storage backend: {config.storage_type}")
     
     def _validate_prerequisites(self, mode: str) -> bool:
         """
@@ -190,7 +181,7 @@ class PipelineRunner:
         self.logger.info(f"Found {len(all_channels)} channels to monitor")
         
         # Process in batches
-        for i, batch in enumerate(self._split_batches(all_channels), 1):
+        for i, batch in enumerate(self._split_batches(all_channels, self.config.collection.batch_size), 1):
             self.logger.info(f"Processing batch {i}/{-(-len(all_channels)//self.config.collection.batch_size)}...")
             bot = ChatLogger(token=oauth_token, channels=batch, storage=self.storage)
             await bot.start()
@@ -554,54 +545,6 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
         region=config.s3_region
     )
 
-    # Initialize VOD collector
-    collector = VODCollector(
-        config.vod.raw_dir,
-        config.vod.queue_file,
-        config.vod.cli_path,
-        storage=storage,
-        bucket_len_s=config.vod.bucket_len_s
-    )
-
-    # Cost protection: limit VODs to process
-    effective_max = max_vods or config.vod.max_vods_per_run
-    if effective_max:
-        logger.warning(f"\u26a0\ufe0f  Cost Protection: Max {effective_max} VODs will be processed this run")
-    
-    start_time = time.time()
-    processed_count = 0
-
-    # Process pending VODs
-    pending = collector.queue.get_pending()
-    logger.info(f"Found {len(pending)} pending VODs in queue")
-    
-    for vod_id in pending:
-        # Cost protection: check VOD count limit
-        if effective_max and processed_count >= effective_max:
-            logger.warning(f\"\ud83d\udea8 Reached max VOD limit ({processed_count}/{effective_max}). Stopping.\")
-            break
-        
-        # Cost protection: check runtime limit
-        if config.vod.max_processing_hours:
-            elapsed_hours = (time.time() - start_time) / 3600
-            if elapsed_hours >= config.vod.max_processing_hours:
-                logger.warning(f\"\u23f1\ufe0f Max runtime reached: {elapsed_hours:.1f}h. Stopping VOD processing.\")
-                break
-        
-        # Rate limiting protection
-        if config.vod.rate_limit_delay_s > 0 and processed_count > 0:
-            logger.debug(f\"Rate limit delay: {config.vod.rate_limit_delay_s}s\")
-            time.sleep(config.vod.rate_limit_delay_s)
-        
-        success = collector.process_vod(vod_id)
-        if success:
-            processed_count += 1
-            logger.info(f\"Progress: {processed_count} VODs processed, {(time.time()-start_time)/60:.1f} min elapsed\")
-
-    logger.info(f\"VOD preprocessing complete: {processed_count} VODs processed in {(time.time()-start_time)/60:.1f} min\")
-        region=config.s3_region
-    )
-
     collector = VODCollector(
         storage=storage,
         queue_file=config.vod.queue_file,
@@ -612,6 +555,11 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
         min_views=config.vod.min_views
     )
 
+    # Cost protection: limit VODs to process
+    effective_max = max_vods or config.vod.max_vods_per_run
+    if effective_max:
+        logger.warning(f"⚠️  Cost Protection: Max {effective_max} VODs will be processed this run")
+
     if config.vod.auto_discover:
         channels = load_channels()
         if channels:
@@ -620,7 +568,7 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
         else:
             logger.warning("No channels found for auto-discovery; skipping queue population")
 
-    collector.process_all_pending(max_vods=max_vods)
+    collector.process_all_pending(max_vods=effective_max)
 
 
 def main():

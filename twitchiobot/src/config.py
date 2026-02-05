@@ -324,10 +324,10 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     
     collection_config = CollectionConfig(
         logs_dir=collection_dict.get("logs_dir", "logs"),
-        collection_interval_minutes=collection_dict.get("collection_interval", 3600) // 60,
+        collection_interval_minutes=collection_dict.get("collection_interval_minutes", 60),
         batch_size=collection_dict.get("batch_size", 100),
         duration_per_batch=collection_dict.get("duration_per_batch", 60),
-        top_channels_limit=analysis_dict.get("top_channels_limit", 5000)
+        top_channels_limit=collection_dict.get("top_channels_limit", 5000)
     )
     
     analysis_config = AnalysisConfig(
@@ -336,9 +336,8 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         min_channel_viewers=analysis_dict.get("min_channel_viewers", 1),
         overlap_threshold=analysis_dict.get("overlap_threshold", 1),
         resolution=analysis_dict.get("resolution", 1.0),
-        game_threshold=analysis_dict.get("game_threshold", 60),
-        language_threshold=analysis_dict.get("language_threshold", 40),
-        min_community_size=analysis_dict.get("min_community_size", 2)
+        min_community_size=analysis_dict.get("min_community_size", 2),
+        analysis_interval_cycles=analysis_dict.get("analysis_interval_cycles", 24)
     )
     
     vod_config = VODConfig(
