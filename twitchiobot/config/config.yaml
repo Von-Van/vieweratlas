@@ -17,7 +17,7 @@
 # ============================================
 collection:
   logs_dir: "logs"
-  top_channels_limit: 500       # Lower channel cap for safety
+  top_channels_limit: 5000      # Target top 5000 channels
   batch_size: 50                # Fewer channels per batch
   duration_per_batch: 45        # 45 seconds per batch
   wait_for_hour_alignment: true
@@ -47,8 +47,9 @@ vod:
   queue_file: "vod_queue.json"
   cli_path: "TwitchDownloaderCLI"
   auto_discover: false
-  vod_limit_per_channel: 2      # Conservative default
-  max_age_days: 14
+  vod_limit_per_channel: 1      # One VOD collection per channel/day
+  max_age_hours: 24             # Only VODs created in last 24 hours
+  max_age_days: 14              # Legacy fallback if max_age_hours omitted
   min_views: 100                # Skip very small VODs
   # Cost protection
   max_vods_per_run: 10          # Hard stop per run

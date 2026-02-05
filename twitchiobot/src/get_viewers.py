@@ -8,6 +8,7 @@ from datetime import datetime
 from time import sleep
 from twitchio.ext import commands
 from dotenv import load_dotenv
+from daily_collection_state import DailyCollectionState
 
 # Import storage abstraction
 try:
@@ -57,6 +58,11 @@ class ChatLogger(commands.Bot):
         self.start_time = None
         self.stream_data = {}
         self.failed_channels = {}  # Track failed channels
+        if self.storage:
+            self.daily_state = DailyCollectionState(storage=self.storage)
+        else:
+            local_state_path = os.path.join(self.output_dir, "state", "daily_collection_state.json")
+            self.daily_state = DailyCollectionState(local_state_path=local_state_path)
         self.collection_stats = {
             "successful": 0,
             "failed": 0,
@@ -177,6 +183,11 @@ class ChatLogger(commands.Bot):
                 logger.warning(f"[{channel}] Skipping (previous failure): {self.failed_channels[channel]}")
                 self.collection_stats["skipped"] += 1
                 continue
+
+            if self.daily_state.has_collected("live", channel):
+                logger.info(f"[{channel}] Skipping live snapshot: already collected today (UTC)")
+                self.collection_stats["skipped"] += 1
+                continue
                 
             stream_info = self.fetch_stream_info(channel)
             
@@ -256,6 +267,7 @@ class ChatLogger(commands.Bot):
 
                     logger.info(f"[{channel}] Saved: {csv_path}, {json_path}")
 
+                self.daily_state.mark_collected("live", channel)
                 self.collection_stats["successful"] += 1
                 
             except Exception as e:

@@ -16,10 +16,11 @@ import logging
 import requests
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, asdict
 from collections import defaultdict
 import os
+from daily_collection_state import DailyCollectionState
 
 try:
     from storage import get_storage, BaseStorage
@@ -301,7 +302,7 @@ class VODQueue:
         except Exception as e:
             logger.error(f"Error saving queue: {e}")
     
-    def add_vod(self, vod_id: str, channel_login: str):
+    def add_vod(self, vod_id: str, channel_login: str, vod_created_at: Optional[str] = None):
         """Add VOD to queue"""
         # Check if already exists
         for item in self.queue:
@@ -319,7 +320,8 @@ class VODQueue:
             'lease_expires_at': None,
             'processing_by': None,
             'created_at': now,
-            'updated_at': now
+            'updated_at': now,
+            'vod_created_at': vod_created_at
         })
         self.save()
         logger.info(f"Added VOD {vod_id} ({channel_login}) to queue")
@@ -429,20 +431,20 @@ class VODQueue:
 def get_recent_vods(
     channel_login: str, 
     limit: int = 5, 
-    max_age_days: int = 14,
+    max_age_hours: int = 24,
     min_views: int = 0
-) -> List[Tuple[str, str]]:
+) -> List[Tuple[str, str, str]]:
     """
     Fetch recent VODs for a channel using Twitch Helix API.
     
     Args:
         channel_login: Channel name
         limit: Number of recent VODs to fetch (max 100)
-        max_age_days: Maximum age of VODs in days (default 14)
+        max_age_hours: Maximum age of VODs in hours (default 24)
         min_views: Minimum view count filter (default 0)
         
     Returns:
-        List of (vod_id, channel_login) tuples
+        List of (vod_id, channel_login, vod_created_at) tuples
     """
     client_id = os.getenv("TWITCH_CLIENT_ID")
     oauth_token = os.getenv("TWITCH_OAUTH_TOKEN")
@@ -451,9 +453,8 @@ def get_recent_vods(
         logger.error("TWITCH_CLIENT_ID and TWITCH_OAUTH_TOKEN must be set")
         return []
     
-    # Calculate cutoff date
-    from datetime import timedelta
-    cutoff_date = datetime.now() - timedelta(days=max_age_days)
+    # Calculate cutoff timestamp in UTC
+    cutoff_date = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     
     # First get user ID from login
     user_url = "https://api.twitch.tv/helix/users"
@@ -511,9 +512,12 @@ def get_recent_vods(
             if view_count < min_views:
                 continue
             
-            vod_list.append((video["id"], channel_login))
+            vod_list.append((video["id"], channel_login, created_at.isoformat()))
         
-        logger.info(f"Found {len(vod_list)} recent VODs for {channel_login} (filtered from {len(videos)})") 
+        logger.info(
+            f"Found {len(vod_list)} VODs in last {max_age_hours}h for {channel_login} "
+            f"(filtered from {len(videos)})"
+        )
         return vod_list
         
     except Exception as e:
@@ -524,27 +528,27 @@ def get_recent_vods(
 def get_recent_vods_batch(
     channels: List[str],
     limit_per_channel: int = 5,
-    max_age_days: int = 14,
+    max_age_hours: int = 24,
     min_views: int = 0
-) -> List[Tuple[str, str]]:
+) -> List[Tuple[str, str, str]]:
     """
     Fetch recent VODs for multiple channels efficiently.
     
     Args:
         channels: List of channel names
         limit_per_channel: Number of VODs per channel
-        max_age_days: Maximum age of VODs in days
+        max_age_hours: Maximum age of VODs in hours
         min_views: Minimum view count filter
         
     Returns:
-        List of (vod_id, channel_login) tuples
+        List of (vod_id, channel_login, vod_created_at) tuples
     """
     all_vods = []
     for channel in channels:
         vods = get_recent_vods(
             channel,
             limit=limit_per_channel,
-            max_age_days=max_age_days,
+            max_age_hours=max_age_hours,
             min_views=min_views
         )
         all_vods.extend(vods)
@@ -567,7 +571,7 @@ class VODCollector:
         raw_dir: str = "vod_raw",
         bucket_len_s: int = 60,
         cli_path: str = "TwitchDownloaderCLI",
-        max_age_days: int = 14,
+        max_age_hours: int = 24,
         min_views: int = 0
     ):
         """
@@ -579,7 +583,7 @@ class VODCollector:
             raw_dir: Directory for raw VOD chat JSON files
             bucket_len_s: Bucket window size in seconds
             cli_path: Path to TwitchDownloaderCLI
-            max_age_days: Maximum VOD age in days (default 14)
+            max_age_hours: Maximum VOD age in hours (default 24)
             min_views: Minimum view count filter (default 0)
         """
         # Initialize storage backend
@@ -593,10 +597,16 @@ class VODCollector:
         self.queue = VODQueue(queue_file)
         self.raw_dir = Path(raw_dir)
         self.raw_dir.mkdir(exist_ok=True)
+        if self.storage:
+            self.daily_state = DailyCollectionState(storage=self.storage)
+        else:
+            self.daily_state = DailyCollectionState(
+                local_state_path=str(self.raw_dir / "state" / "daily_collection_state.json")
+            )
         
         self.downloader = VODChatDownloader(cli_path)
         self.parser = VODChatParser(bucket_len_s)
-        self.max_age_days = max_age_days
+        self.max_age_hours = max_age_hours
         self.min_views = min_views
     
     def add_vods_for_channels(self, channels: List[str], vod_limit: int = 5):
@@ -607,17 +617,31 @@ class VODCollector:
             channels: List of channel names
             vod_limit: Number of recent VODs per channel to add
         """
-        logger.info(f"Discovering VODs for {len(channels)} channels (max age: {self.max_age_days} days, min views: {self.min_views})")
+        logger.info(
+            f"Discovering VODs for {len(channels)} channels "
+            f"(max age: {self.max_age_hours}h, min views: {self.min_views})"
+        )
         
         vods = get_recent_vods_batch(
             channels,
             limit_per_channel=vod_limit,
-            max_age_days=self.max_age_days,
+            max_age_hours=self.max_age_hours,
             min_views=self.min_views
         )
-        
-        for vod_id, channel_login in vods:
-            self.queue.add_vod(vod_id, channel_login)
+
+        queued_today = set()
+        for vod_id, channel_login, vod_created_at in vods:
+            channel_login = channel_login.lower()
+
+            # One VOD chatter collection per channel per UTC day.
+            if self.daily_state.has_collected("vod", channel_login):
+                logger.info(f"[{channel_login}] Skipping VOD {vod_id}: already collected today (UTC)")
+                continue
+            if channel_login in queued_today:
+                continue
+
+            self.queue.add_vod(vod_id, channel_login, vod_created_at=vod_created_at)
+            queued_today.add(channel_login)
         
         stats = self.queue.get_stats()
         logger.info(f"VOD discovery complete. Queue stats: {stats}")
@@ -637,6 +661,11 @@ class VODCollector:
         vod_id = vod['vod_id']
         channel = vod['channel_login']
         
+        if self.daily_state.has_collected("vod", channel):
+            logger.info(f"[{channel}] Skipping VOD {vod_id}: already collected today (UTC)")
+            self.queue.update_status(vod_id, 'completed')
+            return True
+
         logger.info(f"Processing VOD {vod_id} ({channel})")
         # Lease already taken in get_next_pending()
         
@@ -673,6 +702,7 @@ class VODCollector:
             self._write_snapshots(snapshots, channel, vod_id)
             
             # Success!
+            self.daily_state.mark_collected("vod", channel)
             self.queue.update_status(vod_id, 'completed')
             logger.info(f"✓ Successfully processed VOD {vod_id}: {len(snapshots)} snapshots")
             return True

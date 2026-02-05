@@ -551,7 +551,7 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
         raw_dir=config.vod.raw_dir,
         bucket_len_s=config.vod.bucket_len_s,
         cli_path=config.vod.cli_path,
-        max_age_days=config.vod.max_age_days,
+        max_age_hours=config.vod.max_age_hours,
         min_views=config.vod.min_views
     )
 

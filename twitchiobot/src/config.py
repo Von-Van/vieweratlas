@@ -131,6 +131,7 @@ class VODConfig:
     vod_limit_per_channel: int = 5  # Number of recent VODs to queue per channel
     
     # Filtering
+    max_age_hours: int = 24  # Maximum VOD age in hours (default 24)
     max_age_days: int = 14  # Maximum VOD age in days (default 14)
     min_views: int = 0  # Minimum view count to process (default 0)
     
@@ -145,6 +146,8 @@ class VODConfig:
             raise ValueError("bucket_len_s must be positive")
         if self.vod_limit_per_channel < 1:
             raise ValueError("vod_limit_per_channel must be at least 1")
+        if self.max_age_hours < 1:
+            raise ValueError("max_age_hours must be at least 1")
         if self.max_age_days < 1:
             raise ValueError("max_age_days must be at least 1")
         if self.min_views < 0:
@@ -321,6 +324,9 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     collection_dict = config_dict.get("collection", {})
     analysis_dict = config_dict.get("analysis", {})
     vod_dict = config_dict.get("vod", {})
+    max_age_hours = vod_dict.get("max_age_hours")
+    if max_age_hours is None:
+        max_age_hours = vod_dict.get("max_age_days", 14) * 24
     
     collection_config = CollectionConfig(
         logs_dir=collection_dict.get("logs_dir", "logs"),
@@ -348,6 +354,7 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         cli_path=vod_dict.get("cli_path", "TwitchDownloaderCLI"),
         auto_discover=vod_dict.get("auto_discover", False),
         vod_limit_per_channel=vod_dict.get("vod_limit_per_channel", 5),
+        max_age_hours=max_age_hours,
         max_age_days=vod_dict.get("max_age_days", 14),
         min_views=vod_dict.get("min_views", 0)
     )
