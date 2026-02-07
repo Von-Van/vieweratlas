@@ -67,9 +67,11 @@ class DataAggregator:
         self.channel_viewers[channel].update(chatters)
 
         # Normalize metadata keys for downstream consumers
+        # Canonical keys: game_name, viewer_count, language, title, started_at, timestamp
         self.channel_metadata[channel] = {
             "viewer_count": snapshot.get("viewer_count", snapshot.get("viewers", 0)),
             "game_name": snapshot.get("game_name", snapshot.get("game", "Unknown")),
+            "language": snapshot.get("language", snapshot.get("broadcaster_language", "")),
             "title": snapshot.get("title", ""),
             "started_at": snapshot.get("started_at", snapshot.get("uptime", "")),
             "timestamp": snapshot.get("timestamp", "")
@@ -182,10 +184,12 @@ class DataAggregator:
                         self.channel_viewers[channel].add(chatter)
                         
                         # Store metadata if not already present
+                        # Use canonical keys matching _ingest_snapshot
                         if channel not in self.channel_metadata:
                             self.channel_metadata[channel] = {
-                                "viewers": int(row.get("viewers", 0) or 0),
-                                "game": row.get("game", "Unknown"),
+                                "viewer_count": int(row.get("viewers", row.get("viewer_count", 0)) or 0),
+                                "game_name": row.get("game", row.get("game_name", "Unknown")),
+                                "language": row.get("language", row.get("broadcaster_language", "")),
                                 "title": row.get("title", ""),
                                 "timestamp": row.get("timestamp", "")
                             }
@@ -387,11 +391,11 @@ class DataAggregator:
             meta = self.channel_metadata[ch]
             
             # Check viewer count threshold
-            if meta.get("viewers", 0) < min_viewer_count:
+            if meta.get("viewer_count", meta.get("viewers", 0)) < min_viewer_count:
                 continue
             
             # Check excluded games
-            game = meta.get("game", "Unknown").lower()
+            game = meta.get("game_name", meta.get("game", "Unknown")).lower()
             if any(excl.lower() in game for excl in exclude_games):
                 continue
             

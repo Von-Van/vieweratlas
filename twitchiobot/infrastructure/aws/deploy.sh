@@ -5,10 +5,16 @@
 
 set -e
 
+# Load .env file if present (for local runs; CI/CD should set vars directly)
+if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+fi
+
 # Configuration
 AWS_REGION=${AWS_REGION:-us-east-1}
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-S3_BUCKET=${S3_BUCKET:-vieweratlas-data-lake}
+S3_BUCKET=${S3_BUCKET:-}
 
 # Color codes for output
 RED='\033[0;31m'
@@ -41,8 +47,29 @@ check_prerequisites() {
         log_error "Docker not found. Please install: https://www.docker.com/"
         exit 1
     fi
-    
+
+    # Validate AWS credentials
+    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+    if [ -z "$AWS_ACCOUNT_ID" ]; then
+        log_error "AWS credentials not configured. Run: aws configure"
+        exit 1
+    fi
+
+    # Validate required variables
+    if [ -z "$S3_BUCKET" ]; then
+        log_error "S3_BUCKET is not set. Set it in .env or export S3_BUCKET=your-bucket"
+        exit 1
+    fi
+
     log_info "Prerequisites check passed"
+    log_info "  AWS Account: $AWS_ACCOUNT_ID"
+    log_info "  Region:      $AWS_REGION"
+    log_info "  S3 Bucket:   $S3_BUCKET"
+    if [ -n "${EFS_ID:-}" ]; then
+        log_info "  EFS ID:      $EFS_ID"
+    else
+        log_warn "  EFS_ID not set — EFS volume mounts will be skipped in task definitions"
+    fi
 }
 
 # Create ECR repositories if they don't exist
@@ -105,8 +132,25 @@ register_task_definitions() {
         sed -e "s/\${AWS_ACCOUNT_ID}/$AWS_ACCOUNT_ID/g" \
             -e "s/\${AWS_REGION}/$AWS_REGION/g" \
             -e "s/\${S3_BUCKET}/$S3_BUCKET/g" \
-            -e "s/\${EFS_ID}/$EFS_ID/g" \
             "$task_def_file" > "$temp_file"
+
+        # Handle optional EFS_ID: replace if set, otherwise strip volumes/mountPoints
+        if [ -n "${EFS_ID:-}" ]; then
+            sed -i.bak "s/\${EFS_ID}/$EFS_ID/g" "$temp_file"
+            rm -f "$temp_file.bak"
+        else
+            # Remove EFS volume and mountPoint blocks so the task registers without EFS
+            python3 -c "
+import json, sys
+with open('$temp_file') as f:
+    td = json.load(f)
+td.pop('volumes', None)
+for container in td.get('containerDefinitions', []):
+    container.pop('mountPoints', None)
+with open('$temp_file', 'w') as f:
+    json.dump(td, f, indent=2)
+" 2>/dev/null || log_warn "Could not strip EFS sections from $task_def_file (python3 not found)"
+        fi
         
         log_info "Registering task definition: vieweratlas-$task"
         aws ecs register-task-definition \
@@ -140,11 +184,10 @@ update_services() {
 # Main execution
 main() {
     log_info "Starting ViewerAtlas deployment to AWS ECS"
-    log_info "AWS Account: $AWS_ACCOUNT_ID"
-    log_info "Region: $AWS_REGION"
-    log_info "S3 Bucket: $S3_BUCKET"
     
     check_prerequisites
+    
+    log_info ""
     create_ecr_repos
     ecr_login
     
@@ -161,7 +204,14 @@ main() {
         log_info "To update services, run: ECS_CLUSTER=your-cluster ./deploy.sh"
     fi
     
+    log_info ""
     log_info "Deployment completed successfully!"
+    log_info ""
+    log_info "Reminder: Twitch credentials must be stored in Secrets Manager:"
+    log_info "  aws secretsmanager create-secret --name vieweratlas/twitch/oauth_token \\"
+    log_info "      --secret-string 'your-oauth-token' --region $AWS_REGION"
+    log_info "  aws secretsmanager create-secret --name vieweratlas/twitch/client_id \\"
+    log_info "      --secret-string 'your-client-id' --region $AWS_REGION"
 }
 
 main "$@"

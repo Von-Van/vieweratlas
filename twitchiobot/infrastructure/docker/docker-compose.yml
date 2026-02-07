@@ -53,6 +53,8 @@ services:
     build:
       context: ../..
       dockerfile: infrastructure/docker/Dockerfile.vod
+      args:
+        TWITCH_DOWNLOADER_VERSION: ${TWITCH_DOWNLOADER_VERSION:-1.55.0}
     container_name: vieweratlas-vod-collector
     environment:
       - TWITCH_OAUTH_TOKEN=${TWITCH_OAUTH_TOKEN}

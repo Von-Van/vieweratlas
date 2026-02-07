@@ -19,6 +19,7 @@ COPY src/get_viewers.py .
 COPY src/update_channels.py .
 COPY src/storage.py .
 COPY src/config.py .
+COPY src/daily_collection_state.py .
 COPY channels.txt ./
 
 # Create logs directory

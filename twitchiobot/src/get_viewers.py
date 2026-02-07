@@ -201,12 +201,14 @@ class ChatLogger(commands.Bot):
                 game_name = stream_info.get("game_name", "Unknown")
                 title = stream_info.get("title", "Unavailable")
                 started_at = stream_info.get("started_at", "Unknown")
+                language = stream_info.get("language", stream_info.get("broadcaster_language", ""))
 
                 # Store in-memory summary for optional reuse
                 self.stream_data[channel] = {
                     "timestamp": timestamp,
                     "viewer_count": viewer_count,
                     "game_name": game_name,
+                    "language": language,
                     "title": title,
                     "started_at": started_at,
                     "chatters": list(users)

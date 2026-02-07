@@ -59,8 +59,9 @@ class GraphBuilder:
             if channel_metadata and channel in channel_metadata:
                 meta = channel_metadata[channel]
                 attributes.update({
-                    "viewer_count": meta.get("viewers", 0),
-                    "game": meta.get("game", "Unknown"),
+                    "viewer_count": meta.get("viewer_count", meta.get("viewers", 0)),
+                    "game_name": meta.get("game_name", meta.get("game", "Unknown")),
+                    "language": meta.get("language", ""),
                     "title": meta.get("title", ""),
                 })
             

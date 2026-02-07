@@ -467,11 +467,11 @@ class TestClusterTagger:
         """Community where 80% play the same game should get that game as label."""
         communities = {0: {"ch1", "ch2", "ch3", "ch4", "ch5"}}
         metadata = {
-            "ch1": {"game": "Valorant", "viewers": 100},
-            "ch2": {"game": "Valorant", "viewers": 200},
-            "ch3": {"game": "Valorant", "viewers": 150},
-            "ch4": {"game": "Valorant", "viewers": 300},
-            "ch5": {"game": "CS2", "viewers": 50},
+            "ch1": {"game_name": "Valorant", "viewer_count": 100},
+            "ch2": {"game_name": "Valorant", "viewer_count": 200},
+            "ch3": {"game_name": "Valorant", "viewer_count": 150},
+            "ch4": {"game_name": "Valorant", "viewer_count": 300},
+            "ch5": {"game_name": "CS2", "viewer_count": 50},
         }
         tagger = ClusterTagger()
         labels = tagger.tag_communities(communities, metadata)
@@ -481,11 +481,11 @@ class TestClusterTagger:
         """Community with clear language + game combo."""
         communities = {0: {"ch1", "ch2", "ch3", "ch4", "ch5"}}
         metadata = {
-            "ch1": {"game": "Minecraft", "language": "es", "viewers": 100},
-            "ch2": {"game": "Fortnite", "language": "es", "viewers": 200},
-            "ch3": {"game": "Minecraft", "language": "es", "viewers": 150},
-            "ch4": {"game": "Roblox", "language": "en", "viewers": 300},
-            "ch5": {"game": "Minecraft", "language": "es", "viewers": 50},
+            "ch1": {"game_name": "Minecraft", "language": "es", "viewer_count": 100},
+            "ch2": {"game_name": "Fortnite", "language": "es", "viewer_count": 200},
+            "ch3": {"game_name": "Minecraft", "language": "es", "viewer_count": 150},
+            "ch4": {"game_name": "Roblox", "language": "en", "viewer_count": 300},
+            "ch5": {"game_name": "Minecraft", "language": "es", "viewer_count": 50},
         }
         tagger = ClusterTagger()
         labels = tagger.tag_communities(communities, metadata)
@@ -497,9 +497,9 @@ class TestClusterTagger:
         """Community with no dominant game should get a mixed label."""
         communities = {0: {"ch1", "ch2", "ch3"}}
         metadata = {
-            "ch1": {"game": "Valorant", "viewers": 100},
-            "ch2": {"game": "Fortnite", "viewers": 200},
-            "ch3": {"game": "Minecraft", "viewers": 150},
+            "ch1": {"game_name": "Valorant", "viewer_count": 100},
+            "ch2": {"game_name": "Fortnite", "viewer_count": 200},
+            "ch3": {"game_name": "Minecraft", "viewer_count": 150},
         }
         tagger = ClusterTagger()
         labels = tagger.tag_communities(communities, metadata)
@@ -514,11 +514,11 @@ class TestClusterTagger:
             2: {"ch5"},
         }
         metadata = {
-            "ch1": {"game": "Valorant", "viewers": 100},
-            "ch2": {"game": "Valorant", "viewers": 200},
-            "ch3": {"game": "LoL", "viewers": 300},
-            "ch4": {"game": "LoL", "viewers": 400},
-            "ch5": {"game": "Art", "viewers": 50},
+            "ch1": {"game_name": "Valorant", "viewer_count": 100},
+            "ch2": {"game_name": "Valorant", "viewer_count": 200},
+            "ch3": {"game_name": "LoL", "viewer_count": 300},
+            "ch4": {"game_name": "LoL", "viewer_count": 400},
+            "ch5": {"game_name": "Art", "viewer_count": 50},
         }
         tagger = ClusterTagger()
         labels = tagger.tag_communities(communities, metadata)
@@ -542,11 +542,11 @@ class TestClusterTagger:
             1: {"ch4", "ch5"},
         }
         metadata = {
-            "ch1": {"game": "Valorant", "viewers": 100},
-            "ch2": {"game": "Valorant", "viewers": 200},
-            "ch3": {"game": "Valorant", "viewers": 150},
-            "ch4": {"game": "Art", "viewers": 50},
-            "ch5": {"game": "Music", "viewers": 50},
+            "ch1": {"game_name": "Valorant", "viewer_count": 100},
+            "ch2": {"game_name": "Valorant", "viewer_count": 200},
+            "ch3": {"game_name": "Valorant", "viewer_count": 150},
+            "ch4": {"game_name": "Art", "viewer_count": 50},
+            "ch5": {"game_name": "Music", "viewer_count": 50},
         }
         tagger = ClusterTagger()
         tagger.tag_communities(communities, metadata)
@@ -558,8 +558,8 @@ class TestClusterTagger:
     def test_get_label_reasoning(self):
         communities = {0: {"ch1", "ch2"}}
         metadata = {
-            "ch1": {"game": "Valorant", "viewers": 100},
-            "ch2": {"game": "Valorant", "viewers": 200},
+            "ch1": {"game_name": "Valorant", "viewer_count": 100},
+            "ch2": {"game_name": "Valorant", "viewer_count": 200},
         }
         tagger = ClusterTagger()
         tagger.tag_communities(communities, metadata)
@@ -646,23 +646,6 @@ class TestConfig:
 class TestIntegration:
     """End-to-end test of the analysis pipeline with fixture data."""
 
-    @staticmethod
-    def _normalize_metadata_for_tagger(raw_meta: dict) -> dict:
-        """
-        Bridge the key mismatch between DataAggregator output
-        (game_name, viewer_count) and ClusterTagger input (game, viewers).
-        This mirrors what the real pipeline should do.
-        """
-        normalized = {}
-        for ch, meta in raw_meta.items():
-            normalized[ch] = {
-                "game": meta.get("game_name", meta.get("game", "Unknown")),
-                "viewers": meta.get("viewer_count", meta.get("viewers", 0)),
-                "language": meta.get("language", "Unknown"),
-                "title": meta.get("title", ""),
-            }
-        return normalized
-
     def test_full_pipeline(self, tmp_logs_dir, tmp_path):
         """
         Run the complete pipeline:
@@ -694,10 +677,9 @@ class TestIntegration:
         assert len(partition) == 5
         assert len(communities) >= 1
 
-        # 4. Tag communities (normalize metadata keys for tagger)
+        # 4. Tag communities (metadata keys are now normalized by DataAggregator)
         tagger = ClusterTagger()
-        tagger_meta = self._normalize_metadata_for_tagger(channel_metadata)
-        labels = tagger.tag_communities(communities, tagger_meta)
+        labels = tagger.tag_communities(communities, channel_metadata)
         assert len(labels) == len(communities)
 
         # 5. Verify structural properties

@@ -4,6 +4,10 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
+# Pin TwitchDownloaderCLI version for reproducible builds.
+# Check https://github.com/lay295/TwitchDownloader/releases for latest.
+ARG TWITCH_DOWNLOADER_VERSION=1.55.0
+
 # Install system dependencies and TwitchDownloaderCLI
 RUN apt-get update && apt-get install -y \
     gcc \
@@ -12,24 +16,23 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install TwitchDownloaderCLI
-RUN wget https://github.com/lay295/TwitchDownloader/releases/latest/download/TwitchDownloaderCLI-LinuxX64.zip \
-    && unzip TwitchDownloaderCLI-LinuxX64.zip -d /usr/local/bin/ \
+# Install TwitchDownloaderCLI (pinned version)
+RUN wget -q "https://github.com/lay295/TwitchDownloader/releases/download/${TWITCH_DOWNLOADER_VERSION}/TwitchDownloaderCLI-${TWITCH_DOWNLOADER_VERSION}-LinuxX64.zip" \
+        -O /tmp/TwitchDownloaderCLI.zip \
+    && unzip /tmp/TwitchDownloaderCLI.zip -d /usr/local/bin/ \
     && chmod +x /usr/local/bin/TwitchDownloaderCLI \
-    && rm TwitchDownloaderCLI-LinuxX64.zip
+    && rm /tmp/TwitchDownloaderCLI.zip
 
 # Copy requirements first (for better caching)
 COPY src/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY src/vod_collector.py .
-COPY src/storage.py .
-COPY src/config.py .
-COPY src/main.py .
-COPY src/update_channels.py .
-COPY src/get_viewers.py .
+# Copy all application code (main.py imports all modules at top level)
+COPY src/*.py ./
 COPY channels.txt ./
+
+# Copy default config (can be overridden via volume mount or env vars)
+COPY config/config.yaml ./config.yaml
 
 # Create directories
 RUN mkdir -p /app/vod_raw /app/logs
