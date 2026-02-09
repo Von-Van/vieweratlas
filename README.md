@@ -2,7 +2,7 @@
 
 A sophisticated, cloud-native tool for analyzing Twitch streamer communities by detecting viewer overlaps and generating beautiful network visualizations. Now with AWS S3 integration and containerized deployment support.
 
-**Status**: ✅ Production Ready  
+**Status**: In Progess 
 **Last Updated**: February 9, 2026
 
 ---
