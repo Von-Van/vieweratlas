@@ -3,9 +3,20 @@
 A sophisticated, cloud-native tool for analyzing Twitch streamer communities by detecting viewer overlaps and generating beautiful network visualizations. Now with AWS S3 integration and containerized deployment support.
 
 **Status**: ✅ Production Ready  
-**Last Updated**: January 7, 2026
+**Last Updated**: February 9, 2026
 
 ---
+
+## Project Overview
+
+ViewerAtlas is a Twitch community mapping system. It collects live chatters from top channels, builds a viewer-overlap graph, detects streamer communities, and produces both data outputs and visualizations. The project is designed to run locally for experiments and scale up to cloud deployments for larger, repeatable analyses.
+
+## Project Goals
+
+- Reveal meaningful streamer communities by shared audiences.
+- Provide repeatable, configurable analysis with clear presets.
+- Support both local workflows and cloud-scale runs (S3 + containers).
+- Produce outputs that are easy to share: graphs, labels, and visuals.
 
 ## 🎯 Overview
 
