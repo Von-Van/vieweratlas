@@ -8,6 +8,14 @@ from datetime import datetime
 from time import sleep
 from twitchio.ext import commands
 from dotenv import load_dotenv
+from daily_collection_state import DailyCollectionState
+
+# Import storage abstraction
+try:
+    from storage import get_storage, BaseStorage
+    HAS_STORAGE = True
+except ImportError:
+    HAS_STORAGE = False
 
 load_dotenv()
 
@@ -27,18 +35,34 @@ def load_channels():
     return [c.strip().lower() for c in env_channels.split(",") if c.strip()]
 
 class ChatLogger(commands.Bot):
-    def __init__(self, token, channels, output_dir="logs"):
+    def __init__(self, token, channels, output_dir="logs", storage=None):
         super().__init__(
             token=token,
             prefix="!",
             initial_channels=channels
         )
         self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Initialize storage backend
+        if storage is not None:
+            self.storage = storage
+        elif HAS_STORAGE:
+            # Auto-detect from environment
+            self.storage = get_storage()
+        else:
+            # Fallback to local files (legacy)
+            self.storage = None
+            os.makedirs(self.output_dir, exist_ok=True)
+        
         self.chatters = {channel: set() for channel in channels}
         self.start_time = None
         self.stream_data = {}
         self.failed_channels = {}  # Track failed channels
+        if self.storage:
+            self.daily_state = DailyCollectionState(storage=self.storage)
+        else:
+            local_state_path = os.path.join(self.output_dir, "state", "daily_collection_state.json")
+            self.daily_state = DailyCollectionState(local_state_path=local_state_path)
         self.collection_stats = {
             "successful": 0,
             "failed": 0,
@@ -91,7 +115,11 @@ class ChatLogger(commands.Bot):
                 
                 if data:
                     logger.debug(f"[{channel_name}] Stream info fetched successfully")
-                    return data[0]
+                    stream_info = data[0]
+                    # Extract broadcaster_language for community tagging
+                    if "language" in stream_info:
+                        stream_info["broadcaster_language"] = stream_info["language"]
+                    return stream_info
                 else:
                     logger.warning(f"[{channel_name}] Stream offline or not found")
                     return None
@@ -155,6 +183,11 @@ class ChatLogger(commands.Bot):
                 logger.warning(f"[{channel}] Skipping (previous failure): {self.failed_channels[channel]}")
                 self.collection_stats["skipped"] += 1
                 continue
+
+            if self.daily_state.has_collected("live", channel):
+                logger.info(f"[{channel}] Skipping live snapshot: already collected today (UTC)")
+                self.collection_stats["skipped"] += 1
+                continue
                 
             stream_info = self.fetch_stream_info(channel)
             
@@ -168,12 +201,14 @@ class ChatLogger(commands.Bot):
                 game_name = stream_info.get("game_name", "Unknown")
                 title = stream_info.get("title", "Unavailable")
                 started_at = stream_info.get("started_at", "Unknown")
+                language = stream_info.get("language", stream_info.get("broadcaster_language", ""))
 
                 # Store in-memory summary for optional reuse
                 self.stream_data[channel] = {
                     "timestamp": timestamp,
                     "viewer_count": viewer_count,
                     "game_name": game_name,
+                    "language": language,
                     "title": title,
                     "started_at": started_at,
                     "chatters": list(users)
@@ -187,27 +222,54 @@ class ChatLogger(commands.Bot):
                 print(f"  Chatters    : {len(users)}")
 
                 filename_base = f"{channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                json_path = os.path.join(self.output_dir, f"{filename_base}.json")
-                csv_path = os.path.join(self.output_dir, f"{filename_base}.csv")
-
-                # Save JSON
-                with open(json_path, "w") as f:
-                    json.dump(self.stream_data[channel], f, indent=2)
-
-                # Save CSV
-                with open(csv_path, "w", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        "timestamp", "channel", "viewer_count",
-                        "game_name", "title", "started_at", "username"
-                    ])
+                
+                # Use storage abstraction if available
+                if self.storage:
+                    # S3-friendly paths with date partitioning
+                    date_partition = datetime.now().strftime('%Y/%m/%d')
+                    json_key = f"raw/snapshots/{date_partition}/{filename_base}.json"
+                    csv_key = f"raw/chatter_logs/{date_partition}/{filename_base}.csv"
+                    
+                    # Upload JSON
+                    self.storage.upload_json(json_key, self.stream_data[channel])
+                    
+                    # Upload CSV
+                    csv_rows = []
                     for user in sorted(users):
-                        writer.writerow([
+                        csv_rows.append([
                             timestamp, channel, viewer_count,
                             game_name, title, started_at, user
                         ])
+                    headers = ["timestamp", "channel", "viewer_count", 
+                              "game_name", "title", "started_at", "username"]
+                    self.storage.upload_csv(csv_key, csv_rows, headers=headers)
+                    
+                    logger.info(f"[{channel}] Saved: {self.storage.get_uri(json_key)}")
+                else:
+                    # Legacy local file storage
+                    json_path = os.path.join(self.output_dir, f"{filename_base}.json")
+                    csv_path = os.path.join(self.output_dir, f"{filename_base}.csv")
 
-                logger.info(f"[{channel}] Saved: {csv_path}, {json_path}")
+                    # Save JSON
+                    with open(json_path, "w") as f:
+                        json.dump(self.stream_data[channel], f, indent=2)
+
+                    # Save CSV
+                    with open(csv_path, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            "timestamp", "channel", "viewer_count",
+                            "game_name", "title", "started_at", "username"
+                        ])
+                        for user in sorted(users):
+                            writer.writerow([
+                                timestamp, channel, viewer_count,
+                                game_name, title, started_at, user
+                            ])
+
+                    logger.info(f"[{channel}] Saved: {csv_path}, {json_path}")
+
+                self.daily_state.mark_collected("live", channel)
                 self.collection_stats["successful"] += 1
                 
             except Exception as e:

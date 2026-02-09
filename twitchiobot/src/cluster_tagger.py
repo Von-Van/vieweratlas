@@ -79,7 +79,7 @@ class ClusterTagger:
         for channel in channels:
             if channel in channel_metadata:
                 meta = channel_metadata[channel]
-                game = meta.get("game", "Unknown")
+                game = meta.get("game_name", meta.get("game", "Unknown"))
                 if game and game != "Unknown":
                     games.append(game)
                 
@@ -87,7 +87,7 @@ class ClusterTagger:
                 if lang and lang != "Unknown":
                     languages.append(lang)
                 
-                viewers = meta.get("viewers", 0)
+                viewers = meta.get("viewer_count", meta.get("viewers", 0))
                 if viewers:
                     viewer_counts.append(viewers)
         

@@ -1,0 +1,69 @@
+# ViewerAtlas Pipeline Configuration (Conservative Defaults)
+# Environment variables override these settings
+
+# ============================================
+# Storage Configuration
+# ============================================
+# Options: 'file' (local filesystem) or 's3' (AWS S3)
+
+
+# S3 Settings (required if storage_type='s3')
+# s3_bucket: "your-unique-bucket"
+# s3_prefix: "vieweratlas/"
+# s3_region: "us-east-1"
+
+# ============================================
+# Collection (Live) - Conservative
+# ============================================
+collection:
+  logs_dir: "logs"
+  top_channels_limit: 5000      # Target top 5000 channels
+  batch_size: 50                # Fewer channels per batch
+  duration_per_batch: 45        # 45 seconds per batch
+  wait_for_hour_alignment: true
+  collection_interval_minutes: 60
+  # Cost protection
+  max_runtime_hours: 8          # Stop after 8 hours
+  max_collection_cycles: 24     # Stop after 24 cycles
+
+# ============================================
+# Analysis - Conservative
+# ============================================
+analysis:
+  logs_dir: "logs"
+  output_dir: "community_analysis"
+  overlap_threshold: 10         # Drop very weak overlaps
+  min_community_size: 3
+  resolution: 1.2
+  analysis_interval_cycles: 24  # Run analysis daily if continuous mode
+
+# ============================================
+# VOD Collection - Disabled by default, guarded
+# ============================================
+vod:
+  enabled: false
+  bucket_len_s: 60
+  raw_dir: "vod_raw"
+  queue_file: "vod_queue.json"
+  cli_path: "TwitchDownloaderCLI"
+  auto_discover: false
+  vod_limit_per_channel: 1      # One VOD collection per channel/day
+  max_age_hours: 24             # Only VODs created in last 24 hours
+  max_age_days: 14              # Legacy fallback if max_age_hours omitted
+  min_views: 100                # Skip very small VODs
+  # Cost protection
+  max_vods_per_run: 10          # Hard stop per run
+  max_processing_hours: 2       # Stop VOD run after 2 hours
+  rate_limit_delay_s: 2         # Delay between API calls
+
+# ============================================
+# Logging
+# ============================================
+log_level: "INFO"
+log_format: "% (asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Notes:
+# - Switch storage_type to "s3" and set s3_bucket/prefix/region before cloud deploy
+# - Limits are conservative to prevent accidental spend; raise gradually after testing
+# - VOD is off by default; enable once comfortable with costs
+  

@@ -39,6 +39,10 @@ class CollectionConfig:
     wait_for_hour_alignment: bool = True  # Sync to top of hour
     collection_interval_minutes: int = 60  # Minutes between cycles
     
+    # Cost Protection
+    max_runtime_hours: Optional[int] = 24  # Auto-stop after N hours (None = unlimited)
+    max_collection_cycles: Optional[int] = 100  # Auto-stop after N cycles (None = unlimited)
+    
     # File settings
     logs_dir: str = "logs"
     
@@ -75,6 +79,9 @@ class AnalysisConfig:
     resolution: float = 1.0  # Louvain resolution (higher = more communities)
     min_community_size: int = 1  # Minimum channels in a community to include
     
+    # Continuous mode
+    analysis_interval_cycles: int = 24  # Run analysis every N collection cycles
+    
     # Visualization
     enable_static_viz: bool = True  # Generate PNG
     enable_interactive_viz: bool = True  # Generate HTML
@@ -103,11 +110,67 @@ class AnalysisConfig:
 
 
 @dataclass
+class VODConfig:
+    """Configuration for VOD (Video On Demand) chatter collection."""
+    
+    # Enable/disable VOD collection
+    enabled: bool = False
+    
+    # Time bucketing
+    bucket_len_s: int = 60  # Bucket window size in seconds (must match live collection)
+    
+    # Storage
+    raw_dir: str = "vod_raw"  # Directory for raw VOD chat JSON
+    queue_file: str = "vod_queue.json"  # VOD processing queue
+    
+    # TwitchDownloaderCLI
+    cli_path: str = "TwitchDownloaderCLI"  # Path to executable
+    
+    # Auto-discovery
+    auto_discover: bool = False  # Automatically discover recent VODs
+    vod_limit_per_channel: int = 5  # Number of recent VODs to queue per channel
+    
+    # Filtering
+    max_age_hours: int = 24  # Maximum VOD age in hours (default 24)
+    max_age_days: int = 14  # Maximum VOD age in days (default 14)
+    min_views: int = 0  # Minimum view count to process (default 0)
+    
+    # Cost Protection
+    max_vods_per_run: Optional[int] = 50  # Max VODs to process per execution (None = unlimited)
+    max_processing_hours: Optional[int] = 4  # Auto-stop after N hours (None = unlimited)
+    rate_limit_delay_s: int = 2  # Delay between API calls to avoid rate limits
+    
+    def __post_init__(self):
+        """Validate configuration."""
+        if self.bucket_len_s <= 0:
+            raise ValueError("bucket_len_s must be positive")
+        if self.vod_limit_per_channel < 1:
+            raise ValueError("vod_limit_per_channel must be at least 1")
+        if self.max_age_hours < 1:
+            raise ValueError("max_age_hours must be at least 1")
+        if self.max_age_days < 1:
+            raise ValueError("max_age_days must be at least 1")
+        if self.min_views < 0:
+            raise ValueError("min_views cannot be negative")
+        
+        # Create directories if they don't exist
+        if self.enabled:
+            Path(self.raw_dir).mkdir(exist_ok=True)
+
+
+@dataclass
 class PipelineConfig:
     """Combined configuration for entire pipeline."""
     
     collection: CollectionConfig = None
     analysis: AnalysisConfig = None
+    vod: VODConfig = None
+    
+    # Storage backend
+    storage_type: str = "file"  # 'file' or 's3'
+    s3_bucket: Optional[str] = None  # Required if storage_type='s3'
+    s3_prefix: str = "vieweratlas/"  # S3 key prefix
+    s3_region: str = "us-east-1"  # AWS region
     
     # Logging
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
@@ -123,6 +186,12 @@ class PipelineConfig:
             self.collection = CollectionConfig()
         if self.analysis is None:
             self.analysis = AnalysisConfig()
+        if self.vod is None:
+            self.vod = VODConfig()
+        
+        # Validate S3 config
+        if self.storage_type == 's3' and not self.s3_bucket:
+            raise ValueError("s3_bucket required when storage_type='s3'")
 
 
 # Default configurations for different use cases
@@ -254,13 +323,17 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     # Create configs from dict
     collection_dict = config_dict.get("collection", {})
     analysis_dict = config_dict.get("analysis", {})
+    vod_dict = config_dict.get("vod", {})
+    max_age_hours = vod_dict.get("max_age_hours")
+    if max_age_hours is None:
+        max_age_hours = vod_dict.get("max_age_days", 14) * 24
     
     collection_config = CollectionConfig(
         logs_dir=collection_dict.get("logs_dir", "logs"),
-        collection_interval_minutes=collection_dict.get("collection_interval", 3600) // 60,
+        collection_interval_minutes=collection_dict.get("collection_interval_minutes", 60),
         batch_size=collection_dict.get("batch_size", 100),
         duration_per_batch=collection_dict.get("duration_per_batch", 60),
-        top_channels_limit=analysis_dict.get("top_channels_limit", 5000)
+        top_channels_limit=collection_dict.get("top_channels_limit", 5000)
     )
     
     analysis_config = AnalysisConfig(
@@ -269,14 +342,31 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         min_channel_viewers=analysis_dict.get("min_channel_viewers", 1),
         overlap_threshold=analysis_dict.get("overlap_threshold", 1),
         resolution=analysis_dict.get("resolution", 1.0),
-        game_threshold=analysis_dict.get("game_threshold", 60),
-        language_threshold=analysis_dict.get("language_threshold", 40),
-        min_community_size=analysis_dict.get("min_community_size", 2)
+        min_community_size=analysis_dict.get("min_community_size", 2),
+        analysis_interval_cycles=analysis_dict.get("analysis_interval_cycles", 24)
+    )
+    
+    vod_config = VODConfig(
+        enabled=vod_dict.get("enabled", False),
+        bucket_len_s=vod_dict.get("bucket_len_s", 60),
+        raw_dir=vod_dict.get("raw_dir", "vod_raw"),
+        queue_file=vod_dict.get("queue_file", "vod_queue.json"),
+        cli_path=vod_dict.get("cli_path", "TwitchDownloaderCLI"),
+        auto_discover=vod_dict.get("auto_discover", False),
+        vod_limit_per_channel=vod_dict.get("vod_limit_per_channel", 5),
+        max_age_hours=max_age_hours,
+        max_age_days=vod_dict.get("max_age_days", 14),
+        min_views=vod_dict.get("min_views", 0)
     )
     
     return PipelineConfig(
         collection=collection_config,
         analysis=analysis_config,
+        vod=vod_config,
+        storage_type=config_dict.get("storage_type", "file"),
+        s3_bucket=config_dict.get("s3_bucket"),
+        s3_prefix=config_dict.get("s3_prefix", "vieweratlas/"),
+        s3_region=config_dict.get("s3_region", "us-east-1"),
         log_level=config_dict.get("log_level", "INFO"),
         log_format=config_dict.get("log_format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"),
         verbose=config_dict.get("verbose", False)
