@@ -1,0 +1,268 @@
+# ViewerAtlas Monitoring Dashboard Configuration
+# Import into CloudWatch or Grafana
+
+dashboard_config:
+  name: "ViewerAtlas VOD Collection"
+  widgets:
+    - type: "metric"
+      title: "VOD Queue Status"
+      metrics:
+        - name: "VODQueuePending"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Average"
+          period: 300
+        - name: "VODQueueProcessing"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Average"
+          period: 300
+        - name: "VODQueueCompleted"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Sum"
+          period: 3600
+        - name: "VODQueueFailed"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Sum"
+          period: 3600
+
+    - type: "metric"
+      title: "VOD Processing Rate"
+      metrics:
+        - name: "VODsProcessedSuccess"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Sum"
+          period: 3600
+        - name: "VODsProcessedFailure"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Sum"
+          period: 3600
+
+    - type: "metric"
+      title: "VOD Processing Duration"
+      metrics:
+        - name: "VODProcessingDurationSeconds"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Average"
+          period: 300
+
+    - type: "metric"
+      title: "VOD Snapshots Generated"
+      metrics:
+        - name: "VODSnapshotsGenerated"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+          stat: "Sum"
+          period: 3600
+
+    - type: "log"
+      title: "VOD Collector Logs"
+      log_group: "/ecs/vieweratlas-vod-collector"
+      query: |
+        fields @timestamp, @message
+        | filter @message like /VOD/
+        | sort @timestamp desc
+        | limit 100
+
+    - type: "metric"
+      title: "Backoff Distribution"
+      metrics:
+        - name: "VODBackoffAttempts"
+          namespace: "ViewerAtlas"
+          dimensions:
+            - name: "Component"
+              value: "VODCollector"
+            - name: "AttemptNumber"
+              value: "*"
+          stat: "Sum"
+          period: 3600
+
+    - type: "metric"
+      title: "ECS Task Health"
+      metrics:
+        - name: "CPUUtilization"
+          namespace: "AWS/ECS"
+          dimensions:
+            - name: "ServiceName"
+              value: "vieweratlas-vod-collector"
+            - name: "ClusterName"
+              value: "vieweratlas-cluster"
+          stat: "Average"
+          period: 300
+        - name: "MemoryUtilization"
+          namespace: "AWS/ECS"
+          dimensions:
+            - name: "ServiceName"
+              value: "vieweratlas-vod-collector"
+            - name: "ClusterName"
+              value: "vieweratlas-cluster"
+          stat: "Average"
+          period: 300
+
+  # SNS Topic for Alerts
+  sns_topic:
+    name: "vieweratlas-alerts"
+    display_name: "ViewerAtlas Alerts"
+    subscriptions:
+      - protocol: "email"
+        endpoint: "${ALERT_EMAIL}"  # Set via environment variable
+      # Add additional subscriptions as needed:
+      # - protocol: "sms"
+      #   endpoint: "+1234567890"
+      # - protocol: "lambda"
+      #   endpoint: "arn:aws:lambda:region:account:function:notify"
+
+  alarms:
+    - name: "VODQueueBacklogHigh"
+      description: "Alert when VOD queue pending count exceeds 1000"
+      metric: "VODQueuePending"
+      threshold: 1000
+      comparison: "GreaterThanThreshold"
+      evaluation_periods: 2
+      period: 300
+      statistic: "Average"
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "notBreaching"
+
+    - name: "VODFailureRateHigh"
+      description: "Alert when VOD failure rate exceeds 20%"
+      metric_math:
+        expression: "failures / (successes + failures) * 100"
+        metrics:
+          - id: "failures"
+            metric: "VODsProcessedFailure"
+          - id: "successes"
+            metric: "VODsProcessedSuccess"
+      threshold: 20
+      comparison: "GreaterThanThreshold"
+      evaluation_periods: 2
+      period: 3600
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "notBreaching"
+
+    - name: "VODProcessingStalled"
+      description: "Alert when no VODs processed in 6 hours"
+      metric: "VODsProcessedSuccess"
+      threshold: 1
+      comparison: "LessThanThreshold"
+      evaluation_periods: 1
+      period: 21600  # 6 hours
+      statistic: "Sum"
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "breaching"
+
+    - name: "ECSTaskFailures"
+      description: "Alert when ECS tasks fail repeatedly"
+      metric: "TasksStoppedReason"
+      namespace: "AWS/ECS"
+      dimensions:
+        - name: "ServiceName"
+          value: "vieweratlas-vod-collector"
+        - name: "ClusterName"
+          value: "vieweratlas-cluster"
+      threshold: 3
+      comparison: "GreaterThanThreshold"
+      evaluation_periods: 1
+      period: 900  # 15 minutes
+      statistic: "Sum"
+      alarm_actions:
+        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
+      treat_missing_data: "notBreaching"
+
+# Python code to emit CloudWatch metrics from VOD collector
+"""
+import boto3
+from datetime import datetime
+
+cloudwatch = boto3.client('cloudwatch', region_name='us-east-1')
+
+def emit_vod_metrics(queue_stats, processing_duration=None, success=True):
+    metrics = [
+        {
+            'MetricName': 'VODQueuePending',
+            'Value': queue_stats['pending'],
+            'Unit': 'Count',
+            'Timestamp': datetime.utcnow(),
+            'Dimensions': [
+                {'Name': 'Component', 'Value': 'VODCollector'}
+            ]
+        },
+        {
+            'MetricName': 'VODQueueProcessing',
+            'Value': queue_stats['processing'],
+            'Unit': 'Count',
+            'Timestamp': datetime.utcnow(),
+            'Dimensions': [
+                {'Name': 'Component', 'Value': 'VODCollector'}
+            ]
+        },
+        {
+            'MetricName': 'VODQueueCompleted',
+            'Value': queue_stats['completed'],
+            'Unit': 'Count',
+            'Timestamp': datetime.utcnow(),
+            'Dimensions': [
+                {'Name': 'Component', 'Value': 'VODCollector'}
+            ]
+        },
+        {
+            'MetricName': 'VODQueueFailed',
+            'Value': queue_stats['failed'],
+            'Unit': 'Count',
+            'Timestamp': datetime.utcnow(),
+            'Dimensions': [
+                {'Name': 'Component', 'Value': 'VODCollector'}
+            ]
+        }
+    ]
+    
+    if processing_duration is not None:
+        metrics.append({
+            'MetricName': 'VODProcessingDurationSeconds',
+            'Value': processing_duration,
+            'Unit': 'Seconds',
+            'Timestamp': datetime.utcnow(),
+            'Dimensions': [
+                {'Name': 'Component', 'Value': 'VODCollector'}
+            ]
+        })
+        
+        metrics.append({
+            'MetricName': 'VODsProcessedSuccess' if success else 'VODsProcessedFailure',
+            'Value': 1,
+            'Unit': 'Count',
+            'Timestamp': datetime.utcnow(),
+            'Dimensions': [
+                {'Name': 'Component', 'Value': 'VODCollector'}
+            ]
+        })
+    
+    cloudwatch.put_metric_data(
+        Namespace='ViewerAtlas',
+        MetricData=metrics
+    )
+"""

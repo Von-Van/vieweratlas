@@ -1,378 +1,323 @@
-# ViewerAtlas: Twitch Community Detection System
+# ViewerAtlas – Twitch Community Detection
 
-A sophisticated tool for analyzing Twitch streamer communities by detecting viewer overlaps and generating beautiful network visualizations.
+Discover and map streaming communities by analyzing viewer overlap patterns across Twitch channels. ViewerAtlas collects chat presence data (live + VOD), builds a weighted overlap graph, and uses community detection algorithms to reveal clusters of streamers that share audiences.
 
-## 🎯 Overview
-
-ViewerAtlas automatically:
-1. **Collects** real-time chat data from top Twitch channels
-2. **Aggregates** viewer information across channels
-3. **Builds** a network graph based on shared audiences
-4. **Detects** communities of streamers with similar viewer bases
-5. **Labels** communities by game, language, and content type
-6. **Visualizes** results as interactive bubble graphs
-
-The result is a beautiful, data-driven map of Twitch's streaming ecosystem.
-
-## 🏗️ Architecture
+## 📂 Project Structure
 
 ```
 twitchiobot/
-├── main.py                 # Orchestrator (collect → analyze → visualize)
-├── config.py              # Configuration (4 presets: default, rigorous, explorer, debug)
-├── get_viewers.py         # Twitch IRC chat collection
-├── update_channels.py     # Fetch top channels via Helix API
-├── data_aggregator.py     # Load & aggregate viewer data
-├── graph_builder.py       # Build overlap network
-├── community_detector.py  # Louvain community detection
-├── cluster_tagger.py      # Generate community labels
-├── visualizer.py          # Create PNG & HTML visualizations
-└── requirements.txt       # Python dependencies
+├── src/                          # Core application code
+│   ├── main.py                   # Pipeline orchestrator & entry point
+│   ├── config.py                 # Dataclass config system (4 presets + YAML)
+│   ├── storage.py                # Storage abstraction (FileStorage / S3Storage)
+│   │
+│   ├── get_viewers.py            # Live chat collection via TwitchIO IRC
+│   ├── update_channels.py        # Channel discovery via Helix API
+│   ├── vod_collector.py          # VOD chat replay via TwitchDownloaderCLI
+│   │
+│   ├── data_aggregator.py        # Snapshot loading & viewer set aggregation
+│   ├── graph_builder.py          # Pairwise overlap → NetworkX graph
+│   ├── community_detector.py     # Louvain community detection
+│   ├── cluster_tagger.py         # Community labeling (game / language)
+│   ├── visualizer.py             # Static PNG + interactive HTML output
+│   │
+│   └── requirements.txt          # Python dependencies
+│
+├── tests/                        # Pytest test suite (53 tests)
+│   └── test_pipeline.py
+│
+├── config/                       # Configuration
+│   └── config.yaml               # Pipeline configuration (YAML)
+│
+├── infrastructure/               # Deployment
+│   ├── docker/                   # Container images
+│   │   ├── Dockerfile.collector  # Live collection container
+│   │   ├── Dockerfile.analysis   # Analysis pipeline container
+│   │   ├── Dockerfile.vod        # VOD collection container
+│   │   └── docker-compose.yml    # Local multi-service setup
+│   │
+│   └── aws/                      # AWS infrastructure
+│       ├── deploy.sh             # Automated ECR + ECS deployment
+│       ├── safe-deploy.sh        # Cost-protected deployment w/ guardrails
+│       ├── ecs-task-*.json       # ECS Fargate task definitions
+│       ├── iam-roles.json        # IAM role templates
+│       ├── eventbridge-schedules.json  # Scheduled task configs
+│       ├── athena-schema.sql     # Data lake query schema
+│       ├── monitoring-dashboard.yaml   # CloudWatch dashboards + alarms
+│       └── SNS_SETUP.md          # Alert notification setup
+│
+├── logs/                         # Runtime logs (gitignored)
+├── channels.txt                  # Target channels list
+└── docs/
+    ├── DEVELOPER.md              # Detailed developer guide
+    └── PRODUCTION_UPDATES.md     # Production change log
 ```
+
+## 🏗️ Architecture
+
+### Pipeline
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Collection   │     │  Aggregation  │     │ Graph Build   │
+│              │     │              │     │              │
+│ TwitchIO IRC │────▶│ Load JSON /  │────▶│ Pairwise set │
+│ VOD Replay   │     │ CSV / Parquet │     │ intersection │
+└──────────────┘     └──────────────┘     └──────┬───────┘
+                                                  │
+                     ┌──────────────┐     ┌───────▼──────┐
+                     │ Visualization │     │  Community   │
+                     │              │◀────│  Detection   │
+                     │ PNG + HTML   │     │  (Louvain)   │
+                     │ CSV export   │     │  + Tagging   │
+                     └──────────────┘     └──────────────┘
+```
+
+**Data Collection** — Two complementary sources:
+- **Live:** IRC chat monitoring via TwitchIO joins channels and logs unique chatters per snapshot
+- **VOD:** Historical chat replay via TwitchDownloaderCLI with time-bucketed presence snapshots
+
+**Analysis** — Five-step pipeline orchestrated by `PipelineRunner`:
+1. **Aggregate** viewer presence data from all snapshot sources
+2. **Build** weighted overlap graph — edge weight = shared unique viewers (NetworkX)
+3. **Detect** communities via Louvain modularity optimization (python-louvain)
+4. **Tag** communities with human-readable labels from game/language metadata
+5. **Visualize** as static bubble graph (Matplotlib) + interactive HTML (PyVis)
+
+**Storage** — Abstracted via `BaseStorage` → `FileStorage` (local) or `S3Storage` (AWS)
+
+### AWS Deployment
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        AWS ARCHITECTURE                            │
+│                                                                    │
+│  ┌──────────────┐   ┌───────────────┐   ┌──────────────────────┐  │
+│  │ ECR          │   │ Secrets Mgr   │   │ EventBridge          │  │
+│  │ 3 repos:     │   │ twitch/       │   │ Schedules:           │  │
+│  │  -collector  │   │  oauth_token  │   │  -collector: always  │  │
+│  │  -analysis   │   │  client_id    │   │  -analysis: daily    │  │
+│  │  -vod        │   │               │   │  -vod: every 6h      │  │
+│  └──────┬───────┘   └──────┬────────┘   └──────┬───────────────┘  │
+│         │                  │                    │                  │
+│         ▼                  ▼                    ▼                  │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                     ECS FARGATE CLUSTER                    │   │
+│  │                                                            │   │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐  │   │
+│  │  │ Collector   │  │ Analysis     │  │ VOD Collector    │  │   │
+│  │  │ 0.25 vCPU   │  │ 1 vCPU       │  │ 0.5 vCPU         │  │   │
+│  │  │ 512 MB      │  │ 2 GB         │  │ 1 GB             │  │   │
+│  │  │ Long-running│  │ Scheduled    │  │ Scheduled        │  │   │
+│  │  └──────┬──────┘  └──────┬───────┘  └──────┬───────────┘  │   │
+│  └─────────┼────────────────┼─────────────────┼──────────────┘   │
+│            │                │                  │                  │
+│            ▼                ▼                  ▼                  │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                      S3 DATA LAKE                          │   │
+│  │                                                            │   │
+│  │  raw/snapshots/              ← live chat JSON  (30-day TTL)│   │
+│  │  raw/vod_chat/               ← VOD downloads    (7-day TTL)│   │
+│  │  curated/presence_snapshots/ ← Parquet        (90d→Glacier)│   │
+│  │  curated/analysis/           ← graph + partition results   │   │
+│  └──────────────────────────┬──────────────────────────────────┘   │
+│                             │                                     │
+│            ┌────────────────┼──────────────────┐                  │
+│            ▼                ▼                   ▼                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐    │
+│  │ Athena       │  │ CloudWatch   │  │ SNS Alerts           │    │
+│  │ (ad-hoc SQL) │  │ Logs + Dash  │  │ Budget + Task alarms │    │
+│  └──────────────┘  │ + Metrics    │  └──────────────────────┘    │
+│                    └──────────────┘                               │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**Estimated monthly cost** (100 channels, 4 h/day collection, Spot pricing):
+
+| Service | Cost |
+|---|---|
+| S3 storage (10 GB) | ~$0.23 |
+| ECS Fargate (Spot, 4 h/day) | ~$3–5 |
+| CloudWatch Logs (1 GB) | ~$0.50 |
+| Secrets Manager (3 secrets) | ~$1.20 |
+| Data transfer | ~$0.50 |
+| **Total** | **~$5–8 / month** |
+
+Built-in cost guardrails: AWS Budget alert at $50/month, S3 lifecycle auto-deletion, 7-day log retention, task-level runtime caps.
 
 ## 🚀 Quick Start
 
-### 1. Install Dependencies
+### Prerequisites
+
+- Python 3.11+
+- A [Twitch application](https://dev.twitch.tv/console) with OAuth token and Client ID
+- (Optional) Docker, AWS CLI for cloud deployment
+
+### Local Development
 
 ```bash
-cd twitchiobot
+# 1. Install dependencies
+cd twitchiobot/src
 pip install -r requirements.txt
-```
 
-### 2. Set Up Twitch API
+# 2. Set Twitch credentials
+export TWITCH_OAUTH_TOKEN=oauth:your_token
+export TWITCH_CLIENT_ID=your_client_id
 
-Create a `.env` file in `twitchiobot/`:
+# 3. Collect live chat data
+python main.py collect
 
-```env
-TWITCH_OAUTH_TOKEN=your_oauth_token_here
-TWITCH_CLIENT_ID=your_client_id_here
-```
-
-Get tokens from [Twitch Dev Console](https://dev.twitch.tv/console).
-
-### 3. Run Analysis
-
-```bash
-# Analyze existing log data (default config)
+# 4. Run the analysis pipeline
 python main.py analyze
 
-# TwitchAtlas-style rigorous analysis (300+ overlap threshold)
-python main.py analyze rigorous
-
-# Fine-grained exploratory analysis
-python main.py analyze explorer
-
-# Debug mode (small dataset, verbose)
-python main.py analyze debug
+# 5. Run tests
+cd ..
+python -m pytest tests/ -v
 ```
 
-## 📊 Operating Modes
+### Docker (local)
 
-### Analyze (Analysis-Only)
 ```bash
-python main.py analyze [config]
+cd twitchiobot/infrastructure/docker
+
+# Copy and fill in credentials
+cp ../../config/.env.example .env
+
+# Build and start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f collector
 ```
-Processes existing data from `logs/` directory. No collection required.
 
-**Perfect for:**
-- Testing with existing data
-- Tuning parameters
-- Quick iterations
+### AWS Deployment
 
-### Collect (Data Collection)
 ```bash
-python main.py collect
+cd twitchiobot/infrastructure/aws
+
+# Set required variables
+export AWS_REGION=us-east-1
+export S3_BUCKET=your-bucket-name
+export ECS_CLUSTER=vieweratlas-cluster
+export ALERT_EMAIL=you@example.com
+
+# Cost-protected deployment (recommended)
+./safe-deploy.sh
+
+# Or direct deployment
+./deploy.sh
 ```
-Runs continuous data collection hourly. Requires Twitch API tokens.
 
-**Perfect for:**
-- Building datasets over time
-- Running as a background service
-
-### Continuous (Collection + Analysis)
-```bash
-python main.py continuous [config]
-```
-Collects data hourly, runs analysis every 24 hours.
-
-**Perfect for:**
-- Automated monthly reports
-- Keeping community maps current
+See [infrastructure/aws/SNS_SETUP.md](infrastructure/aws/SNS_SETUP.md) for alert configuration.
 
 ## ⚙️ Configuration
 
-### Preset Configurations
+ViewerAtlas uses a **dataclass-based config system** with four built-in presets:
 
-**Default** (`default`)
-- Balanced approach
-- Low threshold (1 shared viewer = edge)
-- Good for initial exploration
+| Preset | Channels | Overlap Threshold | Resolution | Use Case |
+|---|---|---|---|---|
+| `default` | 5,000 | 1 | 1.0 | Balanced general-purpose |
+| `rigorous` | 5,000 | 300 | 1.0 | High-confidence edges only |
+| `explorer` | 5,000 | 1 | 2.0 | Fine-grained sub-communities |
+| `debug` | 100 | 1 | 1.0 | Fast local testing |
 
-**Rigorous** (`rigorous`)
-- TwitchAtlas-style parameters
-- 300+ shared viewers required
-- 10+ channel minimum per community
-- Better for meaningful overlaps
-
-**Explorer** (`explorer`)
-- Fine-grained communities (resolution 2.0)
-- Low thresholds
-- Verbose logging
-- All data included
-
-**Debug** (`debug`)
-- Small dataset (100 channels)
-- Very verbose logging
-- Quick testing
-
-### Custom Configuration
-
-Edit `config.py` to create your own:
-
-```python
-from config import PipelineConfig, CollectionConfig, AnalysisConfig
-
-my_config = PipelineConfig(
-    collection=CollectionConfig(
-        top_channels_limit=1000,
-        batch_size=50
-    ),
-    analysis=AnalysisConfig(
-        overlap_threshold=50,
-        resolution=1.5,
-        min_community_size=5
-    )
-)
-```
-
-## 📈 Pipeline Steps
-
-### [1/6] Aggregation
-- Loads JSON/CSV logs from `logs/`
-- Builds `{channel: set(viewers)}` structure
-- Generates data quality report
-- Shows one-off vs. repeat viewers
-
-### [2/6] Graph Building
-- Computes overlaps (shared viewers between channels)
-- Creates weighted graph with NetworkX
-- Exports nodes/edges CSVs for Gephi
-- Reports network density and statistics
-
-### [3/6] Community Detection
-- Applies Louvain modularity optimization
-- Detects tightly-connected groups
-- Reports modularity score
-- Validates community coherence
-
-### [4/6] Tagging
-- Analyzes dominant game per community
-- Detects language/region patterns
-- Generates human-readable labels
-- Ensures unique community names
-
-### [5/6] Visualization
-- Creates static PNG with force-directed layout
-- Generates interactive HTML (PyVis)
-- Color-codes nodes by community
-- Sizes nodes by audience
-- Thickens edges by overlap strength
-
-### [6/6] Results
-- Saves `analysis_results.json` with full output
-- Exports graph data for Gephi
-- Creates bubble graph visualizations
-
-## 📁 Output Files
-
-After analysis, check `community_analysis/`:
-
-```
-community_analysis/
-├── community_graph.png           # Static visualization
-├── community_graph.html          # Interactive visualization
-├── analysis_results.json         # Full results
-├── graph_nodes.csv              # Node attributes
-└── graph_edges.csv              # Edge weights
-```
-
-## 🔍 Understanding Results
-
-### analysis_results.json
-
-```json
-{
-  "timestamp": "2026-01-05T...",
-  "config": {
-    "overlap_threshold": 300,
-    "resolution": 1.0,
-    "min_channel_viewers": 10
-  },
-  "partition": {
-    "channel_name": 0,
-    ...
-  },
-  "labels": {
-    "0": "League of Legends (English)",
-    "1": "Just Chatting (Spanish)",
-    ...
-  },
-  "statistics": {
-    "graph": {...},
-    "detection": {...},
-    "tagging": {...}
-  }
-}
-```
-
-### Interpreting Communities
-
-Each detected community typically represents:
-- **Game-based**: Streamers of same game (e.g., "Valorant (NA)")
-- **Language-based**: Streamers speaking same language
-- **Niche communities**: Art, music, variety, etc.
-- **Cross-game**: Streamers with overlapping audiences despite different games
-
-## 🛠️ Advanced Usage
-
-### Data Filtering
-
-Filter for repeat viewers only:
-
-```python
-from data_aggregator import DataAggregator
-
-agg = DataAggregator("logs")
-agg.load_all()
-
-# Only include viewers who appear in 3+ channels
-filtered = agg.filter_by_repeat_viewers(min_appearances=3)
-```
-
-### Quality Report
-
-```python
-quality = agg.get_data_quality_report()
-print(f"One-off viewers: {quality['one_off_percentage']:.1f}%")
-print(f"Repeat viewers (2+): {quality['repeat_viewers_2plus']}")
-```
-
-### Exporting for Gephi
+Configuration is loaded in order of precedence: **defaults → YAML file → environment variables**.
 
 ```bash
-# CSV files are automatically exported to community_analysis/
-# Import graph_nodes.csv and graph_edges.csv into Gephi for advanced layout
+# Run with a preset
+python main.py analyze rigorous
+
+# Or use YAML config
+python main.py analyze config.yaml
 ```
 
-### Custom Visualization
+Key settings in `config/config.yaml`:
 
-```python
-from visualizer import Visualizer
-from graph_builder import GraphBuilder
+```yaml
+collection:
+  batch_size: 100           # Channels per IRC batch
+  top_channels_limit: 500   # Max channels to monitor
+  collection_interval_minutes: 60
 
-viz = Visualizer(figsize=(24, 20))
-viz.visualize_static(
-    graph, partition, labels,
-    output_file="custom_viz.png",
-    show_labels=True
-)
+analysis:
+  overlap_threshold: 10     # Min shared viewers for an edge
+  resolution: 1.0           # Louvain resolution (higher = more communities)
+  min_community_size: 3
+
+vod:
+  bucket_len_s: 300         # Presence bucket window (seconds)
+  max_age_days: 30          # Only process recent VODs
+  min_views: 100            # Skip low-view VODs
 ```
 
-## 📊 Data Collection Tips
+## 🧪 Testing
 
-### For Best Results:
+53 tests across 6 test classes covering the full pipeline:
 
-1. **Collect over 3-5 days minimum**
-   - Captures different viewing patterns
-   - Identifies loyal vs. casual viewers
-
-2. **Run hourly collections**
-   - Picks up peak and off-peak viewers
-   - Follows the config schedule
-
-3. **Aim for 1000+ channels**
-   - Top channels often sufficient
-   - More channels = richer overlaps
-
-4. **Exclude obvious bots**
-   - Filter if you know bot usernames
-   - Check data quality report
-
-## 🐛 Troubleshooting
-
-### No data found in logs/
-
-**Problem:** Analyze mode fails with "No data found"
-
-**Solution:**
-1. Run collection first: `python main.py collect`
-2. Wait at least 1 hour for data
-3. Check `logs/` directory exists
-4. Verify JSON/CSV files were created
-
-### Graph has no edges
-
-**Problem:** Overlap threshold too high, no edges created
-
-**Solution:**
-1. Lower `overlap_threshold` in config
-2. Start with `overlap_threshold=1`
-3. Check if enough viewer overlap exists
-
-### Poor community structure (low modularity)
-
-**Problem:** Modularity < 0.4 indicates weak communities
-
-**Possible causes:**
-- Overlap threshold too low (includes noise)
-- Insufficient data collection period
-- Channels too diverse (no natural grouping)
-
-**Solutions:**
-1. Increase `overlap_threshold`
-2. Increase `min_channel_viewers`
-3. Filter for repeat viewers only
-4. Collect more data over longer period
-
-### python-louvain not installed
-
-**Problem:** "python-louvain not installed" error
-
-**Solution:**
 ```bash
-pip install python-louvain
+python -m pytest tests/test_pipeline.py -v
 ```
 
-Falls back to greedy algorithm if unavailable.
+| Test Class | Tests | Coverage |
+|---|---|---|
+| `TestDataAggregator` | 11 | Snapshot loading, viewer sets, filtering, quality reports |
+| `TestGraphBuilder` | 11 | Edge weights, thresholds, CSV export, neighbors |
+| `TestCommunityDetector` | 12 | Partitions, modularity, resolution, attributes |
+| `TestClusterTagger` | 7 | Game labels, language combos, fallback labels |
+| `TestConfig` | 9 | Presets, validation, YAML loading |
+| `TestIntegration` | 3 | Full pipeline end-to-end with fixture data |
+
+## 📊 Output
+
+Each analysis run produces:
+
+- **Community graph** — static PNG (Matplotlib) + interactive HTML (PyVis)
+- **Channel overlap statistics** — node/edge counts, density, modularity
+- **Community labels** — auto-generated from dominant game/language patterns
+- **Exportable data** — nodes CSV, edges CSV, Parquet snapshots
+
+## 🗺️ Roadmap
+
+### ✅ Completed
+- Fix syntax errors and duplicate code in collector / pipeline
+- Fix config YAML loader bugs (phantom fields, wrong key mappings)
+- Synchronize schema document with actual codebase
+- Add pytest test suite (53 tests)
+
+### 🔧 Up Next — Deployment-Ready
+- [ ] Normalize metadata keys across pipeline (game_name→game, viewer_count→viewers)
+- [ ] Validate and harden Docker images for all three services
+- [ ] Parameterize AWS templates + add `.env.example` for all variables
+- [ ] Create step-by-step `DEPLOYMENT.md` guide
+- [ ] Wire env var overrides for all config fields (containerized use)
+- [ ] Integrate CloudWatch custom metrics into pipeline code
+
+### 📈 Short-Term Improvements
+- [ ] Helix "Get Chatters" endpoint as supplementary data source
+- [ ] Repeat-viewer edge weighting (loyalty scoring)
+- [ ] Application-layer data retention and cleanup
+- [ ] Bot detection and filtering (blocklist + heuristics)
+
+### 🔭 Medium-Term
+- [ ] CI/CD pipeline (GitHub Actions → ECR → ECS)
+- [ ] Web-based interactive visualization dashboard
+- [ ] Temporal community tracking (evolution over time)
+- [ ] Leiden algorithm option (faster, better-connected communities)
+- [ ] Athena integration for ad-hoc SQL queries on the data lake
+
+### 🌐 Long-Term Vision
+- [ ] Multi-platform support (YouTube, Kick)
+- [ ] Cross-platform community detection
+- [ ] Overlapping community detection
+- [ ] Scalability to full Twitch (MinHash, sparse matrices, distributed graph)
 
 ## 📖 Documentation
 
-- **[SCHEMA_AUDIT.md](../SCHEMA_AUDIT.md)** - What was built vs. original spec
-- **[requirements.txt](requirements.txt)** - Python dependencies
-- **[config.py](config.py)** - Configuration options and presets
-
-## 🔮 Future Enhancements
-
-- [ ] YouTube support (BaseCollector interface)
-- [ ] SQLite storage backend
-- [ ] Overlapping communities detection
-- [ ] Social media integration (Twitter, Discord)
-- [ ] Custom tag rules
-- [ ] Performance profiling
-- [ ] Scheduled cron integration
-- [ ] Prometheus metrics export
+- [Developer Guide](docs/DEVELOPER.md) — Implementation details and module APIs
+- [Production Updates](docs/PRODUCTION_UPDATES.md) — Production change log
+- [AWS SNS Setup](infrastructure/aws/SNS_SETUP.md) — Alert notification configuration
+- [Athena Schema](infrastructure/aws/athena-schema.sql) — Data lake query examples
 
 ## 📝 License
 
-This project documents and implements the Streaming Community Detection approach described in the ViewerAtlas schema.
-
-## 🙏 Acknowledgments
-
-Based on research from:
-- [TwitchAtlas](https://github.com/KiranGershenfeld/VisualizingTwitchCommunities)
-- [Twitch Official Blog](https://blog.twitch.tv/en/2015/02/04/visual-mapping-of-twitch-and-our-communities-cause-science-2f5ad212c3da/)
-- NetworkX and community detection libraries
-
----
-
-**Questions?** Check the code docstrings or create an issue.
+MIT License — See LICENSE file for details.

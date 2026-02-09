@@ -1,0 +1,35 @@
+# ViewerAtlas Analysis Pipeline - Docker Image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies (for matplotlib, networkx)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libfreetype6-dev \
+    libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY src/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all application code
+COPY src/*.py ./
+COPY channels.txt ./
+
+# Create output directory
+RUN mkdir -p /app/community_analysis
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV OUTPUT_DIR=/app/community_analysis
+
+# Health check
+HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \
+    CMD python -c "import networkx; import matplotlib; exit(0)"
+
+# Run analysis pipeline
+CMD ["python", "-u", "main.py", "analyze", "rigorous"]
