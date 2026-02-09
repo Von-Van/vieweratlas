@@ -47,7 +47,7 @@ twitchiobot/
 │       └── SNS_SETUP.md          # Alert notification setup
 │
 ├── logs/                         # Runtime logs (gitignored)
-├── channels.txt                  # Target channels list
+├── channels.example.txt          # Sample channels list
 └── docs/
     ├── DEVELOPER.md              # Detailed developer guide
     └── PRODUCTION_UPDATES.md     # Production change log
@@ -157,21 +157,22 @@ Built-in cost guardrails: AWS Budget alert at $50/month, S3 lifecycle auto-delet
 
 ```bash
 # 1. Install dependencies
-cd twitchiobot/src
-pip install -r requirements.txt
+cd twitchiobot
+pip install -r src/requirements.txt
 
-# 2. Set Twitch credentials
-export TWITCH_OAUTH_TOKEN=oauth:your_token
-export TWITCH_CLIENT_ID=your_client_id
+# 2. Set Twitch credentials (or copy the example file)
+cp config/.env.example .env
 
-# 3. Collect live chat data
-python main.py collect
+# 3. Create a channels list
+cp channels.example.txt channels.txt
 
-# 4. Run the analysis pipeline
-python main.py analyze
+# 4. Collect live chat data
+python src/main.py collect
 
-# 5. Run tests
-cd ..
+# 5. Run the analysis pipeline
+python src/main.py analyze
+
+# 6. Run tests
 python -m pytest tests/ -v
 ```
 
@@ -225,10 +226,10 @@ Configuration is loaded in order of precedence: **defaults → YAML file → env
 
 ```bash
 # Run with a preset
-python main.py analyze rigorous
+python src/main.py analyze rigorous
 
 # Or use YAML config
-python main.py analyze config.yaml
+python src/main.py analyze config/config.yaml
 ```
 
 Key settings in `config/config.yaml`:

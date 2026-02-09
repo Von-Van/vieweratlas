@@ -6,7 +6,7 @@ echo "======================="
 echo ""
 
 # Check if we're in the right directory
-if [ ! -f "twitchiobot/main.py" ]; then
+if [ ! -f "twitchiobot/src/main.py" ]; then
     echo "❌ Error: Run this from the vieweratlas root directory"
     exit 1
 fi
@@ -27,27 +27,27 @@ read -p "Enter choice (1-6): " choice
 case $choice in
     1)
         echo "Installing dependencies..."
-        pip install -r twitchiobot/requirements.txt
+        pip install -r twitchiobot/src/requirements.txt
         echo "✓ Done!"
         ;;
     2)
         echo "Running analysis with default config..."
         cd twitchiobot
-        python main.py analyze default
+        python src/main.py analyze default
         echo ""
         echo "Results saved to: community_analysis/"
         ;;
     3)
         echo "Running analysis with rigorous config..."
         cd twitchiobot
-        python main.py analyze rigorous
+        python src/main.py analyze rigorous
         echo ""
         echo "Results saved to: community_analysis/"
         ;;
     4)
         echo "Running analysis with explorer config..."
         cd twitchiobot
-        python main.py analyze explorer
+        python src/main.py analyze explorer
         echo ""
         echo "Results saved to: community_analysis/"
         ;;
@@ -55,6 +55,8 @@ case $choice in
         echo "Checking data quality..."
         cd twitchiobot
         python -c "
+import sys
+sys.path.append('src')
 from data_aggregator import DataAggregator
 agg = DataAggregator('logs')
 agg.load_all()
@@ -72,7 +74,7 @@ print(f'  Repeat visitors (2+): {quality[\"repeat_viewers_2plus\"]}')
         echo "This will run hourly collections."
         echo "Press Ctrl+C to stop."
         cd twitchiobot
-        python main.py collect
+        python src/main.py collect
         ;;
     *)
         echo "Invalid choice"

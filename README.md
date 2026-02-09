@@ -2,7 +2,7 @@
 
 A sophisticated, cloud-native tool for analyzing Twitch streamer communities by detecting viewer overlaps and generating beautiful network visualizations. Now with AWS S3 integration and containerized deployment support.
 
-**Status**: In Progess 
+**Status**: Active development  
 **Last Updated**: February 9, 2026
 
 ---
@@ -37,31 +37,29 @@ The result is a beautiful, data-driven map of Twitch's streaming ecosystem.
 
 ```
 vieweratlas/
-├── twitchiobot/                    # Main application
-│   ├── main.py                     # Pipeline orchestrator (3 modes)
-│   ├── config.py                   # Configuration (4 presets + YAML)
-│   ├── config.yaml                 # Configuration template
-│   ├── storage.py                  # Storage abstraction (local + S3)
-│   │
-│   ├── get_viewers.py              # Twitch IRC chat collection
-│   ├── update_channels.py          # Fetch top channels via Helix API
-│   ├── data_aggregator.py          # Load & aggregate viewer data
-│   ├── graph_builder.py            # Build overlap network
-│   ├── community_detector.py       # Louvain community detection
-│   ├── cluster_tagger.py           # Generate community labels
-│   ├── visualizer.py               # Create PNG & HTML visualizations
-│   │
-│   ├── Dockerfile.collector        # Collector container
-│   ├── Dockerfile.analysis         # Analysis container
-│   ├── docker-compose.yml          # Local testing setup
-│   ├── ecs-task-collector.json     # AWS ECS task definition
-│   ├── ecs-task-analysis.json      # AWS ECS task definition
-│   ├── deploy.sh                   # AWS deployment script
-│   │
-│   └── requirements.txt            # Python dependencies
+├── twitchiobot/                     # Main application
+│   ├── src/                         # Core pipeline code
+│   │   ├── main.py                  # Pipeline orchestrator (3 modes)
+│   │   ├── config.py                # Configuration (presets + YAML loader)
+│   │   ├── get_viewers.py           # Twitch IRC chat collection
+│   │   ├── update_channels.py       # Fetch top channels via Helix API
+│   │   ├── data_aggregator.py       # Load & aggregate viewer data
+│   │   ├── graph_builder.py         # Build overlap network
+│   │   ├── community_detector.py    # Louvain community detection
+│   │   ├── cluster_tagger.py        # Generate community labels
+│   │   ├── visualizer.py            # Create PNG & HTML visualizations
+│   │   └── requirements.txt         # Python dependencies
+│   ├── config/                      # Config + environment templates
+│   │   ├── config.yaml
+│   │   └── .env.example
+│   ├── docs/                        # Deployment + production notes
+│   ├── infrastructure/              # Docker + AWS infra
+│   │   ├── docker/
+│   │   └── aws/
+│   └── tests/                       # Unit tests
 │
-├── README.md                       # This file
-└── vieweratlas scheme.txt          # Original specification
+├── README.md                        # This file
+└── setup.sh                         # Local helper script
 ```
 
 ---
@@ -79,7 +77,7 @@ vieweratlas/
 
 ```bash
 cd twitchiobot
-pip install -r requirements.txt
+pip install -r src/requirements.txt
 ```
 
 ### Twitch API Setup
@@ -90,7 +88,7 @@ pip install -r requirements.txt
 
 ```bash
 # Copy example
-cp .env.example .env
+cp config/.env.example .env
 
 # Edit with your credentials
 TWITCH_OAUTH_TOKEN=oauth:your_token_here
@@ -98,20 +96,30 @@ TWITCH_CLIENT_ID=your_client_id_here
 STORAGE_TYPE=file  # Use 'file' for local, 's3' for AWS
 ```
 
+4. Create your channels list:
+
+```bash
+# Option A: start from the example file
+cp channels.example.txt channels.txt
+
+# Option B: auto-generate from Twitch (requires API creds)
+python src/update_channels.py
+```
+
 ### Run Your First Analysis
 
 ```bash
 # Analyze existing log data (default config)
-python main.py analyze
+python src/main.py analyze
 
 # TwitchAtlas-style rigorous analysis (300+ overlap threshold)
-python main.py analyze rigorous
+python src/main.py analyze rigorous
 
 # Fine-grained exploratory analysis
-python main.py analyze explorer
+python src/main.py analyze explorer
 
 # Debug mode (small dataset, verbose)
-python main.py analyze debug
+python src/main.py analyze debug
 ```
 
 ---
@@ -120,7 +128,7 @@ python main.py analyze debug
 
 ### 1. Analyze (Analysis-Only)
 ```bash
-python main.py analyze [config]
+python src/main.py analyze [config]
 ```
 Processes existing data from `logs/` directory. No collection required.
 
@@ -131,7 +139,7 @@ Processes existing data from `logs/` directory. No collection required.
 
 ### 2. Collect (Data Collection)
 ```bash
-python main.py collect
+python src/main.py collect
 ```
 Runs continuous data collection hourly. Requires Twitch API tokens.
 
@@ -141,7 +149,7 @@ Runs continuous data collection hourly. Requires Twitch API tokens.
 
 ### 3. Continuous (Collection + Analysis)
 ```bash
-python main.py continuous [config]
+python src/main.py continuous [config]
 ```
 Collects data hourly, runs analysis every 24 hours.
 
@@ -181,7 +189,7 @@ Collects data hourly, runs analysis every 24 hours.
 Create custom configurations:
 
 ```bash
-cp config.yaml my_analysis.yaml
+cp config/config.yaml my_analysis.yaml
 ```
 
 Edit settings:
@@ -212,7 +220,7 @@ log_level: "INFO"
 Use your config:
 
 ```bash
-python main.py analyze my_analysis.yaml
+python src/main.py analyze my_analysis.yaml
 ```
 
 Override with environment variables:
@@ -220,7 +228,7 @@ Override with environment variables:
 ```bash
 export OVERLAP_THRESHOLD=500
 export LOG_LEVEL=DEBUG
-python main.py analyze my_analysis.yaml
+python src/main.py analyze my_analysis.yaml
 ```
 
 ---
@@ -233,7 +241,7 @@ ViewerAtlas supports both local file storage and AWS S3:
 
 **Local Storage (Default)**
 ```bash
-STORAGE_TYPE=file python main.py analyze
+STORAGE_TYPE=file python src/main.py analyze
 ```
 
 **AWS S3 Storage**
@@ -242,7 +250,7 @@ STORAGE_TYPE=s3 \
 S3_BUCKET=vieweratlas-data-lake \
 S3_PREFIX=vieweratlas/ \
 S3_REGION=us-east-1 \
-python main.py analyze
+python src/main.py analyze
 ```
 
 ### S3 Data Lake Structure
@@ -538,7 +546,7 @@ uri = storage.get_uri('outputs/graph.png')
 **Problem:** Analyze mode fails with "No data found"
 
 **Solution:**
-1. Run collection first: `python main.py collect`
+1. Run collection first: `python src/main.py collect`
 2. Wait at least 1 hour for data
 3. Check `logs/` directory exists
 4. Verify JSON/CSV files were created

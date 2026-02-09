@@ -1,29 +1,26 @@
-# Environment and secrets
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
 .env
+.env.local
 twitchiobot/.env
 twitchiobot/config/.env
-twitchiobot/docs
-# Specification documents (local only)
-vieweratlas scheme.txt
-vodintegr.txt
-schema_review_and_roadmap.txt
-DEPLOYMENT.md
 
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.egg-info/
 dist/
 build/
 
-# Runtime data directories
-twitchiobot/logs/
-twitchiobot/vod_raw/
-twitchiobot/community_analysis/
-twitchiobot/vod_queue.json
+# Virtual environments
+.venv/
+venv/
 
 # IDE
 .vscode/
@@ -31,11 +28,14 @@ twitchiobot/vod_queue.json
 *.swp
 *.swo
 *~
+*.code-workspace
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Docker
-twitchiobot/.dockerignore
-*.log
+# Runtime data / outputs
+logs/
+community_analysis/
+twitchiobot/logs/
+twitchiobot/community_analysis/
+twitchiobot/vod_raw/
+twitchiobot/vod_queue.json
+twitchiobot/channels.txt
+twitchiobot/chatters_log.csv
