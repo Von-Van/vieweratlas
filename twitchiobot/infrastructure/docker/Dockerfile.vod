@@ -29,7 +29,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application code (main.py imports all modules at top level)
 COPY src/*.py ./
-COPY channels.txt ./
 
 # Copy default config (can be overridden via volume mount or env vars)
 COPY config/config.yaml ./config.yaml

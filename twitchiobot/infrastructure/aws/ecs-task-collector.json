@@ -10,7 +10,7 @@
   "containerDefinitions": [
     {
       "name": "collector",
-      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-collector:latest",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-collector:${IMAGE_TAG}",
       "essential": true,
       "logConfiguration": {
         "logDriver": "awslogs",
@@ -31,7 +31,7 @@
         },
         {
           "name": "S3_PREFIX",
-          "value": "vieweratlas/"
+          "value": "${S3_PREFIX}"
         },
         {
           "name": "S3_REGION",
@@ -40,6 +40,10 @@
         {
           "name": "LOG_LEVEL",
           "value": "INFO"
+        },
+        {
+          "name": "CHANNELS_FILE",
+          "value": "/app/channels.txt"
         }
       ],
       "secrets": [
@@ -58,23 +62,6 @@
         "timeout": 5,
         "retries": 3,
         "startPeriod": 60
-      },
-      "mountPoints": [
-        {
-          "sourceVolume": "channels",
-          "containerPath": "/app/channels.txt",
-          "readOnly": true
-        }
-      ]
-    }
-  ],
-  "volumes": [
-    {
-      "name": "channels",
-      "efsVolumeConfiguration": {
-        "fileSystemId": "${EFS_ID}",
-        "rootDirectory": "/channels",
-        "transitEncryption": "ENABLED"
       }
     }
   ],

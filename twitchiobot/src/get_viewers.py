@@ -21,7 +21,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-def load_channels_from_file(path="channels.txt"):
+CHANNELS_FILE = os.getenv("CHANNELS_FILE", "channels.txt")
+
+
+def load_channels_from_file(path=None):
+    if path is None:
+        path = CHANNELS_FILE
     if os.path.exists(path):
         with open(path, "r") as f:
             return [line.strip().lower() for line in f if line.strip()]

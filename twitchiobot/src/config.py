@@ -188,6 +188,23 @@ class PipelineConfig:
             self.analysis = AnalysisConfig()
         if self.vod is None:
             self.vod = VODConfig()
+
+        # Allow runtime environment to control storage backend selection.
+        env_storage_type = os.getenv("STORAGE_TYPE")
+        if env_storage_type:
+            self.storage_type = env_storage_type.lower()
+
+        env_s3_bucket = os.getenv("S3_BUCKET")
+        if env_s3_bucket:
+            self.s3_bucket = env_s3_bucket
+
+        env_s3_prefix = os.getenv("S3_PREFIX")
+        if env_s3_prefix:
+            self.s3_prefix = env_s3_prefix
+
+        env_s3_region = os.getenv("S3_REGION")
+        if env_s3_region:
+            self.s3_region = env_s3_region
         
         # Validate S3 config
         if self.storage_type == 's3' and not self.s3_bucket:

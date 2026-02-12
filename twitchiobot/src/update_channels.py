@@ -6,7 +6,7 @@ load_dotenv()
 
 CLIENT_ID = os.getenv("TWITCH_CLIENT_ID")
 OAUTH_TOKEN = os.getenv("TWITCH_OAUTH_TOKEN")
-CHANNEL_FILE = "channels.txt"
+CHANNEL_FILE = os.getenv("CHANNELS_FILE", "channels.txt")
 
 def fetch_top_channels(limit=5000):
     url = "https://api.twitch.tv/helix/streams"

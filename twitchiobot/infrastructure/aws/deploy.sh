@@ -1,20 +1,60 @@
 #!/bin/bash
 
 # AWS ECS Deployment Script for ViewerAtlas
-# This script builds and deploys Docker images to ECR, then updates ECS services
+# Idempotent flow for first-time and repeat deployments.
 
-set -e
+set -euo pipefail
 
-# Load .env file if present (for local runs; CI/CD should set vars directly)
-if [ -f ".env" ]; then
-    set -a
-    source .env
-    set +a
-fi
+load_env_file() {
+    local env_file=".env"
+    if [ ! -f "$env_file" ]; then
+        return
+    fi
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Skip comments/blank lines
+        case "$line" in
+            ''|'#'*)
+                continue
+                ;;
+        esac
+
+        # Support optional leading "export "
+        line="${line#export }"
+
+        # Only load KEY=VALUE assignments
+        if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+            continue
+        fi
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+        # Trim surrounding quotes for simple quoted values.
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+        export "$key=$value"
+    done < "$env_file"
+}
+
+load_env_file
 
 # Configuration
 AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
+S3_PREFIX=${S3_PREFIX:-vieweratlas/}
+ECS_CLUSTER=${ECS_CLUSTER:-vieweratlas-cluster}
+ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
+SUBNET_IDS=${SUBNET_IDS:-}
+SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
+
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
+else
+    DEFAULT_IMAGE_TAG=$(date +%Y%m%d%H%M%S)
+fi
+IMAGE_TAG=${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}
 
 # Color codes for output
 RED='\033[0;31m'
@@ -37,14 +77,19 @@ log_error() {
 # Check prerequisites
 check_prerequisites() {
     log_info "Checking prerequisites..."
-    
-    if ! command -v aws &> /dev/null; then
+
+    if ! command -v aws >/dev/null 2>&1; then
         log_error "AWS CLI not found. Please install: https://aws.amazon.com/cli/"
         exit 1
     fi
-    
-    if ! command -v docker &> /dev/null; then
+
+    if ! command -v docker >/dev/null 2>&1; then
         log_error "Docker not found. Please install: https://www.docker.com/"
+        exit 1
+    fi
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 not found (required for task definition patching)"
         exit 1
     fi
 
@@ -65,6 +110,8 @@ check_prerequisites() {
     log_info "  AWS Account: $AWS_ACCOUNT_ID"
     log_info "  Region:      $AWS_REGION"
     log_info "  S3 Bucket:   $S3_BUCKET"
+    log_info "  S3 Prefix:   $S3_PREFIX"
+    log_info "  Image Tag:   $IMAGE_TAG"
     if [ -n "${EFS_ID:-}" ]; then
         log_info "  EFS ID:      $EFS_ID"
     else
@@ -74,16 +121,16 @@ check_prerequisites() {
 
 # Create ECR repositories if they don't exist
 create_ecr_repos() {
-    log_info "Creating ECR repositories..."
-    
+    log_info "Ensuring ECR repositories..."
+
     for repo in vieweratlas-collector vieweratlas-analysis vieweratlas-vod; do
-        if ! aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" &> /dev/null; then
+        if ! aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1; then
             log_info "Creating repository: $repo"
             aws ecr create-repository \
                 --repository-name "$repo" \
                 --region "$AWS_REGION" \
                 --image-scanning-configuration scanOnPush=true \
-                --encryption-configuration encryptionType=AES256
+                --encryption-configuration encryptionType=AES256 >/dev/null
         else
             log_info "Repository already exists: $repo"
         fi
@@ -94,44 +141,157 @@ create_ecr_repos() {
 ecr_login() {
     log_info "Logging into ECR..."
     aws ecr get-login-password --region "$AWS_REGION" | \
-        docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+        docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com" >/dev/null
 }
 
 # Build and push Docker images
 build_and_push() {
     local service=$1
     local dockerfile=$2
-    local image_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/vieweratlas-$service:latest"
-    
+    local image_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/vieweratlas-$service:$IMAGE_TAG"
+    local latest_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/vieweratlas-$service:latest"
+
     log_info "Building $service image..."
-    docker build -t "vieweratlas-$service:latest" -f "../docker/$dockerfile" ../..
-    
+    docker build -t "vieweratlas-$service:$IMAGE_TAG" -f "../docker/$dockerfile" ../..
+
     log_info "Tagging $service image..."
-    docker tag "vieweratlas-$service:latest" "$image_uri"
-    
+    docker tag "vieweratlas-$service:$IMAGE_TAG" "$image_uri"
+    docker tag "vieweratlas-$service:$IMAGE_TAG" "$latest_uri"
+
     log_info "Pushing $service image to ECR..."
     docker push "$image_uri"
-    
+    docker push "$latest_uri"
+
     log_info "$service image pushed: $image_uri"
+}
+
+ensure_iam_roles() {
+    log_info "Ensuring IAM roles and policies..."
+
+    local trust_file s3_policy_file secrets_policy_file
+    trust_file=$(mktemp)
+    s3_policy_file=$(mktemp)
+    secrets_policy_file=$(mktemp)
+
+    cat > "$trust_file" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {"Service": "ecs-tasks.amazonaws.com"},
+      "Action": "sts:AssumeRole"
+    }
+  ]
+}
+JSON
+
+    local s3_object_arn="arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX%/}/*"
+    cat > "$s3_policy_file" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": ["${s3_object_arn}"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::${S3_BUCKET}"],
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["${S3_PREFIX%/}/*"]
+        }
+      }
+    }
+  ]
+}
+JSON
+
+    cat > "$secrets_policy_file" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue"],
+      "Resource": [
+        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token*",
+        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id*"
+      ]
+    }
+  ]
+}
+JSON
+
+    ensure_task_role() {
+        local role_name=$1
+        if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+            log_info "Creating IAM role: $role_name"
+            aws iam create-role --role-name "$role_name" --assume-role-policy-document "file://$trust_file" >/dev/null
+        else
+            log_info "IAM role exists: $role_name"
+        fi
+        aws iam put-role-policy \
+            --role-name "$role_name" \
+            --policy-name ViewerAtlasS3Access \
+            --policy-document "file://$s3_policy_file" >/dev/null
+    }
+
+    ensure_execution_role() {
+        local role_name=$1
+        local include_secrets=$2
+        if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+            log_info "Creating IAM role: $role_name"
+            aws iam create-role --role-name "$role_name" --assume-role-policy-document "file://$trust_file" >/dev/null
+        else
+            log_info "IAM role exists: $role_name"
+        fi
+
+        aws iam attach-role-policy \
+            --role-name "$role_name" \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy >/dev/null
+
+        if [ "$include_secrets" = "yes" ]; then
+            aws iam put-role-policy \
+                --role-name "$role_name" \
+                --policy-name ViewerAtlasSecretsAccess \
+                --policy-document "file://$secrets_policy_file" >/dev/null
+        fi
+    }
+
+    ensure_task_role "vieweratlas-collector-task-role"
+    ensure_task_role "vieweratlas-analysis-task-role"
+    ensure_task_role "vieweratlas-vod-collector-task-role"
+
+    ensure_execution_role "vieweratlas-collector-execution-role" "yes"
+    ensure_execution_role "vieweratlas-analysis-execution-role" "no"
+    ensure_execution_role "vieweratlas-vod-collector-execution-role" "yes"
+
+    rm -f "$trust_file" "$s3_policy_file" "$secrets_policy_file"
 }
 
 # Register ECS task definitions
 register_task_definitions() {
     log_info "Registering ECS task definitions..."
-    
+
     for task in collector analysis vod-collector; do
         local task_def_file="ecs-task-$task.json"
-        
+
         if [ ! -f "$task_def_file" ]; then
             log_warn "Task definition file not found: $task_def_file"
             continue
         fi
-        
-        # Replace placeholders in task definition
-        local temp_file=$(mktemp)
+
+        local temp_file
+        temp_file=$(mktemp)
         sed -e "s/\${AWS_ACCOUNT_ID}/$AWS_ACCOUNT_ID/g" \
             -e "s/\${AWS_REGION}/$AWS_REGION/g" \
             -e "s/\${S3_BUCKET}/$S3_BUCKET/g" \
+            -e "s#\${S3_PREFIX}#${S3_PREFIX}#g" \
+            -e "s/\${IMAGE_TAG}/$IMAGE_TAG/g" \
             "$task_def_file" > "$temp_file"
 
         # Handle optional EFS_ID: replace if set, otherwise strip volumes/mountPoints
@@ -139,9 +299,8 @@ register_task_definitions() {
             sed -i.bak "s/\${EFS_ID}/$EFS_ID/g" "$temp_file"
             rm -f "$temp_file.bak"
         else
-            # Remove EFS volume and mountPoint blocks so the task registers without EFS
             python3 -c "
-import json, sys
+import json
 with open('$temp_file') as f:
     td = json.load(f)
 td.pop('volumes', None)
@@ -149,69 +308,121 @@ for container in td.get('containerDefinitions', []):
     container.pop('mountPoints', None)
 with open('$temp_file', 'w') as f:
     json.dump(td, f, indent=2)
-" 2>/dev/null || log_warn "Could not strip EFS sections from $task_def_file (python3 not found)"
+" >/dev/null
         fi
-        
+
         log_info "Registering task definition: vieweratlas-$task"
         aws ecs register-task-definition \
             --cli-input-json "file://$temp_file" \
-            --region "$AWS_REGION"
-        
-        rm "$temp_file"
+            --region "$AWS_REGION" >/dev/null
+
+        rm -f "$temp_file"
     done
 }
 
-# Update ECS services
-update_services() {
-    local cluster=${ECS_CLUSTER:-vieweratlas-cluster}
-    
-    log_info "Updating ECS services in cluster: $cluster"
-    
+ensure_cluster() {
+    if aws ecs describe-clusters --clusters "$ECS_CLUSTER" --region "$AWS_REGION" --query 'clusters[0].status' --output text 2>/dev/null | grep -q "ACTIVE"; then
+        log_info "ECS cluster exists: $ECS_CLUSTER"
+    else
+        log_info "Creating ECS cluster: $ECS_CLUSTER"
+        aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" >/dev/null
+    fi
+}
+
+network_config_arg() {
+    local subnets_csv=$1
+    local security_group=$2
+    local assign_public_ip=$3
+    echo "awsvpcConfiguration={subnets=[${subnets_csv}],securityGroups=[${security_group}],assignPublicIp=${assign_public_ip}}"
+}
+
+upsert_services() {
+    log_info "Ensuring ECS services in cluster: $ECS_CLUSTER"
+
+    ensure_cluster
+
     for service in collector analysis vod-collector; do
-        if aws ecs describe-services --cluster "$cluster" --services "vieweratlas-$service" --region "$AWS_REGION" | grep -q "vieweratlas-$service"; then
-            log_info "Updating service: vieweratlas-$service"
+        local full_service_name="vieweratlas-$service"
+        local desired_count="0"
+        case "$service" in
+            collector)
+                desired_count=${COLLECTOR_DESIRED_COUNT:-1}
+                ;;
+            analysis)
+                desired_count=${ANALYSIS_DESIRED_COUNT:-0}
+                ;;
+            vod-collector)
+                desired_count=${VOD_COLLECTOR_DESIRED_COUNT:-0}
+                ;;
+        esac
+
+        local task_def_arn
+        task_def_arn=$(aws ecs describe-task-definition \
+            --task-definition "$full_service_name" \
+            --region "$AWS_REGION" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+        local status
+        status=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$full_service_name" \
+            --region "$AWS_REGION" \
+            --query 'services[0].status' \
+            --output text 2>/dev/null || echo "MISSING")
+
+        if [ "$status" = "ACTIVE" ]; then
+            log_info "Updating service: $full_service_name"
             aws ecs update-service \
-                --cluster "$cluster" \
-                --service "vieweratlas-$service" \
+                --cluster "$ECS_CLUSTER" \
+                --service "$full_service_name" \
+                --task-definition "$task_def_arn" \
                 --force-new-deployment \
-                --region "$AWS_REGION"
-        else
-            log_warn "Service not found: vieweratlas-$service (skipping update)"
+                --region "$AWS_REGION" >/dev/null
+            continue
         fi
+
+        if [ -z "$SUBNET_IDS" ] || [ -z "$SECURITY_GROUP_ID" ]; then
+            log_warn "Skipping create for $full_service_name (set SUBNET_IDS and SECURITY_GROUP_ID for first-time service creation)"
+            continue
+        fi
+
+        log_info "Creating service: $full_service_name"
+        aws ecs create-service \
+            --cluster "$ECS_CLUSTER" \
+            --service-name "$full_service_name" \
+            --task-definition "$task_def_arn" \
+            --desired-count "$desired_count" \
+            --launch-type FARGATE \
+            --network-configuration "$(network_config_arg "$SUBNET_IDS" "$SECURITY_GROUP_ID" "$ASSIGN_PUBLIC_IP")" \
+            --region "$AWS_REGION" >/dev/null
     done
 }
 
 # Main execution
 main() {
     log_info "Starting ViewerAtlas deployment to AWS ECS"
-    
+
     check_prerequisites
-    
-    log_info ""
+
     create_ecr_repos
     ecr_login
-    
+
     build_and_push "collector" "Dockerfile.collector"
     build_and_push "analysis" "Dockerfile.analysis"
     build_and_push "vod" "Dockerfile.vod"
-    
+
+    ensure_iam_roles
     register_task_definitions
-    
-    if [ -n "$ECS_CLUSTER" ]; then
-        update_services
-    else
-        log_warn "ECS_CLUSTER not set, skipping service updates"
-        log_info "To update services, run: ECS_CLUSTER=your-cluster ./deploy.sh"
-    fi
-    
+    upsert_services
+
+    log_info "Deployment completed successfully"
     log_info ""
-    log_info "Deployment completed successfully!"
+    log_info "Secrets required in AWS Secrets Manager:"
+    log_info "  vieweratlas/twitch/oauth_token"
+    log_info "  vieweratlas/twitch/client_id"
     log_info ""
-    log_info "Reminder: Twitch credentials must be stored in Secrets Manager:"
-    log_info "  aws secretsmanager create-secret --name vieweratlas/twitch/oauth_token \\"
-    log_info "      --secret-string 'your-oauth-token' --region $AWS_REGION"
-    log_info "  aws secretsmanager create-secret --name vieweratlas/twitch/client_id \\"
-    log_info "      --secret-string 'your-client-id' --region $AWS_REGION"
+    log_info "Deployed image tag: $IMAGE_TAG"
 }
 
 main "$@"

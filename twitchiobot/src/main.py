@@ -139,19 +139,13 @@ class PipelineRunner:
                 return False
             self.logger.info("✓ OAuth token found")
         
-        if mode in ['analyze', 'continuous']:
-            logs_path = Path(self.config.analysis.logs_dir)
-            if not logs_path.exists():
-                self.logger.error(f"❌ Logs directory {logs_path} does not exist")
+        if mode == 'analyze':
+            if not self._validate_analysis_inputs():
                 return False
-            
-            json_files = list(logs_path.glob("*.json"))
-            csv_files = list(logs_path.glob("*.csv"))
-            if not json_files and not csv_files:
-                self.logger.error(f"❌ No data found in {logs_path}")
+        elif mode == 'continuous':
+            # Continuous mode can bootstrap from empty datasets and collect first.
+            if not self._validate_analysis_inputs(require_data=False):
                 return False
-            
-            self.logger.info(f"✓ Found {len(json_files)} JSON and {len(csv_files)} CSV files")
         
         # Check for required libraries
         try:
@@ -162,6 +156,69 @@ class PipelineRunner:
             self.logger.info("   Install with: pip install python-louvain")
         
         self.logger.info("Prerequisites validation complete ✓\n")
+        return True
+
+    def _validate_analysis_inputs(self, require_data: bool = True) -> bool:
+        """
+        Validate that analysis inputs are accessible for the configured storage backend.
+
+        Args:
+            require_data: If True, fail when no input data is found.
+                         If False, log warnings and continue.
+        """
+        if self.config.storage_type == "s3":
+            snapshot_keys = self.storage.list_files(prefix="raw/snapshots", suffix=".json")
+            vod_json_keys = self.storage.list_files(
+                prefix="curated/presence_snapshots/source=vod",
+                suffix=".json"
+            )
+            vod_parquet_keys = self.storage.list_files(
+                prefix="curated/presence_snapshots/source=vod",
+                suffix=".parquet"
+            )
+            total_inputs = len(snapshot_keys) + len(vod_json_keys) + len(vod_parquet_keys)
+
+            if total_inputs == 0:
+                msg = (
+                    "No analysis input data found in S3 prefixes "
+                    "'raw/snapshots' or 'curated/presence_snapshots/source=vod'"
+                )
+                if require_data:
+                    self.logger.error(f"❌ {msg}")
+                    return False
+                self.logger.warning(f"⚠ {msg}. Continuous mode will collect before analysis.")
+                return True
+
+            self.logger.info(
+                "✓ Found S3 analysis inputs: %d live snapshots, %d VOD JSON, %d VOD parquet",
+                len(snapshot_keys), len(vod_json_keys), len(vod_parquet_keys)
+            )
+            return True
+
+        logs_path = Path(self.config.analysis.logs_dir)
+        if not logs_path.exists():
+            if require_data:
+                self.logger.error(f"❌ Logs directory {logs_path} does not exist")
+                return False
+            self.logger.warning(
+                "⚠ Logs directory %s does not exist yet. Continuous mode will collect first.",
+                logs_path
+            )
+            return True
+
+        json_files = list(logs_path.glob("*.json"))
+        csv_files = list(logs_path.glob("*.csv"))
+        if not json_files and not csv_files:
+            if require_data:
+                self.logger.error(f"❌ No data found in {logs_path}")
+                return False
+            self.logger.warning(
+                "⚠ No existing local data found in %s. Continuous mode will collect first.",
+                logs_path
+            )
+            return True
+
+        self.logger.info(f"✓ Found {len(json_files)} JSON and {len(csv_files)} CSV files")
         return True
     
     async def run_collection_cycle(self):

@@ -60,7 +60,7 @@ vod:
 # Logging
 # ============================================
 log_level: "INFO"
-log_format: "% (asctime)s - %(name)s - %(levelname)s - %(message)s"
+log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # Notes:
 # - Switch storage_type to "s3" and set s3_bucket/prefix/region before cloud deploy

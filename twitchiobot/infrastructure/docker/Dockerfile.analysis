@@ -18,7 +18,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application code
 COPY src/*.py ./
-COPY channels.txt ./
 
 # Create output directory
 RUN mkdir -p /app/community_analysis

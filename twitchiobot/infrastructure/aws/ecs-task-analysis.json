@@ -10,7 +10,7 @@
   "containerDefinitions": [
     {
       "name": "analysis",
-      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-analysis:latest",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-analysis:${IMAGE_TAG}",
       "essential": true,
       "command": ["python", "-u", "main.py", "analyze", "rigorous"],
       "logConfiguration": {
@@ -32,7 +32,7 @@
         },
         {
           "name": "S3_PREFIX",
-          "value": "vieweratlas/"
+          "value": "${S3_PREFIX}"
         },
         {
           "name": "S3_REGION",

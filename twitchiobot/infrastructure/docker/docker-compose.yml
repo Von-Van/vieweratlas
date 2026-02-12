@@ -18,9 +18,9 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
       - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
       - LOG_LEVEL=INFO
+      - CHANNELS_FILE=/app/channels.txt
     volumes:
       - ../../logs:/app/logs
-      - ../../channels.txt:/app/channels.txt
     restart: unless-stopped
     networks:
       - vieweratlas
@@ -69,10 +69,10 @@ services:
       - LOG_LEVEL=INFO
       - VOD_RAW_DIR=/app/vod_raw
       - TWITCH_DOWNLOADER_CLI=/usr/local/bin/TwitchDownloaderCLI
+      - CHANNELS_FILE=/app/channels.txt
     volumes:
       - ../../vod_raw:/app/vod_raw
       - ../../logs:/app/logs
-      - ../../channels.txt:/app/channels.txt
       - ../../config/config.yaml:/app/config.yaml
       - ../../vod_queue.json:/app/vod_queue.json
     restart: unless-stopped

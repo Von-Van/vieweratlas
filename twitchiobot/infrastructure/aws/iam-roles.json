@@ -1,9 +1,9 @@
 {
-  "comment": "IAM Roles for ViewerAtlas ECS Tasks",
+  "comment": "IAM roles for ViewerAtlas ECS tasks",
   "roles": {
-    "vod_collector_task_role": {
-      "name": "vieweratlas-vod-collector-task-role",
-      "description": "IAM role for VOD collector ECS tasks to access AWS services",
+    "collector_task_role": {
+      "name": "vieweratlas-collector-task-role",
+      "description": "Runtime role for collector ECS tasks",
       "assume_role_policy": {
         "Version": "2012-10-17",
         "Statement": [
@@ -25,26 +25,182 @@
               "Action": [
                 "s3:PutObject",
                 "s3:GetObject",
-                "s3:ListBucket",
                 "s3:DeleteObject"
               ],
               "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}/vieweratlas/*",
-                "arn:aws:s3:::${S3_BUCKET}"
+                "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
               ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::${S3_BUCKET}"
+              ],
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": [
+                    "${S3_PREFIX}*"
+                  ]
+                }
+              }
             }
           ]
-        },
-        "CloudWatchLogs": {
+        }
+      }
+    },
+    "collector_execution_role": {
+      "name": "vieweratlas-collector-execution-role",
+      "description": "Execution role for collector ECS tasks",
+      "assume_role_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ecs-tasks.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "managed_policies": [
+        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      ],
+      "inline_policies": {
+        "SecretsManagerAccess": {
           "Version": "2012-10-17",
           "Statement": [
             {
               "Effect": "Allow",
               "Action": [
-                "logs:CreateLogStream",
-                "logs:PutLogEvents"
+                "secretsmanager:GetSecretValue"
               ],
-              "Resource": "arn:aws:logs:${AWS_REGION}:${AWS_ACCOUNT_ID}:log-group:/ecs/vieweratlas-vod-collector:*"
+              "Resource": [
+                "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token*",
+                "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id*"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "analysis_task_role": {
+      "name": "vieweratlas-analysis-task-role",
+      "description": "Runtime role for analysis ECS tasks",
+      "assume_role_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ecs-tasks.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "inline_policies": {
+        "S3Access": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::${S3_BUCKET}"
+              ],
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": [
+                    "${S3_PREFIX}*"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "analysis_execution_role": {
+      "name": "vieweratlas-analysis-execution-role",
+      "description": "Execution role for analysis ECS tasks",
+      "assume_role_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ecs-tasks.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "managed_policies": [
+        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+      ]
+    },
+    "vod_collector_task_role": {
+      "name": "vieweratlas-vod-collector-task-role",
+      "description": "Runtime role for VOD collector ECS tasks",
+      "assume_role_policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ecs-tasks.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      },
+      "inline_policies": {
+        "S3Access": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:DeleteObject"
+              ],
+              "Resource": [
+                "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
+              ]
+            },
+            {
+              "Effect": "Allow",
+              "Action": [
+                "s3:ListBucket"
+              ],
+              "Resource": [
+                "arn:aws:s3:::${S3_BUCKET}"
+              ],
+              "Condition": {
+                "StringLike": {
+                  "s3:prefix": [
+                    "${S3_PREFIX}*"
+                  ]
+                }
+              }
             }
           ]
         }
@@ -52,7 +208,7 @@
     },
     "vod_collector_execution_role": {
       "name": "vieweratlas-vod-collector-execution-role",
-      "description": "IAM role for ECS task execution (pull images, get secrets)",
+      "description": "Execution role for VOD collector ECS tasks",
       "assume_role_policy": {
         "Version": "2012-10-17",
         "Statement": [
@@ -86,17 +242,5 @@
         }
       }
     }
-  },
-  "terraform_example": "See terraform/iam.tf for Terraform configuration",
-  "cli_creation_commands": [
-    "# Create task role",
-    "aws iam create-role --role-name vieweratlas-vod-collector-task-role --assume-role-policy-document file://task-role-assume-policy.json",
-    "aws iam put-role-policy --role-name vieweratlas-vod-collector-task-role --policy-name S3Access --policy-document file://task-role-s3-policy.json",
-    "aws iam put-role-policy --role-name vieweratlas-vod-collector-task-role --policy-name CloudWatchLogs --policy-document file://task-role-logs-policy.json",
-    "",
-    "# Create execution role",
-    "aws iam create-role --role-name vieweratlas-vod-collector-execution-role --assume-role-policy-document file://execution-role-assume-policy.json",
-    "aws iam attach-role-policy --role-name vieweratlas-vod-collector-execution-role --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
-    "aws iam put-role-policy --role-name vieweratlas-vod-collector-execution-role --policy-name SecretsManagerAccess --policy-document file://execution-role-secrets-policy.json"
-  ]
+  }
 }
