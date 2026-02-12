@@ -1,0 +1,179 @@
+name: Security
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  dependency-and-static-security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies and scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r twitchiobot/src/requirements.txt
+          pip install pip-audit bandit cvss
+
+      - name: Run pip-audit
+        run: |
+          pip-audit -r twitchiobot/src/requirements.txt --format json --output pip-audit.json || true
+
+      - name: Enforce pip-audit high/critical policy
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          from cvss import CVSS2, CVSS3
+
+          with open("pip-audit.json", "r", encoding="utf-8") as file_handle:
+              report = json.load(file_handle)
+
+          def rank_from_label(label: str | None) -> int:
+              if not label:
+                  return 0
+              upper = label.upper()
+              if upper == "CRITICAL":
+                  return 4
+              if upper == "HIGH":
+                  return 3
+              if upper == "MEDIUM":
+                  return 2
+              if upper == "LOW":
+                  return 1
+              return 0
+
+          def rank_from_cvss(score: float) -> int:
+              if score >= 9.0:
+                  return 4
+              if score >= 7.0:
+                  return 3
+              if score >= 4.0:
+                  return 2
+              if score > 0:
+                  return 1
+              return 0
+
+          def parse_cvss_score(raw_score: str) -> float | None:
+              if not raw_score:
+                  return None
+              raw_score = raw_score.strip()
+              try:
+                  return float(raw_score)
+              except ValueError:
+                  pass
+
+              try:
+                  if raw_score.startswith("CVSS:3"):
+                      return float(CVSS3(raw_score).scores()[0])
+                  if raw_score.startswith("AV:"):
+                      return float(CVSS2(raw_score).scores()[0])
+              except Exception:
+                  return None
+              return None
+
+          def fetch_osv(vuln_id: str) -> dict | None:
+              url = f"https://api.osv.dev/v1/vulns/{urllib.parse.quote(vuln_id)}"
+              req = urllib.request.Request(url, method="GET")
+              try:
+                  with urllib.request.urlopen(req, timeout=10) as response:
+                      return json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      return None
+                  raise
+
+          failing = []
+          unresolved = []
+
+          for dep in report.get("dependencies", []):
+              dep_name = dep.get("name")
+              dep_version = dep.get("version")
+              for vuln in dep.get("vulns", []):
+                  vuln_id = vuln.get("id")
+                  aliases = vuln.get("aliases", [])
+                  candidate_ids = [item for item in [vuln_id, *aliases] if item]
+
+                  highest_rank = rank_from_label(vuln.get("severity"))
+                  chosen_source = "pip-audit"
+
+                  payload = None
+                  for candidate in candidate_ids:
+                      payload = fetch_osv(candidate)
+                      if payload is not None:
+                          chosen_source = f"osv:{candidate}"
+                          break
+
+                  if payload is not None:
+                      highest_rank = max(
+                          highest_rank,
+                          rank_from_label(payload.get("database_specific", {}).get("severity")),
+                      )
+                      for entry in payload.get("severity", []):
+                          score = parse_cvss_score(entry.get("score", ""))
+                          if score is not None:
+                              highest_rank = max(highest_rank, rank_from_cvss(score))
+
+                  if highest_rank >= 3:
+                      failing.append((dep_name, dep_version, vuln_id, chosen_source, highest_rank))
+                  elif highest_rank == 0:
+                      unresolved.append((dep_name, dep_version, vuln_id, chosen_source))
+
+          if failing:
+              print("High/Critical dependency vulnerabilities detected:")
+              for dep_name, dep_version, vuln_id, source, rank in failing:
+                  label = "CRITICAL" if rank == 4 else "HIGH"
+                  print(f"- {dep_name}=={dep_version}: {vuln_id} [{label}] ({source})")
+              raise SystemExit(1)
+
+          if unresolved:
+              print("Could not determine severity for some vulnerabilities; failing closed:")
+              for dep_name, dep_version, vuln_id, source in unresolved:
+                  print(f"- {dep_name}=={dep_version}: {vuln_id} ({source})")
+              raise SystemExit(1)
+
+          print("pip-audit policy check passed (no high/critical vulnerabilities).")
+          PY
+
+      - name: Run bandit
+        run: |
+          bandit -r twitchiobot/src -f json -o bandit.json || true
+
+      - name: Enforce bandit high/critical policy
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("bandit.json", "r", encoding="utf-8") as file_handle:
+              report = json.load(file_handle)
+
+          findings = [
+              item
+              for item in report.get("results", [])
+              if item.get("issue_severity", "").upper() in {"HIGH", "CRITICAL"}
+          ]
+
+          if findings:
+              print("Bandit high/critical findings detected:")
+              for finding in findings:
+                  print(
+                      f"- {finding.get('filename')}:{finding.get('line_number')} "
+                      f"{finding.get('test_id')} {finding.get('issue_text')}"
+                  )
+              raise SystemExit(1)
+
+          print("Bandit policy check passed (no high/critical findings).")
+          PY

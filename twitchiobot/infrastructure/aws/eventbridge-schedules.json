@@ -1,100 +1,33 @@
 {
-  "comment": "EventBridge schedule for VOD collector periodic execution",
+  "comment": "Reference template only. create-schedules.sh is the source of truth for ViewerAtlas EventBridge schedules.",
   "schedules": [
     {
-      "name": "vieweratlas-vod-daily",
-      "description": "Run VOD collector daily at 2 AM UTC",
-      "schedule_expression": "cron(0 2 * * ? *)",
+      "name": "vieweratlas-analysis-daily",
+      "description": "Run analysis pipeline daily at 03:00 UTC",
+      "schedule_expression": "cron(0 3 * * ? *)",
       "target": {
-        "arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/vieweratlas-cluster",
+        "cluster_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}",
         "role_arn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-eventbridge-ecs-role",
-        "ecs_parameters": {
-          "task_definition_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-vod-collector",
-          "launch_type": "FARGATE",
-          "network_configuration": {
-            "awsvpc_configuration": {
-              "subnets": ["subnet-xxxxx", "subnet-yyyyy"],
-              "security_groups": ["sg-xxxxx"],
-              "assign_public_ip": "ENABLED"
-            }
-          },
-          "platform_version": "LATEST"
-        }
+        "task_definition_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-analysis"
       }
     },
     {
-      "name": "vieweratlas-vod-hourly",
+      "name": "vieweratlas-vod-6h",
       "description": "Run VOD collector every 6 hours",
       "schedule_expression": "rate(6 hours)",
       "target": {
-        "arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/vieweratlas-cluster",
+        "cluster_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}",
         "role_arn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-eventbridge-ecs-role",
-        "ecs_parameters": {
-          "task_definition_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-vod-collector",
-          "launch_type": "FARGATE",
-          "network_configuration": {
-            "awsvpc_configuration": {
-              "subnets": ["subnet-xxxxx", "subnet-yyyyy"],
-              "security_groups": ["sg-xxxxx"],
-              "assign_public_ip": "ENABLED"
-            }
-          },
-          "platform_version": "LATEST"
-        }
+        "task_definition_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-vod-collector"
       }
     }
   ],
-  "eventbridge_role": {
-    "name": "vieweratlas-eventbridge-ecs-role",
-    "assume_role_policy": {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Principal": {
-            "Service": "events.amazonaws.com"
-          },
-          "Action": "sts:AssumeRole"
-        }
-      ]
-    },
-    "inline_policy": {
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Effect": "Allow",
-          "Action": [
-            "ecs:RunTask"
-          ],
-          "Resource": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-vod-collector:*",
-          "Condition": {
-            "ArnLike": {
-              "ecs:cluster": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/vieweratlas-cluster"
-            }
-          }
-        },
-        {
-          "Effect": "Allow",
-          "Action": "iam:PassRole",
-          "Resource": [
-            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-vod-collector-task-role",
-            "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-vod-collector-execution-role"
-          ]
-        }
-      ]
-    }
-  },
-  "cli_creation_commands": [
-    "# Create EventBridge role",
-    "aws iam create-role --role-name vieweratlas-eventbridge-ecs-role --assume-role-policy-document file://eventbridge-assume-policy.json",
-    "aws iam put-role-policy --role-name vieweratlas-eventbridge-ecs-role --policy-name ECSRunTask --policy-document file://eventbridge-ecs-policy.json",
-    "",
-    "# Create daily schedule",
-    "aws events put-rule --name vieweratlas-vod-daily --schedule-expression 'cron(0 2 * * ? *)' --description 'Run VOD collector daily at 2 AM UTC'",
-    "aws events put-targets --rule vieweratlas-vod-daily --targets file://eventbridge-daily-target.json",
-    "",
-    "# Or create 6-hour schedule",
-    "aws events put-rule --name vieweratlas-vod-hourly --schedule-expression 'rate(6 hours)' --description 'Run VOD collector every 6 hours'",
-    "aws events put-targets --rule vieweratlas-vod-hourly --targets file://eventbridge-hourly-target.json"
+  "required_inputs": [
+    "AWS_REGION",
+    "AWS_ACCOUNT_ID",
+    "ECS_CLUSTER",
+    "SUBNET_IDS",
+    "SECURITY_GROUP_ID",
+    "ASSIGN_PUBLIC_IP"
   ]
 }

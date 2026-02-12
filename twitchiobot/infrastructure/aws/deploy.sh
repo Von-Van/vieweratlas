@@ -48,6 +48,7 @@ ECS_CLUSTER=${ECS_CLUSTER:-vieweratlas-cluster}
 ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
+PUSH_LATEST=${PUSH_LATEST:-false}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
@@ -112,10 +113,11 @@ check_prerequisites() {
     log_info "  S3 Bucket:   $S3_BUCKET"
     log_info "  S3 Prefix:   $S3_PREFIX"
     log_info "  Image Tag:   $IMAGE_TAG"
+    log_info "  Push latest: $PUSH_LATEST"
     if [ -n "${EFS_ID:-}" ]; then
         log_info "  EFS ID:      $EFS_ID"
     else
-        log_warn "  EFS_ID not set — EFS volume mounts will be skipped in task definitions"
+        log_warn "  EFS_ID not set — EFS volume mounts will be stripped from task definitions (VOD queue will be task-local/ephemeral)"
     fi
 }
 
@@ -156,11 +158,15 @@ build_and_push() {
 
     log_info "Tagging $service image..."
     docker tag "vieweratlas-$service:$IMAGE_TAG" "$image_uri"
-    docker tag "vieweratlas-$service:$IMAGE_TAG" "$latest_uri"
+    if [ "$PUSH_LATEST" = "true" ]; then
+        docker tag "vieweratlas-$service:$IMAGE_TAG" "$latest_uri"
+    fi
 
     log_info "Pushing $service image to ECR..."
     docker push "$image_uri"
-    docker push "$latest_uri"
+    if [ "$PUSH_LATEST" = "true" ]; then
+        docker push "$latest_uri"
+    fi
 
     log_info "$service image pushed: $image_uri"
 }

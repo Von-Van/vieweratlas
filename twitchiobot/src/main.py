@@ -134,10 +134,14 @@ class PipelineRunner:
         
         if mode in ['collect', 'continuous']:
             oauth_token = os.getenv("TWITCH_OAUTH_TOKEN")
+            client_id = os.getenv("TWITCH_CLIENT_ID")
             if not oauth_token:
-                self.logger.error("❌ TWITCH_OAUTH_TOKEN not set in .env")
+                self.logger.error("❌ TWITCH_OAUTH_TOKEN not set in environment")
                 return False
-            self.logger.info("✓ OAuth token found")
+            if not client_id:
+                self.logger.error("❌ TWITCH_CLIENT_ID not set in environment")
+                return False
+            self.logger.info("✓ Twitch OAuth token and client ID found")
         
         if mode == 'analyze':
             if not self._validate_analysis_inputs():
@@ -232,8 +236,7 @@ class PipelineRunner:
         all_channels = load_channels()
         
         if not all_channels:
-            self.logger.error("No channels loaded")
-            return
+            raise RuntimeError("Channel discovery returned zero channels; aborting collection cycle")
         
         self.logger.info(f"Found {len(all_channels)} channels to monitor")
         
