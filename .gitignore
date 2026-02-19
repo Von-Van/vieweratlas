@@ -39,3 +39,6 @@ twitchiobot/vod_raw/
 twitchiobot/vod_queue.json
 twitchiobot/channels.txt
 twitchiobot/chatters_log.csv
+twitchiobot/docs/AWS_DEPLOYMENT_GUIDE.md
+twitchiobot/docs/deployment-checklist.md
+
