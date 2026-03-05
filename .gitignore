@@ -41,4 +41,6 @@ twitchiobot/channels.txt
 twitchiobot/chatters_log.csv
 twitchiobot/docs/AWS_DEPLOYMENT_GUIDE.md
 twitchiobot/docs/deployment-checklist.md
+twitchiobot/docs/DAILY_OPERATIONS.md
+twitchiobot/docs/DEVELOPMENT_COMPLETION_PLAN.md
 

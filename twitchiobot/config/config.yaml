@@ -33,6 +33,7 @@ analysis:
   logs_dir: "logs"
   output_dir: "community_analysis"
   overlap_threshold: 10         # Drop very weak overlaps
+  weighting_mode: "shared_count"  # Edge weight formula: 'shared_count' (shared viewer count, default)
   min_community_size: 3
   resolution: 1.2
   analysis_interval_cycles: 24  # Run analysis daily if continuous mode

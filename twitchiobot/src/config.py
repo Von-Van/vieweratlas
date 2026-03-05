@@ -73,6 +73,7 @@ class AnalysisConfig:
     
     # Graph building
     overlap_threshold: int = 1  # Minimum shared viewers for an edge (TwitchAtlas used 300)
+    weighting_mode: str = "shared_count"  # Edge weight formula: 'shared_count' (shared viewer intersection)
     include_isolated_nodes: bool = True  # Include channels with no overlaps
     
     # Community detection
@@ -98,6 +99,9 @@ class AnalysisConfig:
         """Validate configuration."""
         if self.overlap_threshold < 0:
             raise ValueError("overlap_threshold cannot be negative")
+        valid_weighting_modes = {"shared_count"}
+        if self.weighting_mode not in valid_weighting_modes:
+            raise ValueError(f"weighting_mode must be one of {valid_weighting_modes}")
         if self.resolution <= 0:
             raise ValueError("resolution must be positive")
         if self.min_community_size < 1:
@@ -358,6 +362,7 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         output_dir=analysis_dict.get("output_dir", "community_analysis"),
         min_channel_viewers=analysis_dict.get("min_channel_viewers", 1),
         overlap_threshold=analysis_dict.get("overlap_threshold", 1),
+        weighting_mode=analysis_dict.get("weighting_mode", "shared_count"),
         resolution=analysis_dict.get("resolution", 1.0),
         min_community_size=analysis_dict.get("min_community_size", 2),
         analysis_interval_cycles=analysis_dict.get("analysis_interval_cycles", 24)
