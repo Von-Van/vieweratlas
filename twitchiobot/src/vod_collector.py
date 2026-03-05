@@ -114,59 +114,82 @@ class VODChatDownloader:
         """
         self.cli_path = cli_path
     
+    # Backoff delays (seconds) between download retry attempts
+    _DOWNLOAD_RETRY_DELAYS = [10, 30, 60]
+
     def download_vod_chat(
-        self, 
-        vod_id: str, 
+        self,
+        vod_id: str,
         output_path: str,
         compression: str = "None"
     ) -> bool:
         """
         Download VOD chat replay to JSON file.
-        
+
+        Retries up to 3 times with 10s/30s/60s backoff on timeout or
+        non-zero exit. FileNotFoundError (CLI missing) is not retried.
+
         Args:
             vod_id: Twitch VOD ID (numeric ID without 'v' prefix)
             output_path: Path to save JSON output
             compression: Compression format ("None", "Gzip")
-            
+
         Returns:
             True if successful, False otherwise
         """
-        try:
-            cmd = [
-                self.cli_path,
-                "chatdownload",
-                "--id", str(vod_id),
-                "--output", output_path,
-                "--compression", compression,
-                "--embed-images", "false",  # Reduce file size
-                "--chat-connections", "4"   # Parallel downloads
-            ]
-            
-            logger.info(f"Downloading VOD {vod_id} chat to {output_path}")
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
-            )
-            
-            if result.returncode == 0:
-                logger.info(f"Successfully downloaded VOD {vod_id} chat")
-                return True
-            else:
-                logger.error(f"TwitchDownloaderCLI failed: {result.stderr}")
-                return False
-                
-        except subprocess.TimeoutExpired:
-            logger.error(f"Timeout downloading VOD {vod_id}")
-            return False
-        except FileNotFoundError:
-            logger.error(f"TwitchDownloaderCLI not found at {self.cli_path}")
-            logger.error("Install from: https://github.com/lay295/TwitchDownloader")
-            return False
-        except Exception as e:
-            logger.error(f"Error downloading VOD {vod_id}: {e}")
-            return False
+        import time
+
+        cmd = [
+            self.cli_path,
+            "chatdownload",
+            "--id", str(vod_id),
+            "--output", output_path,
+            "--compression", compression,
+            "--embed-images", "false",  # Reduce file size
+            "--chat-connections", "4"   # Parallel downloads
+        ]
+
+        max_attempts = len(self._DOWNLOAD_RETRY_DELAYS) + 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                logger.info(f"Downloading VOD {vod_id} chat to {output_path} (attempt {attempt}/{max_attempts})")
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+
+                if result.returncode == 0:
+                    logger.info(f"Successfully downloaded VOD {vod_id} chat")
+                    return True
+
+                logger.error(
+                    f"TwitchDownloaderCLI failed for VOD {vod_id} "
+                    f"(attempt {attempt}/{max_attempts}, exit={result.returncode}): {result.stderr.strip()}"
+                )
+
+            except subprocess.TimeoutExpired:
+                logger.error(f"Timeout downloading VOD {vod_id} (attempt {attempt}/{max_attempts})")
+
+            except FileNotFoundError:
+                logger.error(f"TwitchDownloaderCLI not found at {self.cli_path}")
+                logger.error("Install from: https://github.com/lay295/TwitchDownloader")
+                return False  # Permanent failure — no retry
+
+            except Exception as e:
+                logger.error(f"Unexpected error downloading VOD {vod_id} (attempt {attempt}/{max_attempts}): {e}")
+
+            if attempt < max_attempts:
+                delay = self._DOWNLOAD_RETRY_DELAYS[attempt - 1]
+                logger.info(f"Retrying VOD {vod_id} download in {delay}s...")
+                time.sleep(delay)
+
+        logger.error(
+            f"VOD {vod_id} download failed permanently after {max_attempts} attempts — "
+            f"channel download will be skipped"
+        )
+        return False
 
 
 class VODChatParser:

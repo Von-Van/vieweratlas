@@ -29,8 +29,18 @@ load_env_file() {
 
 load_env_file
 
+# Environment-aware naming (mirrors deploy.sh)
+ENVIRONMENT="${ENVIRONMENT:-prod}"
+if [ "$ENVIRONMENT" = "prod" ]; then
+    SERVICE_PREFIX="vieweratlas"
+    _DEFAULT_CLUSTER="vieweratlas-cluster"
+else
+    SERVICE_PREFIX="vieweratlas-${ENVIRONMENT}"
+    _DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
+fi
+
 AWS_REGION=${AWS_REGION:-}
-ECS_CLUSTER=${ECS_CLUSTER:-}
+ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
 S3_SNAPSHOT_PREFIX=${S3_SNAPSHOT_PREFIX:-${S3_PREFIX%/}/raw/snapshots/}
@@ -65,7 +75,7 @@ cluster_status=$(aws ecs describe-clusters \
 [ "$cluster_status" = "ACTIVE" ] || fail "ECS cluster not ACTIVE: $ECS_CLUSTER (status=${cluster_status:-missing})"
 info "ECS cluster is ACTIVE"
 
-for family in vieweratlas-collector vieweratlas-analysis vieweratlas-vod-collector; do
+for family in "${SERVICE_PREFIX}-collector" "${SERVICE_PREFIX}-analysis" "${SERVICE_PREFIX}-vod-collector"; do
     arn=$(aws ecs describe-task-definition \
         --region "$AWS_REGION" \
         --task-definition "$family" \
@@ -75,7 +85,7 @@ for family in vieweratlas-collector vieweratlas-analysis vieweratlas-vod-collect
     info "Task definition OK: $family"
 done
 
-service_name="vieweratlas-collector"
+service_name="${SERVICE_PREFIX}-collector"
 service_status=$(aws ecs describe-services \
     --region "$AWS_REGION" \
     --cluster "$ECS_CLUSTER" \
@@ -119,7 +129,7 @@ PY
 
 recent_log_count=$(aws logs filter-log-events \
     --region "$AWS_REGION" \
-    --log-group-name "/ecs/vieweratlas-collector" \
+    --log-group-name "/ecs/${SERVICE_PREFIX}-collector" \
     --start-time "$log_start_ms" \
     --query 'length(events)' \
     --output text 2>/dev/null || true)

@@ -40,11 +40,23 @@ load_env_file() {
 
 load_env_file
 
+# Environment-aware naming
+# ENVIRONMENT=staging → cluster/service names get '-staging-' infix
+# ENVIRONMENT=prod (default) → preserves existing 'vieweratlas-*' names
+ENVIRONMENT="${ENVIRONMENT:-prod}"
+if [ "$ENVIRONMENT" = "prod" ]; then
+    SERVICE_PREFIX="vieweratlas"
+    _DEFAULT_CLUSTER="vieweratlas-cluster"
+else
+    SERVICE_PREFIX="vieweratlas-${ENVIRONMENT}"
+    _DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
+fi
+
 # Configuration
 AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
-ECS_CLUSTER=${ECS_CLUSTER:-vieweratlas-cluster}
+ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
 ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
@@ -298,6 +310,8 @@ register_task_definitions() {
             -e "s/\${S3_BUCKET}/$S3_BUCKET/g" \
             -e "s#\${S3_PREFIX}#${S3_PREFIX}#g" \
             -e "s/\${IMAGE_TAG}/$IMAGE_TAG/g" \
+            -e "s/\"family\": \"vieweratlas-$task\"/\"family\": \"${SERVICE_PREFIX}-$task\"/" \
+            -e "s|/ecs/vieweratlas-$task|/ecs/${SERVICE_PREFIX}-$task|" \
             "$task_def_file" > "$temp_file"
 
         # Handle optional EFS_ID: replace if set, otherwise strip volumes/mountPoints
@@ -348,7 +362,7 @@ upsert_services() {
     ensure_cluster
 
     for service in collector analysis vod-collector; do
-        local full_service_name="vieweratlas-$service"
+        local full_service_name="${SERVICE_PREFIX}-$service"
         local desired_count="0"
         case "$service" in
             collector)

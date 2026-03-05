@@ -29,16 +29,26 @@ load_env_file() {
 
 load_env_file
 
+# Environment-aware naming (mirrors deploy.sh)
+ENVIRONMENT="${ENVIRONMENT:-prod}"
+if [ "$ENVIRONMENT" = "prod" ]; then
+    SERVICE_PREFIX="vieweratlas"
+    _DEFAULT_CLUSTER="vieweratlas-cluster"
+else
+    SERVICE_PREFIX="vieweratlas-${ENVIRONMENT}"
+    _DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
+fi
+
 AWS_REGION=${AWS_REGION:-us-east-1}
-ECS_CLUSTER=${ECS_CLUSTER:-vieweratlas-cluster}
+ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
 ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-}
 ANALYSIS_SCHEDULE=${ANALYSIS_SCHEDULE:-cron(0 3 * * ? *)}
 VOD_SCHEDULE=${VOD_SCHEDULE:-rate(6 hours)}
-ANALYSIS_RULE_NAME=${ANALYSIS_RULE_NAME:-vieweratlas-analysis-daily}
-VOD_RULE_NAME=${VOD_RULE_NAME:-vieweratlas-vod-6h}
+ANALYSIS_RULE_NAME=${ANALYSIS_RULE_NAME:-${SERVICE_PREFIX}-analysis-daily}
+VOD_RULE_NAME=${VOD_RULE_NAME:-${SERVICE_PREFIX}-vod-6h}
 EVENTBRIDGE_ROLE_NAME=${EVENTBRIDGE_ROLE_NAME:-vieweratlas-eventbridge-ecs-role}
 
 RED='\033[0;31m'
@@ -73,13 +83,13 @@ CLUSTER_ARN="arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}"
 ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${EVENTBRIDGE_ROLE_NAME}"
 
 ANALYSIS_TASK_ARN=$(aws ecs describe-task-definition \
-    --task-definition vieweratlas-analysis \
+    --task-definition "${SERVICE_PREFIX}-analysis" \
     --region "$AWS_REGION" \
     --query 'taskDefinition.taskDefinitionArn' \
     --output text)
 
 VOD_TASK_ARN=$(aws ecs describe-task-definition \
-    --task-definition vieweratlas-vod-collector \
+    --task-definition "${SERVICE_PREFIX}-vod-collector" \
     --region "$AWS_REGION" \
     --query 'taskDefinition.taskDefinitionArn' \
     --output text)

@@ -60,10 +60,20 @@ read_config_value() {
 
 load_env_file
 
+# Environment-aware naming (mirrors deploy.sh)
+ENVIRONMENT="${ENVIRONMENT:-prod}"
+if [ "$ENVIRONMENT" = "prod" ]; then
+    SERVICE_PREFIX="vieweratlas"
+    _DEFAULT_CLUSTER="vieweratlas-cluster"
+else
+    SERVICE_PREFIX="vieweratlas-${ENVIRONMENT}"
+    _DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
+fi
+
 AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
-ECS_CLUSTER=${ECS_CLUSTER:-vieweratlas-cluster}
+ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
 ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 ALERT_EMAIL=${ALERT_EMAIL:-}
 SUBNET_IDS=${SUBNET_IDS:-}
@@ -241,12 +251,13 @@ aws s3api put-bucket-lifecycle-configuration \
     --bucket "$S3_BUCKET" \
     --lifecycle-configuration file:///tmp/vieweratlas-lifecycle.json >/dev/null
 
-for log_group in "/ecs/vieweratlas-collector" "/ecs/vieweratlas-analysis" "/ecs/vieweratlas-vod-collector"; do
+for log_group in "/ecs/${SERVICE_PREFIX}-collector" "/ecs/${SERVICE_PREFIX}-analysis" "/ecs/${SERVICE_PREFIX}-vod-collector"; do
     aws logs create-log-group --log-group-name "$log_group" >/dev/null 2>&1 || true
     aws logs put-retention-policy --log-group-name "$log_group" --retention-in-days 7 >/dev/null
- done
+done
 
 info "Invoking deploy.sh"
+ENVIRONMENT="$ENVIRONMENT" \
 AWS_REGION="$AWS_REGION" \
 S3_BUCKET="$S3_BUCKET" \
 S3_PREFIX="$S3_PREFIX" \
@@ -266,5 +277,5 @@ info "Safe deployment completed"
 echo ""
 echo "Post-deploy checks:"
 echo "  1) bash ./smoke-test.sh"
-echo "  2) aws logs tail /ecs/vieweratlas-collector --follow --region $AWS_REGION"
+echo "  2) aws logs tail /ecs/${SERVICE_PREFIX}-collector --follow --region $AWS_REGION"
 echo "  3) aws s3 ls s3://$S3_BUCKET/${S3_PREFIX}raw/snapshots/ --recursive | tail"

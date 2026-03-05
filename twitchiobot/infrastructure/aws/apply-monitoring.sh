@@ -29,12 +29,22 @@ load_env_file() {
 
 load_env_file
 
+# Environment-aware naming (mirrors deploy.sh)
+ENVIRONMENT="${ENVIRONMENT:-prod}"
+if [ "$ENVIRONMENT" = "prod" ]; then
+    SERVICE_PREFIX="vieweratlas"
+    _DEFAULT_CLUSTER="vieweratlas-cluster"
+else
+    SERVICE_PREFIX="vieweratlas-${ENVIRONMENT}"
+    _DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
+fi
+
 AWS_REGION=${AWS_REGION:-us-east-1}
 AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-}
-ECS_CLUSTER=${ECS_CLUSTER:-vieweratlas-cluster}
+ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
-COLLECTOR_SERVICE_NAME=${COLLECTOR_SERVICE_NAME:-vieweratlas-collector}
+COLLECTOR_SERVICE_NAME=${COLLECTOR_SERVICE_NAME:-${SERVICE_PREFIX}-collector}
 LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
 SNAPSHOT_WINDOW_SECONDS=${SNAPSHOT_WINDOW_SECONDS:-3600}
 ERROR_SPIKE_THRESHOLD=${ERROR_SPIKE_THRESHOLD:-20}
@@ -192,9 +202,9 @@ aws cloudwatch put-dashboard \
 info "Dashboard applied: $dashboard_name"
 
 for log_group in \
-    "/ecs/vieweratlas-collector" \
-    "/ecs/vieweratlas-analysis" \
-    "/ecs/vieweratlas-vod-collector"; do
+    "/ecs/${SERVICE_PREFIX}-collector" \
+    "/ecs/${SERVICE_PREFIX}-analysis" \
+    "/ecs/${SERVICE_PREFIX}-vod-collector"; do
     aws logs create-log-group --region "$AWS_REGION" --log-group-name "$log_group" >/dev/null 2>&1 || true
     aws logs put-retention-policy \
         --region "$AWS_REGION" \
@@ -213,7 +223,7 @@ info "CloudWatch log retention validated"
 metric_transformations='metricName=SnapshotSavedCount,metricNamespace=ViewerAtlas/Collector,metricValue=1'
 aws logs put-metric-filter \
     --region "$AWS_REGION" \
-    --log-group-name "/ecs/vieweratlas-collector" \
+    --log-group-name "/ecs/${SERVICE_PREFIX}-collector" \
     --filter-name "ViewerAtlasCollectorSnapshotSaved" \
     --filter-pattern '"Saved:"' \
     --metric-transformations "$metric_transformations" >/dev/null
@@ -221,7 +231,7 @@ aws logs put-metric-filter \
 metric_transformations='metricName=CollectorErrorCount,metricNamespace=ViewerAtlas/Collector,metricValue=1'
 aws logs put-metric-filter \
     --region "$AWS_REGION" \
-    --log-group-name "/ecs/vieweratlas-collector" \
+    --log-group-name "/ecs/${SERVICE_PREFIX}-collector" \
     --filter-name "ViewerAtlasCollectorErrors" \
     --filter-pattern 'ERROR' \
     --metric-transformations "$metric_transformations" >/dev/null
