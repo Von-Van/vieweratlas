@@ -24,11 +24,11 @@ This document defines what ViewerAtlas stores, retention expectations, and opera
 
 ## 2. Retention Windows
 
-Production defaults (enforced via lifecycle/retention scripts):
+Production defaults (enforced via S3 lifecycle rules and CloudWatch retention):
 
-- `raw/snapshots/`: expire after 30 days
-- `raw/vod_chat/`: expire after 7 days
-- `curated/`: transition to Glacier Instant Retrieval after 90 days
+- `raw/snapshots/`: Standard-IA at 30 days, Glacier IR at 90 days, expire at 365 days
+- `raw/vod_chat/`: Standard-IA at 30 days, expire at 90 days
+- `curated/`: Standard-IA at 90 days (no expiration)
 - CloudWatch logs: retain 7 days
 
 ## 3. Deletion Behavior

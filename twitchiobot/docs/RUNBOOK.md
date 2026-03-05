@@ -20,17 +20,31 @@ This runbook covers standard production operations for ViewerAtlas on AWS.
    - `aws logs tail /ecs/vieweratlas-analysis --region <region> --since 30m`
    - `aws logs tail /ecs/vieweratlas-vod-collector --region <region> --since 30m`
 4. Check data freshness.
-   - `bash twitchiobot/infrastructure/aws/smoke-test.sh`
+   - `bash smoke-test.sh`
 5. If deploy-related, identify current task definition revisions and image tags.
 
 ## 3. Rollback Procedure
 
-1. Select last known-good immutable image tag.
-2. Redeploy with explicit tag.
-   - `IMAGE_TAG=<known-good-tag> PUSH_LATEST=false bash twitchiobot/infrastructure/aws/deploy.sh`
-3. Verify service reaches stable state.
-4. Run smoke test.
-5. Validate S3 snapshot freshness and analysis outputs.
+**Automated rollback (revert to previous task definition revision):**
+```bash
+cd twitchiobot/infrastructure/aws
+ENVIRONMENT=prod bash rollback.sh
+```
+The script reverts all three services to `current_revision - 1`, waits for stability, and runs a smoke test automatically.
+
+**Roll back to a specific revision:**
+```bash
+TASK_DEF_REVISION=42 ENVIRONMENT=prod bash rollback.sh
+```
+
+**After the rollback passes, validate manually:**
+1. Run smoke test: `bash smoke-test.sh`
+2. Confirm fresh S3 snapshots and analysis outputs.
+
+**Promoting a staging-validated image to prod:**
+```bash
+IMAGE_TAG=<validated-tag> bash promote.sh
+```
 
 ## 4. Disable/Enable Schedules
 

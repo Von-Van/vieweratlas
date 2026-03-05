@@ -218,9 +218,10 @@ vod:
 
 ### Retry & Backoff
 
-VOD processing includes exponential backoff for transient failures:
-- **Max attempts:** 5
-- **Backoff:** 30s, 60s, 120s, 240s, 480s
+VOD download retries on transient failures (non-zero exit code, timeout):
+- **Max attempts:** 4 (1 initial + 3 retries)
+- **Delays between retries:** 10s, 30s, 60s (`_DOWNLOAD_RETRY_DELAYS`)
+- **No retry on:** `FileNotFoundError` (TwitchDownloaderCLI not installed)
 - **Lease duration:** 15 minutes (prevents duplicate processing)
 - **Stale lease recovery:** Automatically releases expired leases
 
@@ -250,11 +251,10 @@ class CollectionConfig:
 @dataclass
 class AnalysisConfig:
     overlap_threshold: int = 1
+    weighting_mode: str = "shared_count"  # Edge weight formula
     min_channel_viewers: int = 10
     min_community_size: int = 2
     resolution: float = 1.0
-    game_threshold: float = 0.60
-    language_threshold: float = 0.40
     output_dir: str = "community_analysis"
 
 @dataclass
@@ -626,46 +626,6 @@ class GraphBuilder:
     def export_for_gephi(self, graph: nx.Graph, output_dir: str) -> None:
         """Export nodes and edges CSVs for Gephi"""
 ```
-
----
-
-## 🔄 Change Log
-
-### Session 4 (January 7, 2026) - VOD Collection
-- ✅ Implemented VOD chat replay ingestion (vod_collector.py)
-- ✅ Added PresenceSnapshot canonical format for live/VOD parity
-- ✅ Parquet-based curated snapshot storage
-- ✅ Aggregator support for VOD snapshots (JSON + Parquet)
-- ✅ Exponential backoff + lease-based queue management
-- ✅ TwitchDownloaderCLI integration
-- ✅ Dockerfile.vod + ECS task definition
-- ✅ Deploy script updated for VOD infrastructure
-- ✅ Config validation for bucket window consistency
-- ✅ VOD age filtering (14-day default) + view count threshold
-- ✅ IAM roles and EventBridge scheduling templates
-- ✅ Athena schema for querying curated snapshots
-- ✅ CloudWatch monitoring dashboard configuration
-
-### Session 3 (January 7, 2026)
-- ✅ Added storage abstraction layer (storage.py)
-- ✅ Implemented S3 backend with encryption
-- ✅ Added Docker containerization
-- ✅ Created ECS task definitions
-- ✅ Built automated deployment script
-- ✅ Added date partitioning for S3
-
-### Session 2 (January 5, 2026)
-- ✅ Added file logging with rotation
-- ✅ Implemented error recovery with retry logic
-- ✅ Added YAML configuration support
-- ✅ Environment variable overrides
-
-### Session 1 (Original Implementation)
-- ✅ Core pipeline implementation
-- ✅ Twitch API integration
-- ✅ Community detection
-- ✅ Visualization
-- ✅ Configuration presets
 
 ---
 

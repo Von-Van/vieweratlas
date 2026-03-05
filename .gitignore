@@ -7,6 +7,7 @@ Thumbs.db
 .env.local
 twitchiobot/.env
 twitchiobot/config/.env
+twitchiobot/infrastructure/aws/.env
 
 # Python
 __pycache__/
@@ -39,8 +40,8 @@ twitchiobot/vod_raw/
 twitchiobot/vod_queue.json
 twitchiobot/channels.txt
 twitchiobot/chatters_log.csv
-twitchiobot/docs/AWS_DEPLOYMENT_GUIDE.md
-twitchiobot/docs/deployment-checklist.md
-twitchiobot/docs/DAILY_OPERATIONS.md
-twitchiobot/docs/DEVELOPMENT_COMPLETION_PLAN.md
+
+# Internal operational docs (deployment procedures, runbooks, checklists)
+twitchiobot/docs/*.md
+!twitchiobot/docs/DEVELOPER.md
 

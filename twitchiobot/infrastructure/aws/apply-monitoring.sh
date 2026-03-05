@@ -83,7 +83,7 @@ if [ -z "$SNS_TOPIC_ARN" ]; then
 fi
 
 if ! aws sns get-topic-attributes --region "$AWS_REGION" --topic-arn "$SNS_TOPIC_ARN" >/dev/null 2>&1; then
-    fail "SNS topic not found: $SNS_TOPIC_ARN (see SNS_SETUP.md)"
+    fail "SNS topic not found: $SNS_TOPIC_ARN (see docs/DEPLOYMENT.md Phase 4.5)"
 fi
 
 info "Applying monitoring using $MONITORING_CONFIG"
@@ -246,7 +246,7 @@ info "ECS Container Insights enabled for cluster metrics"
 
 aws cloudwatch put-metric-alarm \
     --region "$AWS_REGION" \
-    --alarm-name "ViewerAtlas-ECSCollector-Unavailable" \
+    --alarm-name "${SERVICE_PREFIX}-ECSCollector-Unavailable" \
     --alarm-description "Collector running task count dropped below 1" \
     --namespace "ECS/ContainerInsights" \
     --metric-name "RunningTaskCount" \
@@ -261,7 +261,7 @@ aws cloudwatch put-metric-alarm \
 
 aws cloudwatch put-metric-alarm \
     --region "$AWS_REGION" \
-    --alarm-name "ViewerAtlas-Collector-Snapshot-Stalled" \
+    --alarm-name "${SERVICE_PREFIX}-Collector-Snapshot-Stalled" \
     --alarm-description "No collector snapshot save logs in expected window" \
     --namespace "ViewerAtlas/Collector" \
     --metric-name "SnapshotSavedCount" \
@@ -275,7 +275,7 @@ aws cloudwatch put-metric-alarm \
 
 aws cloudwatch put-metric-alarm \
     --region "$AWS_REGION" \
-    --alarm-name "ViewerAtlas-Collector-Error-Spike" \
+    --alarm-name "${SERVICE_PREFIX}-Collector-Error-Spike" \
     --alarm-description "Collector error log volume exceeded threshold" \
     --namespace "ViewerAtlas/Collector" \
     --metric-name "CollectorErrorCount" \
