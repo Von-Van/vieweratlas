@@ -636,6 +636,24 @@ class TestConfig:
         with pytest.raises(FileNotFoundError):
             load_config_from_yaml(str(tmp_path / "nonexistent.yaml"))
 
+    def test_default_weighting_mode_is_shared_count(self):
+        config = get_default_config()
+        assert config.analysis.weighting_mode == "shared_count"
+
+    def test_invalid_weighting_mode_raises(self):
+        with pytest.raises(ValueError):
+            AnalysisConfig(weighting_mode="jaccard")
+
+    def test_yaml_loading_weighting_mode(self, tmp_path):
+        yaml_file = tmp_path / "wm_config.yaml"
+        yaml_file.write_text(
+            "analysis:\n"
+            "  overlap_threshold: 1\n"
+            '  weighting_mode: "shared_count"\n'
+        )
+        config = load_config_from_yaml(str(yaml_file))
+        assert config.analysis.weighting_mode == "shared_count"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Integration Test
@@ -722,3 +740,328 @@ class TestIntegration:
         assert len(filtered) <= len(all_channels)
         # streamer_e has only 2 viewers, should be filtered out at min=5
         assert "streamer_e" not in filtered
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# VOD Snapshot Loading Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.fixture
+def tmp_vod_snapshots_dir(tmp_path):
+    """Create a temporary logs/vod_snapshots directory with VOD JSON snapshot files."""
+    vod_dir = tmp_path / "logs" / "vod_snapshots"
+    vod_dir.mkdir(parents=True)
+
+    vod_snap_1 = {
+        "channel": "streamer_v1",
+        "timestamp": "2025-01-01T14:00:00",
+        "viewer_count": 1200,
+        "game_name": "Minecraft",
+        "title": "VOD: Sunday session",
+        "started_at": "2025-01-01T12:00:00",
+        "chatters": ["alpha", "beta", "gamma"],
+        "_source": "vod",
+    }
+    vod_snap_2 = {
+        "channel": "streamer_v2",
+        "timestamp": "2025-01-01T14:05:00",
+        "viewer_count": 800,
+        "game_name": "Minecraft",
+        "title": "VOD: Monday highlights",
+        "started_at": "2025-01-01T13:00:00",
+        "chatters": ["beta", "delta", "epsilon"],
+        "_source": "vod",
+    }
+
+    for i, snap in enumerate([vod_snap_1, vod_snap_2]):
+        filepath = vod_dir / f"snapshot_{i:03d}.json"
+        with open(filepath, "w") as f:
+            json.dump(snap, f)
+
+    return tmp_path / "logs"
+
+
+class TestVODSnapshotLoading:
+    """Tests for VOD snapshot ingestion from local filesystem."""
+
+    def test_load_vod_snapshots_count(self, tmp_vod_snapshots_dir):
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        count = agg.load_vod_snapshots()
+        assert count == 2, f"Expected 2 VOD snapshots loaded, got {count}"
+
+    def test_vod_channels_in_viewer_map(self, tmp_vod_snapshots_dir):
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        agg.load_vod_snapshots()
+        viewers = agg.get_channel_viewers()
+        assert "streamer_v1" in viewers
+        assert "streamer_v2" in viewers
+
+    def test_vod_viewer_sets_correct(self, tmp_vod_snapshots_dir):
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        agg.load_vod_snapshots()
+        viewers = agg.get_channel_viewers()
+        assert viewers["streamer_v1"] == {"alpha", "beta", "gamma"}
+        assert viewers["streamer_v2"] == {"beta", "delta", "epsilon"}
+
+    def test_vod_source_count_tracked(self, tmp_vod_snapshots_dir):
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        agg.load_vod_snapshots()
+        assert agg.snapshot_source_counts.get("vod", 0) == 2
+
+    def test_load_all_vod_count(self, tmp_vod_snapshots_dir):
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        json_count, csv_count, vod_count = agg.load_all()
+        assert vod_count == 2
+
+    def test_vod_metadata_stored(self, tmp_vod_snapshots_dir):
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        agg.load_vod_snapshots()
+        meta = agg.get_channel_metadata()
+        assert meta["streamer_v1"]["game_name"] == "Minecraft"
+        assert meta["streamer_v1"]["viewer_count"] == 1200
+
+    def test_empty_vod_dir_returns_zero(self, tmp_path):
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+        agg = DataAggregator(str(logs_dir))
+        agg.storage = None
+        count = agg.load_vod_snapshots()
+        assert count == 0
+
+    def test_vod_graph_edges_on_overlap(self, tmp_vod_snapshots_dir):
+        """VOD data flows into the graph with correct overlap weights."""
+        agg = DataAggregator(str(tmp_vod_snapshots_dir))
+        agg.storage = None
+        agg.load_vod_snapshots()
+        viewers = agg.get_channel_viewers()
+
+        builder = GraphBuilder(overlap_threshold=1)
+        g = builder.build_graph(viewers)
+
+        # streamer_v1 and streamer_v2 share 'beta' => weight 1
+        assert g.has_edge("streamer_v1", "streamer_v2")
+        assert g["streamer_v1"]["streamer_v2"]["weight"] == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# S3 Backend Integration Tests (mocked)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MockS3Storage:
+    """Minimal S3Storage mock for testing without real AWS credentials."""
+
+    def __init__(self, live_snapshots=None, vod_snapshots=None):
+        self._live = live_snapshots or []
+        self._vod_json = vod_snapshots or []
+
+    def list_files(self, prefix="", suffix=""):
+        if prefix.startswith("raw/snapshots") and suffix == ".json":
+            return [f"raw/snapshots/snap_{i}.json" for i in range(len(self._live))]
+        if prefix.startswith("curated/presence_snapshots/source=vod") and suffix == ".parquet":
+            return []  # No parquet in this mock
+        if prefix.startswith("curated/presence_snapshots/source=vod") and suffix == ".json":
+            return [f"curated/presence_snapshots/source=vod/snap_{i}.json" for i in range(len(self._vod_json))]
+        return []
+
+    def download_json(self, key):
+        if key.startswith("raw/snapshots/snap_"):
+            idx = int(key.split("_")[-1].replace(".json", ""))
+            return self._live[idx]
+        if key.startswith("curated/presence_snapshots/source=vod/snap_"):
+            idx = int(key.split("_")[-1].replace(".json", ""))
+            return self._vod_json[idx]
+        return None
+
+
+class TestS3Integration:
+    """Tests for S3 storage backend path through DataAggregator (mocked)."""
+
+    @pytest.fixture
+    def live_snapshots(self):
+        return [
+            {
+                "channel": "s3_streamer_a",
+                "timestamp": "2025-02-01T10:00:00",
+                "viewer_count": 500,
+                "game_name": "Apex Legends",
+                "title": "S3 live stream",
+                "chatters": ["user1", "user2", "user3"],
+            },
+            {
+                "channel": "s3_streamer_b",
+                "timestamp": "2025-02-01T10:00:00",
+                "viewer_count": 300,
+                "game_name": "Apex Legends",
+                "title": "S3 live stream B",
+                "chatters": ["user2", "user3", "user4"],
+            },
+        ]
+
+    @pytest.fixture
+    def vod_snapshots(self):
+        return [
+            {
+                "channel": "s3_vod_channel",
+                "timestamp": "2025-02-01T08:00:00",
+                "viewer_count": 200,
+                "game_name": "Apex Legends",
+                "title": "VOD replay",
+                "chatters": ["user1", "user5"],
+                "_source": "vod",
+            }
+        ]
+
+    def test_s3_load_json_snapshots(self, live_snapshots, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=MockS3Storage(live_snapshots=live_snapshots))
+        count = agg.load_json_snapshots()
+        assert count == 2
+
+    def test_s3_channels_populated(self, live_snapshots, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=MockS3Storage(live_snapshots=live_snapshots))
+        agg.load_json_snapshots()
+        viewers = agg.get_channel_viewers()
+        assert "s3_streamer_a" in viewers
+        assert "s3_streamer_b" in viewers
+        assert viewers["s3_streamer_a"] == {"user1", "user2", "user3"}
+
+    def test_s3_load_vod_snapshots(self, vod_snapshots, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=MockS3Storage(vod_snapshots=vod_snapshots))
+        count = agg.load_vod_snapshots()
+        assert count == 1
+        viewers = agg.get_channel_viewers()
+        assert "s3_vod_channel" in viewers
+        assert viewers["s3_vod_channel"] == {"user1", "user5"}
+
+    def test_s3_vod_source_tracked(self, vod_snapshots, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=MockS3Storage(vod_snapshots=vod_snapshots))
+        agg.load_vod_snapshots()
+        assert agg.snapshot_source_counts.get("vod", 0) == 1
+
+    def test_s3_load_all_returns_correct_counts(self, live_snapshots, vod_snapshots, tmp_path):
+        storage = MockS3Storage(live_snapshots=live_snapshots, vod_snapshots=vod_snapshots)
+        agg = DataAggregator(str(tmp_path), storage=storage)
+        json_count, csv_count, vod_count = agg.load_all()
+        assert json_count == 2
+        assert vod_count == 1
+
+    def test_s3_graph_from_live_data(self, live_snapshots, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=MockS3Storage(live_snapshots=live_snapshots))
+        agg.load_json_snapshots()
+        viewers = agg.get_channel_viewers()
+
+        builder = GraphBuilder(overlap_threshold=1)
+        g = builder.build_graph(viewers)
+
+        # s3_streamer_a and s3_streamer_b share user2 and user3 => weight 2
+        assert g.has_edge("s3_streamer_a", "s3_streamer_b")
+        assert g["s3_streamer_a"]["s3_streamer_b"]["weight"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Mixed Live + VOD Integration Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMixedLiveVOD:
+    """Tests for pipelines combining live snapshots and VOD snapshots."""
+
+    @pytest.fixture
+    def mixed_logs_dir(self, tmp_path):
+        """Create logs dir with both live JSON snapshots and vod_snapshots/ subfolder."""
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        # Live snapshot
+        live_snap = {
+            "channel": "live_channel",
+            "timestamp": "2025-03-01T10:00:00",
+            "viewer_count": 1000,
+            "game_name": "Fortnite",
+            "title": "Live now",
+            "chatters": ["viewer_a", "viewer_b", "viewer_c"],
+        }
+        with open(logs_dir / "snapshot_live.json", "w") as f:
+            json.dump(live_snap, f)
+
+        # VOD snapshot (overlaps 1 viewer with live)
+        vod_dir = logs_dir / "vod_snapshots"
+        vod_dir.mkdir()
+        vod_snap = {
+            "channel": "vod_channel",
+            "timestamp": "2025-03-01T09:00:00",
+            "viewer_count": 500,
+            "game_name": "Fortnite",
+            "title": "VOD replay",
+            "chatters": ["viewer_b", "viewer_d"],
+            "_source": "vod",
+        }
+        with open(vod_dir / "snapshot_vod.json", "w") as f:
+            json.dump(vod_snap, f)
+
+        return logs_dir
+
+    def test_load_all_counts_both_sources(self, mixed_logs_dir):
+        agg = DataAggregator(str(mixed_logs_dir))
+        agg.storage = None
+        json_count, csv_count, vod_count = agg.load_all()
+        assert json_count == 1
+        assert vod_count == 1
+
+    def test_both_channels_in_viewer_map(self, mixed_logs_dir):
+        agg = DataAggregator(str(mixed_logs_dir))
+        agg.storage = None
+        agg.load_all()
+        viewers = agg.get_channel_viewers()
+        assert "live_channel" in viewers
+        assert "vod_channel" in viewers
+
+    def test_source_counts_separate(self, mixed_logs_dir):
+        agg = DataAggregator(str(mixed_logs_dir))
+        agg.storage = None
+        agg.load_all()
+        assert agg.snapshot_source_counts.get("live", 0) == 1
+        assert agg.snapshot_source_counts.get("vod", 0) == 1
+
+    def test_mixed_graph_edge_on_shared_viewer(self, mixed_logs_dir):
+        """Live and VOD channels sharing a viewer should produce a graph edge."""
+        agg = DataAggregator(str(mixed_logs_dir))
+        agg.storage = None
+        agg.load_all()
+        viewers = agg.get_channel_viewers()
+
+        builder = GraphBuilder(overlap_threshold=1)
+        g = builder.build_graph(viewers)
+
+        # live_channel and vod_channel share viewer_b => weight 1
+        assert g.has_edge("live_channel", "vod_channel")
+        assert g["live_channel"]["vod_channel"]["weight"] == 1
+
+    def test_mixed_pipeline_full_run(self, mixed_logs_dir):
+        """Full pipeline run on mixed live+VOD data produces valid community output."""
+        if not LOUVAIN_AVAILABLE:
+            pytest.skip("python-louvain not installed")
+
+        agg = DataAggregator(str(mixed_logs_dir))
+        agg.storage = None
+        agg.load_all()
+
+        viewers = agg.get_channel_viewers()
+        metadata = agg.get_channel_metadata()
+
+        builder = GraphBuilder(overlap_threshold=1)
+        g = builder.build_graph(viewers, metadata)
+
+        detector = CommunityDetector(resolution=1.0)
+        partition = detector.detect_communities(g)
+
+        assert len(partition) == 2  # live_channel and vod_channel
+        assert "live_channel" in partition
+        assert "vod_channel" in partition
