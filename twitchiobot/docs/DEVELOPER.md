@@ -2,7 +2,7 @@
 
 This directory contains the ViewerAtlas application code.
 
-**For comprehensive documentation, see [../README.md](../README.md)**
+**For comprehensive documentation, see [../../README.md](../../README.md)**
 
 This guide provides technical implementation details for developers.
 
@@ -631,7 +631,7 @@ class GraphBuilder:
 
 ## 📖 Additional Resources
 
-- **Main README**: [../README.md](../README.md) - Complete user guide
+- **Main README**: [../../README.md](../../README.md) - Complete user guide
 - **Original Spec**: [../vieweratlas scheme.txt](../vieweratlas%20scheme.txt) - Project specification
 - **NetworkX**: https://networkx.org/
 - **Louvain Algorithm**: https://python-louvain.readthedocs.io/
@@ -639,4 +639,4 @@ class GraphBuilder:
 
 ---
 
-**For usage instructions and troubleshooting, see [../README.md](../README.md)**
+**For usage instructions and troubleshooting, see [../../README.md](../../README.md)**
