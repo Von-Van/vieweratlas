@@ -120,8 +120,8 @@ JSON
       "Effect": "Allow",
       "Action": ["ecs:RunTask"],
       "Resource": [
-        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-analysis:*",
-        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-vod-collector:*"
+        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-analysis:*",
+        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-vod-collector:*"
       ],
       "Condition": {
         "ArnLike": {
@@ -133,10 +133,10 @@ JSON
       "Effect": "Allow",
       "Action": ["iam:PassRole"],
       "Resource": [
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-analysis-task-role",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-analysis-execution-role",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-vod-collector-task-role",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-vod-collector-execution-role"
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-task-role",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-execution-role",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-task-role",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-execution-role"
       ]
     }
   ]

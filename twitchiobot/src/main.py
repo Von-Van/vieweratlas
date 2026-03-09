@@ -15,6 +15,7 @@ Pipeline flow:
 
 import asyncio
 import os
+import signal
 import sys
 import time
 import logging
@@ -45,6 +46,16 @@ from storage import get_storage
 from vod_collector import VODCollector
 
 load_dotenv()
+
+# Graceful shutdown support (ECS sends SIGTERM before SIGKILL)
+_shutdown_requested = False
+
+def _handle_sigterm(signum, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    logging.getLogger(__name__).info("SIGTERM received, finishing current cycle before exit...")
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 
 def setup_logging(config: PipelineConfig):
@@ -251,6 +262,8 @@ class PipelineRunner:
             await bot.close()
         
         self.logger.info("✓ Collection cycle complete\n")
+        # Write heartbeat for container health check
+        Path(os.getenv("LOGS_DIR", "logs"), ".heartbeat").touch()
     
     def run_analysis_pipeline(self) -> dict:
         """
@@ -382,9 +395,17 @@ class PipelineRunner:
             return None
         
         if self.config.analysis.export_graph_csv:
-            builder.export_nodes_csv(f"{self.config.analysis.output_dir}/graph_nodes.csv")
-            builder.export_edges_csv(f"{self.config.analysis.output_dir}/graph_edges.csv")
+            nodes_path = f"{self.config.analysis.output_dir}/graph_nodes.csv"
+            edges_path = f"{self.config.analysis.output_dir}/graph_edges.csv"
+            builder.export_nodes_csv(nodes_path)
+            builder.export_edges_csv(edges_path)
             self.logger.info(f"Exported graph data to {self.config.analysis.output_dir}/")
+            # Upload to S3 so outputs survive container exit
+            if self.storage:
+                date_str = datetime.now().strftime("%Y-%m-%d")
+                self.storage.upload_file(nodes_path, f"curated/analysis/{date_str}/graph_nodes.csv")
+                self.storage.upload_file(edges_path, f"curated/analysis/{date_str}/graph_edges.csv")
+                self.logger.info(f"Uploaded graph CSVs to S3 curated/analysis/{date_str}/")
         
         return graph
     
@@ -515,6 +536,11 @@ async def mode_collect(config: PipelineConfig):
     cycle_count = 0
     
     while True:
+        # Graceful shutdown: exit after completing the current cycle
+        if _shutdown_requested:
+            runner.logger.info("Shutdown requested, exiting after cycle completion.")
+            break
+
         # Cost protection: check runtime limit
         if config.collection.max_runtime_hours:
             elapsed_hours = (time.time() - start_time) / 3600
@@ -523,7 +549,7 @@ async def mode_collect(config: PipelineConfig):
                     f"⏱️ Max runtime reached: {elapsed_hours:.1f}h / {config.collection.max_runtime_hours}h. Stopping collection."
                 )
                 break
-        
+
         # Cost protection: check cycle limit
         if config.collection.max_collection_cycles:
             if cycle_count >= config.collection.max_collection_cycles:
@@ -531,11 +557,11 @@ async def mode_collect(config: PipelineConfig):
                     f"🔄 Max cycles reached: {cycle_count} / {config.collection.max_collection_cycles}. Stopping collection."
                 )
                 break
-        
+
         await runner.run_collection_cycle()
         cycle_count += 1
         runner.logger.info(f"Completed cycle {cycle_count}, runtime: {(time.time() - start_time)/3600:.2f}h")
-        
+
         if config.collection.wait_for_hour_alignment:
             runner.wait_until_next_hour()
 
@@ -561,6 +587,11 @@ async def mode_continuous(config: PipelineConfig):
     start_time = time.time()
     
     while True:
+        # Graceful shutdown: exit after completing the current cycle
+        if _shutdown_requested:
+            runner.logger.info("Shutdown requested, exiting after cycle completion.")
+            break
+
         # Cost protection: check runtime limit
         if config.collection.max_runtime_hours:
             elapsed_hours = (time.time() - start_time) / 3600
@@ -569,7 +600,7 @@ async def mode_continuous(config: PipelineConfig):
                     f"⏱️ Max runtime reached: {elapsed_hours:.1f}h / {config.collection.max_runtime_hours}h. Stopping."
                 )
                 break
-        
+
         # Cost protection: check cycle limit
         if config.collection.max_collection_cycles:
             if collection_cycles >= config.collection.max_collection_cycles:
@@ -577,16 +608,16 @@ async def mode_continuous(config: PipelineConfig):
                     f"🔄 Max cycles reached: {collection_cycles} / {config.collection.max_collection_cycles}. Stopping."
                 )
                 break
-        
+
         await runner.run_collection_cycle()
         collection_cycles += 1
-        
+
         if collection_cycles % analysis_interval == 0:
             runner.logger.info(f"Running periodic analysis (cycle {collection_cycles})...")
             runner.run_analysis_pipeline()
-        
+
         runner.logger.info(f"Completed cycle {collection_cycles}, runtime: {(time.time() - start_time)/3600:.2f}h")
-        
+
         if config.collection.wait_for_hour_alignment:
             runner.wait_until_next_hour()
 

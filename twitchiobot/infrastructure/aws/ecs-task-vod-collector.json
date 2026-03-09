@@ -48,7 +48,7 @@
         },
         {
           "name": "VOD_QUEUE_FILE",
-          "value": "/app/vod_queue.json"
+          "value": "/app/vod_data/vod_queue.json"
         },
         {
           "name": "TWITCH_DOWNLOADER_CLI",
@@ -70,7 +70,7 @@
         }
       ],
       "healthCheck": {
-        "command": ["CMD-SHELL", "test -f /app/vod_queue.json || exit 1"],
+        "command": ["CMD-SHELL", "test -d /app/vod_data || exit 1"],
         "interval": 60,
         "timeout": 10,
         "retries": 3,
@@ -79,7 +79,7 @@
       "mountPoints": [
         {
           "sourceVolume": "vod-queue",
-          "containerPath": "/app/vod_queue.json",
+          "containerPath": "/app/vod_data",
           "readOnly": false
         }
       ]
@@ -90,7 +90,7 @@
       "name": "vod-queue",
       "efsVolumeConfiguration": {
         "fileSystemId": "${EFS_ID}",
-        "rootDirectory": "/vod_queue",
+        "rootDirectory": "/vod_data",
         "transitEncryption": "ENABLED"
       }
     }

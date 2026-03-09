@@ -180,19 +180,8 @@ print(json.dumps(payload))
 PY
 )
 
-dashboard_name=$(python3 - <<'PY'
-import json, sys
-payload = json.loads(sys.stdin.read())
-print(payload["dashboard_name"])
-PY
-<<< "$dashboard_payload")
-
-dashboard_body=$(python3 - <<'PY'
-import json, sys
-payload = json.loads(sys.stdin.read())
-print(payload["dashboard_body"])
-PY
-<<< "$dashboard_payload")
+dashboard_name=$(echo "$dashboard_payload" | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['dashboard_name'])")
+dashboard_body=$(echo "$dashboard_payload" | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['dashboard_body'])")
 
 aws cloudwatch put-dashboard \
     --region "$AWS_REGION" \

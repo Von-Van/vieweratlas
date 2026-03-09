@@ -724,15 +724,21 @@ class VODCollector:
             # Step 4: Write presence snapshots
             self._write_snapshots(snapshots, channel, vod_id)
             
+            # Clean up local raw file to avoid filling ephemeral storage
+            raw_path.unlink(missing_ok=True)
+
             # Success!
             self.daily_state.mark_collected("vod", channel)
             self.queue.update_status(vod_id, 'completed')
             logger.info(f"✓ Successfully processed VOD {vod_id}: {len(snapshots)} snapshots")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error processing VOD {vod_id}: {e}")
             self.queue.update_status(vod_id, 'failed', error=str(e))
+            # Clean up local raw file even on failure
+            if raw_path.exists():
+                raw_path.unlink(missing_ok=True)
             return False
     
     def _write_snapshots(

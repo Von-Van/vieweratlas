@@ -217,30 +217,34 @@ aws s3api put-bucket-versioning \
     --bucket "$S3_BUCKET" \
     --versioning-configuration Status=Enabled >/dev/null
 
-cat > /tmp/vieweratlas-lifecycle.json <<'JSON'
+cat > /tmp/vieweratlas-lifecycle.json <<JSON
 {
   "Rules": [
     {
       "Id": "DeleteOldRawLogs",
       "Status": "Enabled",
-      "Filter": {"Prefix": "raw/snapshots/"},
-      "Expiration": {"Days": 30}
+      "Filter": {"Prefix": "${S3_PREFIX}raw/snapshots/"},
+      "Transitions": [
+        {"Days": 30, "StorageClass": "STANDARD_IA"},
+        {"Days": 90, "StorageClass": "GLACIER_IR"}
+      ],
+      "Expiration": {"Days": 365}
     },
     {
       "Id": "DeleteOldVODRaw",
       "Status": "Enabled",
-      "Filter": {"Prefix": "raw/vod_chat/"},
-      "Expiration": {"Days": 7}
+      "Filter": {"Prefix": "${S3_PREFIX}raw/vod_chat/"},
+      "Transitions": [
+        {"Days": 30, "StorageClass": "STANDARD_IA"}
+      ],
+      "Expiration": {"Days": 90}
     },
     {
       "Id": "ArchiveProcessedData",
       "Status": "Enabled",
-      "Filter": {"Prefix": "curated/"},
+      "Filter": {"Prefix": "${S3_PREFIX}curated/"},
       "Transitions": [
-        {
-          "Days": 90,
-          "StorageClass": "GLACIER_IR"
-        }
+        {"Days": 90, "StorageClass": "STANDARD_IA"}
       ]
     }
   ]
