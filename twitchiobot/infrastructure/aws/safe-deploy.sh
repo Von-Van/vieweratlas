@@ -74,7 +74,7 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
 ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
-ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
+ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-DISABLED}
 ALERT_EMAIL=${ALERT_EMAIL:-}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
@@ -213,6 +213,17 @@ JSON
 fi
 
 aws s3 mb "s3://${S3_BUCKET}" --region "$AWS_REGION" >/dev/null 2>&1 || true
+
+aws s3api put-public-access-block \
+    --bucket "$S3_BUCKET" \
+    --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null
+
+aws s3api put-bucket-encryption \
+    --bucket "$S3_BUCKET" \
+    --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' >/dev/null
+
 aws s3api put-bucket-versioning \
     --bucket "$S3_BUCKET" \
     --versioning-configuration Status=Enabled >/dev/null

@@ -45,3 +45,5 @@ twitchiobot/chatters_log.csv
 twitchiobot/docs/*.md
 !twitchiobot/docs/DEVELOPER.md
 
+# Security review artifacts
+security_best_practices_report.md

@@ -8,11 +8,17 @@ RUN apt-get update && apt-get install -y \
     g++ \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -r app && useradd -r -g app -d /app app
+
 COPY src/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/*.py ./
 
 ENV PYTHONUNBUFFERED=1
+
+RUN chown -R app:app /app
+
+USER app
 
 CMD ["python", "-u", "discovery.py"]

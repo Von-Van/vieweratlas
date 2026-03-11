@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y \
     libpng-dev \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd -r app && useradd -r -g app -d /app app
+
 # Copy requirements
 COPY src/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -20,11 +22,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/*.py ./
 
 # Create output directory
-RUN mkdir -p /app/community_analysis
+RUN mkdir -p /app/community_analysis /app/logs && chown -R app:app /app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV OUTPUT_DIR=/app/community_analysis
+
+USER app
 
 # Health check
 HEALTHCHECK --interval=60s --timeout=30s --start-period=10s --retries=3 \

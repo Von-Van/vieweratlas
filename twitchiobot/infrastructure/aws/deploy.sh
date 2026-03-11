@@ -57,7 +57,7 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
 ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
-ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
+ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-DISABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
@@ -153,6 +153,22 @@ create_ecr_repos() {
     done
 }
 
+ensure_s3_bucket_security_controls() {
+    log_info "Ensuring S3 bucket security controls..."
+
+    aws s3 mb "s3://${S3_BUCKET}" --region "$AWS_REGION" >/dev/null 2>&1 || true
+
+    aws s3api put-public-access-block \
+        --bucket "$S3_BUCKET" \
+        --public-access-block-configuration \
+        BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null
+
+    aws s3api put-bucket-encryption \
+        --bucket "$S3_BUCKET" \
+        --server-side-encryption-configuration \
+        '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' >/dev/null
+}
+
 # Login to ECR
 ecr_login() {
     log_info "Logging into ECR..."
@@ -213,7 +229,7 @@ JSON
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Action": ["s3:PutObject", "s3:GetObject"],
       "Resource": ["${s3_object_arn}"]
     },
     {
@@ -533,6 +549,7 @@ main() {
     check_prerequisites
 
     create_ecr_repos
+    ensure_s3_bucket_security_controls
     ecr_login
 
     build_and_push "collector" "Dockerfile.collector"

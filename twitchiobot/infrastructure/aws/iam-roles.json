@@ -24,8 +24,7 @@
               "Effect": "Allow",
               "Action": [
                 "s3:PutObject",
-                "s3:GetObject",
-                "s3:DeleteObject"
+                "s3:GetObject"
               ],
               "Resource": [
                 "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
@@ -110,8 +109,7 @@
               "Effect": "Allow",
               "Action": [
                 "s3:PutObject",
-                "s3:GetObject",
-                "s3:DeleteObject"
+                "s3:GetObject"
               ],
               "Resource": [
                 "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
@@ -179,8 +177,7 @@
               "Effect": "Allow",
               "Action": [
                 "s3:PutObject",
-                "s3:GetObject",
-                "s3:DeleteObject"
+                "s3:GetObject"
               ],
               "Resource": [
                 "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
