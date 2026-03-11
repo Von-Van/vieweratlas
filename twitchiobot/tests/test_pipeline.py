@@ -19,7 +19,7 @@ from collections import defaultdict
 
 import pytest
 import networkx as nx
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 # Ensure src/ is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -32,6 +32,7 @@ from config import (
     CollectionConfig,
     AnalysisConfig,
     VODConfig,
+    SQSConfig,
     PipelineConfig,
     get_default_config,
     get_rigorous_config,
@@ -39,6 +40,10 @@ from config import (
     get_debug_config,
     load_config_from_yaml,
 )
+from daily_collection_state import DynamoDBCollectionState
+from sqs_task_queue import SQSTaskQueue, ChannelTask
+from discovery import run_discovery
+from worker import _collect_channel, _flush_parquet
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -235,7 +240,7 @@ class TestDataAggregator:
         empty_dir.mkdir()
         agg = DataAggregator(str(empty_dir))
         agg.storage = None  # Force local filesystem
-        json_count, csv_count, vod_count = agg.load_all()
+        json_count, csv_count, vod_count, parquet_count = agg.load_all()
         assert json_count == 0
         assert csv_count == 0
         assert agg.get_channel_viewers() == {}
@@ -245,7 +250,25 @@ class TestDataAggregator:
         agg.storage = None  # Force local filesystem
         result = agg.load_all()
         assert isinstance(result, tuple)
-        assert len(result) == 3
+        assert len(result) == 4
+
+    def test_csv_username_column_loads_correctly(self, tmp_path):
+        """Regression: CSV written with 'username' header must be read correctly."""
+        csv_dir = tmp_path / "csv_logs"
+        csv_dir.mkdir()
+        csv_file = csv_dir / "test_channel_20250101_120000.csv"
+        csv_file.write_text(
+            "timestamp,channel,viewer_count,game_name,title,started_at,username\n"
+            "2025-01-01T12:00:00,test_ch,1000,Valorant,Test,2025-01-01T10:00:00,alice\n"
+            "2025-01-01T12:00:00,test_ch,1000,Valorant,Test,2025-01-01T10:00:00,bob\n"
+        )
+        agg = DataAggregator(str(csv_dir))
+        agg.storage = None
+        csv_count = agg.load_csv_snapshots()
+        assert csv_count == 2
+        viewers = agg.get_channel_viewers()
+        assert "test_ch" in viewers
+        assert viewers["test_ch"] == {"alice", "bob"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -332,6 +355,27 @@ class TestGraphBuilder:
             lines = f.readlines()
         # Header + at least one edge
         assert len(lines) >= 2
+
+    def test_export_nodes_csv_has_correct_game_name(self, channel_viewers, channel_metadata, tmp_path):
+        """Regression: export_nodes_csv must use game_name attribute, not 'game'."""
+        builder = GraphBuilder(overlap_threshold=1)
+        builder.build_graph(channel_viewers, channel_metadata)
+
+        nodes_csv = str(tmp_path / "nodes.csv")
+        builder.export_nodes_csv(nodes_csv)
+
+        with open(nodes_csv) as f:
+            lines = f.readlines()
+
+        # Find streamer_a row and verify game is Valorant, not Unknown
+        found = False
+        for line in lines[1:]:  # skip header
+            parts = line.strip().split(",")
+            if parts[0] == "streamer_a":
+                assert parts[3] == "Valorant", f"Expected Valorant, got {parts[3]}"
+                found = True
+                break
+        assert found, "streamer_a not found in nodes CSV"
 
     def test_empty_graph(self):
         builder = GraphBuilder(overlap_threshold=1)
@@ -675,7 +719,7 @@ class TestIntegration:
         # 1. Aggregate
         aggregator = DataAggregator(str(tmp_logs_dir))
         aggregator.storage = None  # Force local filesystem
-        json_count, csv_count, vod_count = aggregator.load_all()
+        json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
         assert json_count == 5
 
         channel_viewers = aggregator.get_channel_viewers()
@@ -816,7 +860,7 @@ class TestVODSnapshotLoading:
     def test_load_all_vod_count(self, tmp_vod_snapshots_dir):
         agg = DataAggregator(str(tmp_vod_snapshots_dir))
         agg.storage = None
-        json_count, csv_count, vod_count = agg.load_all()
+        json_count, csv_count, vod_count, parquet_count = agg.load_all()
         assert vod_count == 2
 
     def test_vod_metadata_stored(self, tmp_vod_snapshots_dir):
@@ -858,13 +902,16 @@ class TestVODSnapshotLoading:
 class MockS3Storage:
     """Minimal S3Storage mock for testing without real AWS credentials."""
 
-    def __init__(self, live_snapshots=None, vod_snapshots=None):
+    def __init__(self, live_snapshots=None, vod_snapshots=None, parquet_data=None):
         self._live = live_snapshots or []
         self._vod_json = vod_snapshots or []
+        self._parquet = parquet_data or {}  # key -> bytes
 
     def list_files(self, prefix="", suffix=""):
         if prefix.startswith("raw/snapshots") and suffix == ".json":
             return [f"raw/snapshots/snap_{i}.json" for i in range(len(self._live))]
+        if prefix.startswith("raw/snapshots") and suffix == ".parquet":
+            return [k for k in self._parquet.keys() if k.startswith("raw/snapshots") and k.endswith(".parquet")]
         if prefix.startswith("curated/presence_snapshots/source=vod") and suffix == ".parquet":
             return []  # No parquet in this mock
         if prefix.startswith("curated/presence_snapshots/source=vod") and suffix == ".json":
@@ -879,6 +926,16 @@ class MockS3Storage:
             idx = int(key.split("_")[-1].replace(".json", ""))
             return self._vod_json[idx]
         return None
+
+    def upload_parquet(self, key, data, **kwargs):
+        self._parquet[key] = data
+        return True
+
+    def download_parquet(self, key):
+        return self._parquet.get(key)
+
+    def get_uri(self, key):
+        return f"mock://{key}"
 
 
 class TestS3Integration:
@@ -948,7 +1005,7 @@ class TestS3Integration:
     def test_s3_load_all_returns_correct_counts(self, live_snapshots, vod_snapshots, tmp_path):
         storage = MockS3Storage(live_snapshots=live_snapshots, vod_snapshots=vod_snapshots)
         agg = DataAggregator(str(tmp_path), storage=storage)
-        json_count, csv_count, vod_count = agg.load_all()
+        json_count, csv_count, vod_count, parquet_count = agg.load_all()
         assert json_count == 2
         assert vod_count == 1
 
@@ -963,6 +1020,109 @@ class TestS3Integration:
         # s3_streamer_a and s3_streamer_b share user2 and user3 => weight 2
         assert g.has_edge("s3_streamer_a", "s3_streamer_b")
         assert g["s3_streamer_a"]["s3_streamer_b"]["weight"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Parquet Snapshot Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestParquetSnapshots:
+    """Tests for Parquet-based snapshot loading via storage backend."""
+
+    @pytest.fixture
+    def parquet_storage(self):
+        """Create a MockS3Storage with Parquet data."""
+        import pandas as pd
+        from io import BytesIO
+
+        rows = [
+            {
+                "channel": "pq_streamer_a",
+                "timestamp": "2025-03-01T10:00:00",
+                "viewer_count": 500,
+                "game_name": "Valorant",
+                "title": "Ranked",
+                "started_at": "2025-03-01T08:00:00",
+                "language": "en",
+                "chatters_json": '["alice", "bob", "carol"]',
+            },
+            {
+                "channel": "pq_streamer_b",
+                "timestamp": "2025-03-01T10:00:00",
+                "viewer_count": 300,
+                "game_name": "Fortnite",
+                "title": "Squads",
+                "started_at": "2025-03-01T09:00:00",
+                "language": "en",
+                "chatters_json": '["bob", "carol", "dave"]',
+            },
+        ]
+        df = pd.DataFrame(rows)
+        buf = BytesIO()
+        df.to_parquet(buf, index=False, engine="pyarrow")
+        parquet_bytes = buf.getvalue()
+
+        return MockS3Storage(
+            parquet_data={"raw/snapshots/2025/03/01/cycle_20250301_100000.parquet": parquet_bytes}
+        )
+
+    def test_load_parquet_snapshots_count(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        count = agg.load_parquet_snapshots()
+        assert count == 2
+
+    def test_parquet_channels_populated(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        agg.load_parquet_snapshots()
+        viewers = agg.get_channel_viewers()
+        assert "pq_streamer_a" in viewers
+        assert "pq_streamer_b" in viewers
+
+    def test_parquet_viewer_sets_correct(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        agg.load_parquet_snapshots()
+        viewers = agg.get_channel_viewers()
+        assert viewers["pq_streamer_a"] == {"alice", "bob", "carol"}
+        assert viewers["pq_streamer_b"] == {"bob", "carol", "dave"}
+
+    def test_parquet_source_count_tracked(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        agg.load_parquet_snapshots()
+        assert agg.snapshot_source_counts.get("live", 0) == 2
+
+    def test_parquet_graph_edge_on_overlap(self, parquet_storage, tmp_path):
+        """Parquet data flows into the graph with correct overlap weights."""
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        agg.load_parquet_snapshots()
+        viewers = agg.get_channel_viewers()
+
+        builder = GraphBuilder(overlap_threshold=1)
+        g = builder.build_graph(viewers)
+
+        # pq_streamer_a and pq_streamer_b share bob, carol => weight 2
+        assert g.has_edge("pq_streamer_a", "pq_streamer_b")
+        assert g["pq_streamer_a"]["pq_streamer_b"]["weight"] == 2
+
+    def test_parquet_metadata_stored(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        agg.load_parquet_snapshots()
+        meta = agg.get_channel_metadata()
+        assert meta["pq_streamer_a"]["game_name"] == "Valorant"
+        assert meta["pq_streamer_a"]["viewer_count"] == 500
+
+    def test_load_all_includes_parquet_count(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        result = agg.load_all()
+        assert len(result) == 4
+        json_count, csv_count, vod_count, parquet_count = result
+        assert parquet_count == 2
+
+    def test_memory_estimate(self, parquet_storage, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=parquet_storage)
+        agg.load_parquet_snapshots()
+        mb = agg.get_viewer_memory_estimate_mb()
+        assert mb >= 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1011,7 +1171,7 @@ class TestMixedLiveVOD:
     def test_load_all_counts_both_sources(self, mixed_logs_dir):
         agg = DataAggregator(str(mixed_logs_dir))
         agg.storage = None
-        json_count, csv_count, vod_count = agg.load_all()
+        json_count, csv_count, vod_count, parquet_count = agg.load_all()
         assert json_count == 1
         assert vod_count == 1
 
@@ -1065,3 +1225,333 @@ class TestMixedLiveVOD:
         assert len(partition) == 2  # live_channel and vod_channel
         assert "live_channel" in partition
         assert "vod_channel" in partition
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DynamoDB Collection State Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MockDynamoDBTable:
+    """In-memory mock of a DynamoDB Table resource for testing."""
+
+    def __init__(self):
+        self._items = {}
+
+    def get_item(self, Key, ConsistentRead=False):
+        pk = Key["pk"]
+        if pk in self._items:
+            return {"Item": self._items[pk]}
+        return {}
+
+    def put_item(self, Item, ConditionExpression=None):
+        pk = Item["pk"]
+        if ConditionExpression == "attribute_not_exists(pk)" and pk in self._items:
+            from botocore.exceptions import ClientError
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "exists"}},
+                "PutItem",
+            )
+        self._items[pk] = Item
+
+
+class MockDynamoDBResource:
+    """Mock boto3 DynamoDB resource that returns MockDynamoDBTable."""
+
+    def __init__(self):
+        self._tables = {}
+
+    def Table(self, name):
+        if name not in self._tables:
+            self._tables[name] = MockDynamoDBTable()
+        return self._tables[name]
+
+
+class TestDynamoDBCollectionState:
+
+    @pytest.fixture
+    def dynamo_state(self):
+        resource = MockDynamoDBResource()
+        return DynamoDBCollectionState(
+            table_name="test-state",
+            dynamodb_resource=resource,
+            ttl_days=32,
+        )
+
+    def test_has_collected_returns_false_initially(self, dynamo_state):
+        assert dynamo_state.has_collected("live", "xqc", "2026-03-10") is False
+
+    def test_mark_collected_returns_true_first_time(self, dynamo_state):
+        assert dynamo_state.mark_collected("live", "xqc", "2026-03-10") is True
+
+    def test_mark_collected_returns_false_second_time(self, dynamo_state):
+        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
+        assert dynamo_state.mark_collected("live", "xqc", "2026-03-10") is False
+
+    def test_has_collected_returns_true_after_mark(self, dynamo_state):
+        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
+        assert dynamo_state.has_collected("live", "xqc", "2026-03-10") is True
+
+    def test_different_days_are_independent(self, dynamo_state):
+        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
+        assert dynamo_state.has_collected("live", "xqc", "2026-03-11") is False
+
+    def test_different_sources_are_independent(self, dynamo_state):
+        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
+        assert dynamo_state.has_collected("vod", "xqc", "2026-03-10") is False
+
+    def test_channel_name_normalized_to_lowercase(self, dynamo_state):
+        dynamo_state.mark_collected("live", "XQC", "2026-03-10")
+        assert dynamo_state.has_collected("live", "xqc", "2026-03-10") is True
+
+    def test_pk_format(self):
+        pk = DynamoDBCollectionState._make_pk("live", "XQC", "2026-03-10")
+        assert pk == "live#xqc#2026-03-10"
+
+    def test_ttl_is_set_in_item(self):
+        resource = MockDynamoDBResource()
+        state = DynamoDBCollectionState(
+            table_name="test-state",
+            dynamodb_resource=resource,
+            ttl_days=32,
+        )
+        state.mark_collected("live", "xqc", "2026-03-10")
+        table = resource._tables["test-state"]
+        item = table._items["live#xqc#2026-03-10"]
+        assert "ttl" in item
+        assert isinstance(item["ttl"], int)
+        assert item["ttl"] > 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SQS Config Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSQSConfig:
+
+    def test_default_disabled(self):
+        cfg = SQSConfig()
+        assert cfg.enabled is False
+
+    def test_enabled_requires_queue_url(self):
+        with pytest.raises(ValueError, match="queue_url required"):
+            SQSConfig(enabled=True)
+
+    def test_enabled_with_queue_url(self):
+        cfg = SQSConfig(enabled=True, queue_url="https://sqs.us-east-1.amazonaws.com/123/queue.fifo")
+        assert cfg.enabled is True
+
+    def test_pipeline_config_includes_sqs(self):
+        cfg = PipelineConfig()
+        assert cfg.sqs is not None
+        assert isinstance(cfg.sqs, SQSConfig)
+        assert cfg.sqs.enabled is False
+
+    def test_env_override(self):
+        with patch.dict(os.environ, {"SQS_ENABLED": "true", "SQS_CHANNEL_QUEUE_URL": "https://sqs.example.com/q.fifo"}):
+            cfg = SQSConfig()
+            assert cfg.enabled is True
+            assert cfg.queue_url == "https://sqs.example.com/q.fifo"
+
+    def test_dynamodb_table_env_override(self):
+        with patch.dict(os.environ, {"DYNAMODB_STATE_TABLE": "my-custom-table"}):
+            cfg = SQSConfig()
+            assert cfg.dynamodb_state_table == "my-custom-table"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SQS Task Queue Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class MockSQSClient:
+    """In-memory mock of boto3 SQS client."""
+
+    def __init__(self):
+        self._messages = []  # list of {"Body": str, "MessageId": str, "ReceiptHandle": str}
+        self._next_id = 0
+
+    def send_message_batch(self, QueueUrl, Entries):
+        successful = []
+        for entry in Entries:
+            self._next_id += 1
+            msg_id = f"msg-{self._next_id}"
+            self._messages.append({
+                "Body": entry["MessageBody"],
+                "MessageId": msg_id,
+                "ReceiptHandle": f"rh-{msg_id}",
+            })
+            successful.append({"Id": entry["Id"], "MessageId": msg_id})
+        return {"Successful": successful, "Failed": []}
+
+    def receive_message(self, QueueUrl, MaxNumberOfMessages=1, VisibilityTimeout=900, WaitTimeSeconds=0):
+        batch = self._messages[:MaxNumberOfMessages]
+        self._messages = self._messages[MaxNumberOfMessages:]
+        return {"Messages": batch} if batch else {}
+
+    def delete_message(self, QueueUrl, ReceiptHandle):
+        return {}
+
+
+class TestChannelTask:
+
+    def test_round_trip_json(self):
+        task = ChannelTask(channel="xqc", cycle_id="2026-03-11T14:00:00", utc_day="2026-03-11")
+        restored = ChannelTask.from_json(task.to_json())
+        assert restored.channel == "xqc"
+        assert restored.cycle_id == "2026-03-11T14:00:00"
+        assert restored.utc_day == "2026-03-11"
+
+
+class TestSQSTaskQueue:
+
+    @pytest.fixture
+    def queue(self):
+        client = MockSQSClient()
+        return SQSTaskQueue(queue_url="https://sqs.example.com/q.fifo", sqs_client=client), client
+
+    def test_publish_and_receive(self, queue):
+        q, client = queue
+        tasks = [
+            ChannelTask(channel="xqc", cycle_id="c1", utc_day="2026-03-11"),
+            ChannelTask(channel="shroud", cycle_id="c1", utc_day="2026-03-11"),
+        ]
+        sent = q.publish_tasks(tasks)
+        assert sent == 2
+
+        received = q.receive_tasks(max_messages=10)
+        assert len(received) == 2
+        assert received[0]["task"].channel == "xqc"
+        assert received[1]["task"].channel == "shroud"
+
+    def test_receive_empty_queue(self, queue):
+        q, _ = queue
+        received = q.receive_tasks(max_messages=10)
+        assert received == []
+
+    def test_delete_task(self, queue):
+        q, client = queue
+        q.publish_tasks([ChannelTask(channel="a", cycle_id="c1", utc_day="d1")])
+        received = q.receive_tasks(max_messages=1)
+        assert q.delete_task(received[0]["receipt_handle"]) is True
+
+    def test_publish_large_batch(self, queue):
+        """Batches of >10 are split into sub-batches of 10."""
+        q, client = queue
+        tasks = [ChannelTask(channel=f"ch{i}", cycle_id="c1", utc_day="d1") for i in range(25)]
+        sent = q.publish_tasks(tasks)
+        assert sent == 25
+        assert len(client._messages) == 25
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Discovery Service Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDiscovery:
+
+    def test_run_discovery_publishes_new_channels(self):
+        """Discovery should publish tasks for channels not yet collected."""
+        sqs_client = MockSQSClient()
+        dynamo_resource = MockDynamoDBResource()
+
+        with patch("discovery.fetch_top_channels", return_value=["ch_a", "ch_b", "ch_c"]):
+            result = run_discovery(
+                channel_limit=100,
+                queue_url="https://sqs.example.com/q.fifo",
+                dynamodb_table="test-state",
+                sqs_client=sqs_client,
+                dynamodb_resource=dynamo_resource,
+            )
+
+        assert result["discovered"] == 3
+        assert result["skipped"] == 0
+        assert result["published"] == 3
+        assert len(sqs_client._messages) == 3
+
+    def test_run_discovery_skips_already_collected(self):
+        """Channels already in DynamoDB should be skipped."""
+        sqs_client = MockSQSClient()
+        dynamo_resource = MockDynamoDBResource()
+
+        # Pre-mark ch_b as collected
+        state = DynamoDBCollectionState(
+            table_name="test-state",
+            dynamodb_resource=dynamo_resource,
+        )
+        from datetime import datetime, timezone
+        utc_day = datetime.now(timezone.utc).date().isoformat()
+        state.mark_collected("live", "ch_b", utc_day)
+
+        with patch("discovery.fetch_top_channels", return_value=["ch_a", "ch_b", "ch_c"]):
+            result = run_discovery(
+                channel_limit=100,
+                queue_url="https://sqs.example.com/q.fifo",
+                dynamodb_table="test-state",
+                sqs_client=sqs_client,
+                dynamodb_resource=dynamo_resource,
+            )
+
+        assert result["discovered"] == 3
+        assert result["skipped"] == 1
+        assert result["published"] == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Worker Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestWorkerHelpers:
+
+    def test_collect_channel_returns_row_on_success(self):
+        mock_info = {
+            "viewer_count": 1500,
+            "game_name": "Valorant",
+            "title": "Ranked",
+            "started_at": "2026-03-11T12:00:00Z",
+            "language": "en",
+        }
+        with patch("worker.requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"data": [mock_info]}
+            mock_resp.raise_for_status = MagicMock()
+            mock_requests.get.return_value = mock_resp
+            row = _collect_channel("xqc", "client123", "oauth123")
+
+        assert row is not None
+        assert row["channel"] == "xqc"
+        assert row["viewer_count"] == 1500
+        assert row["game_name"] == "Valorant"
+
+    def test_collect_channel_returns_none_when_offline(self):
+        with patch("worker.requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"data": []}
+            mock_resp.raise_for_status = MagicMock()
+            mock_requests.get.return_value = mock_resp
+            row = _collect_channel("offline_ch", "client123", "oauth123")
+
+        assert row is None
+
+    def test_flush_parquet_writes_to_storage(self):
+        rows = [
+            {
+                "channel": "test_ch",
+                "timestamp": "2026-03-11T14:00:00",
+                "viewer_count": 100,
+                "game_name": "Test",
+                "title": "Test stream",
+                "started_at": "2026-03-11T12:00:00Z",
+                "language": "en",
+                "chatters_json": "[]",
+            }
+        ]
+        storage = MockS3Storage()
+        _flush_parquet(rows, storage, "20260311_140000")
+        assert len(storage._parquet) == 1
+        key = list(storage._parquet.keys())[0]
+        assert key.startswith("raw/snapshots/")
+        assert key.endswith(".parquet")

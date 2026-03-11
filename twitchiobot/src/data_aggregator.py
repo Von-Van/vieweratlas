@@ -11,7 +11,9 @@ Supports both local filesystem and S3 storage backends.
 import json
 import csv
 import os
+import logging
 from collections import defaultdict
+from io import BytesIO
 from typing import Dict, Set, List, Tuple, Optional
 from pathlib import Path
 from datetime import datetime
@@ -22,6 +24,8 @@ try:
     HAS_STORAGE = True
 except ImportError:
     HAS_STORAGE = False
+
+logger = logging.getLogger(__name__)
 
 
 class DataAggregator:
@@ -175,7 +179,7 @@ class DataAggregator:
                     
                     for row in reader:
                         channel = row.get("channel", "").lower()
-                        chatter = row.get("chatter", "").lower()
+                        chatter = row.get("username", row.get("chatter", "")).lower()
                         
                         if not channel or not chatter:
                             continue
@@ -293,18 +297,83 @@ class DataAggregator:
 
         return count
     
-    def load_all(self) -> Tuple[int, int, int]:
+    def load_parquet_snapshots(self) -> int:
         """
-        Load all available snapshots (both JSON and CSV).
-        
+        Load Parquet snapshot files (consolidated cycle format).
+
+        Parquet schema: channel, timestamp, viewer_count, game_name, title,
+        started_at, language, chatters_json
+
         Returns:
-            Tuple of (json_count, csv_count, vod_count)
+            Number of channel snapshots loaded
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            logger.warning("pandas not installed; skipping Parquet snapshot loading")
+            return 0
+
+        count = 0
+
+        if self.storage:
+            parquet_keys = self.storage.list_files(
+                prefix="raw/snapshots", suffix=".parquet"
+            )
+            for key in parquet_keys:
+                try:
+                    parquet_bytes = self.storage.download_parquet(key)
+                    if parquet_bytes is None:
+                        continue
+                    df = pd.read_parquet(BytesIO(parquet_bytes))
+                    for _, row in df.iterrows():
+                        snapshot = row.to_dict()
+                        # Decode chatters_json back to list
+                        chatters_json = snapshot.pop("chatters_json", "[]")
+                        snapshot["chatters"] = json.loads(chatters_json)
+                        if self._ingest_snapshot(snapshot, default_source="live"):
+                            count += 1
+                except Exception as e:
+                    logger.error(f"Error loading Parquet {key}: {e}")
+        else:
+            # Local filesystem fallback
+            search_dir = self.logs_dir / "raw" / "snapshots"
+            if search_dir.exists():
+                parquet_files = list(search_dir.rglob("*.parquet"))
+                for parquet_file in parquet_files:
+                    try:
+                        df = pd.read_parquet(parquet_file)
+                        for _, row in df.iterrows():
+                            snapshot = row.to_dict()
+                            chatters_json = snapshot.pop("chatters_json", "[]")
+                            snapshot["chatters"] = json.loads(chatters_json)
+                            if self._ingest_snapshot(snapshot, default_source="live"):
+                                count += 1
+                    except Exception as e:
+                        logger.error(f"Error loading Parquet {parquet_file}: {e}")
+
+        return count
+
+    def load_all(self) -> Tuple[int, int, int, int]:
+        """
+        Load all available snapshots.
+
+        Returns:
+            Tuple of (json_count, csv_count, vod_count, parquet_count)
         """
         json_count = self.load_json_snapshots()
         csv_count = self.load_csv_snapshots()
         vod_count = self.load_vod_snapshots()
-        return json_count, csv_count, vod_count
+        parquet_count = self.load_parquet_snapshots()
+        return json_count, csv_count, vod_count, parquet_count
     
+    def get_viewer_memory_estimate_mb(self) -> float:
+        """Estimate memory used by viewer sets, in MB."""
+        total_bytes = sum(
+            sum(len(v.encode('utf-8', errors='replace')) for v in viewers)
+            for viewers in self.channel_viewers.values()
+        )
+        return total_bytes / (1024 * 1024)
+
     def get_channel_viewers(self) -> Dict[str, Set[str]]:
         """
         Get the accumulated viewer data.

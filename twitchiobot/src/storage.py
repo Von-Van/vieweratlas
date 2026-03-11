@@ -88,6 +88,16 @@ class BaseStorage(ABC):
         pass
     
     @abstractmethod
+    def upload_parquet(self, key: str, data: bytes, **kwargs) -> bool:
+        """Upload raw Parquet bytes to storage."""
+        pass
+
+    @abstractmethod
+    def download_parquet(self, key: str) -> Optional[bytes]:
+        """Download Parquet bytes from storage. Returns None if not found."""
+        pass
+
+    @abstractmethod
     def get_uri(self, key: str) -> str:
         """Get URI/path for file."""
         pass
@@ -257,6 +267,34 @@ class FileStorage(BaseStorage):
             logger.error(f"Failed to delete file {key}: {e}")
             return False
     
+    def upload_parquet(self, key: str, data: bytes, **kwargs) -> bool:
+        """Upload raw Parquet bytes to local file."""
+        try:
+            path = self._resolve_path(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(data)
+            logger.debug(f"Parquet uploaded: {path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upload Parquet {key}: {e}")
+            return False
+
+    def download_parquet(self, key: str) -> Optional[bytes]:
+        """Download Parquet bytes from local file."""
+        try:
+            path = self._resolve_path(key)
+            if not path.exists():
+                logger.debug(f"Parquet not found: {path}")
+                return None
+            with open(path, 'rb') as f:
+                data = f.read()
+            logger.debug(f"Parquet downloaded: {path}")
+            return data
+        except Exception as e:
+            logger.error(f"Failed to download Parquet {key}: {e}")
+            return None
+
     def get_uri(self, key: str) -> str:
         """Get file:// URI for local file."""
         path = self._resolve_path(key).absolute()
@@ -515,6 +553,41 @@ class S3Storage(BaseStorage):
             logger.error(f"Failed to delete file from S3 {key}: {e}")
             return False
     
+    def upload_parquet(self, key: str, data: bytes, **kwargs) -> bool:
+        """Upload raw Parquet bytes to S3."""
+        try:
+            s3_key = self._resolve_key(key)
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=s3_key,
+                Body=data,
+                ContentType='application/octet-stream',
+                ServerSideEncryption='AES256'
+            )
+            logger.debug(f"Parquet uploaded to S3: s3://{self.bucket}/{s3_key}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upload Parquet to S3 {key}: {e}")
+            return False
+
+    def download_parquet(self, key: str) -> Optional[bytes]:
+        """Download Parquet bytes from S3."""
+        try:
+            s3_key = self._resolve_key(key)
+            response = self.s3.get_object(Bucket=self.bucket, Key=s3_key)
+            data = response['Body'].read()
+            logger.debug(f"Parquet downloaded from S3: s3://{self.bucket}/{s3_key}")
+            return data
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey':
+                logger.debug(f"Parquet not found in S3: {key}")
+                return None
+            logger.error(f"Failed to download Parquet from S3 {key}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to download Parquet from S3 {key}: {e}")
+            return None
+
     def get_uri(self, key: str) -> str:
         """Get s3:// URI for file."""
         s3_key = self._resolve_key(key)

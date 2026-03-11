@@ -61,6 +61,8 @@ ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
+DYNAMODB_STATE_TABLE=${DYNAMODB_STATE_TABLE:-vieweratlas-collection-state}
+SQS_CHANNEL_QUEUE_URL=${SQS_CHANNEL_QUEUE_URL:-}  # populated by ensure_sqs_queue
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
@@ -137,7 +139,7 @@ check_prerequisites() {
 create_ecr_repos() {
     log_info "Ensuring ECR repositories..."
 
-    for repo in vieweratlas-collector vieweratlas-analysis vieweratlas-vod; do
+    for repo in vieweratlas-collector vieweratlas-analysis vieweratlas-vod vieweratlas-discovery vieweratlas-worker; do
         if ! aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1; then
             log_info "Creating repository: $repo"
             aws ecr create-repository \
@@ -280,22 +282,119 @@ JSON
         fi
     }
 
+    local sqs_dynamo_policy_file
+    sqs_dynamo_policy_file=$(mktemp)
+    cat > "$sqs_dynamo_policy_file" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:SendMessageBatch",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueUrl",
+        "sqs:GetQueueAttributes"
+      ],
+      "Resource": ["arn:aws:sqs:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SERVICE_PREFIX}-channel-tasks.fifo"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:Query"
+      ],
+      "Resource": ["arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/${DYNAMODB_STATE_TABLE}"]
+    }
+  ]
+}
+JSON
+
     ensure_task_role "vieweratlas-collector-task-role"
     ensure_task_role "vieweratlas-analysis-task-role"
     ensure_task_role "vieweratlas-vod-collector-task-role"
+    ensure_task_role "vieweratlas-discovery-task-role"
+    ensure_task_role "vieweratlas-worker-task-role"
+
+    # Attach SQS+DynamoDB policy to discovery and worker task roles
+    for role in vieweratlas-discovery-task-role vieweratlas-worker-task-role; do
+        aws iam put-role-policy \
+            --role-name "$role" \
+            --policy-name ViewerAtlasSQSDynamoAccess \
+            --policy-document "file://$sqs_dynamo_policy_file" >/dev/null
+    done
 
     ensure_execution_role "vieweratlas-collector-execution-role" "yes"
     ensure_execution_role "vieweratlas-analysis-execution-role" "no"
     ensure_execution_role "vieweratlas-vod-collector-execution-role" "yes"
+    ensure_execution_role "vieweratlas-discovery-execution-role" "yes"
+    ensure_execution_role "vieweratlas-worker-execution-role" "yes"
 
-    rm -f "$trust_file" "$s3_policy_file" "$secrets_policy_file"
+    rm -f "$trust_file" "$s3_policy_file" "$secrets_policy_file" "$sqs_dynamo_policy_file"
+}
+
+# Ensure SQS FIFO queue exists
+ensure_sqs_queue() {
+    local queue_name="${SERVICE_PREFIX}-channel-tasks.fifo"
+    log_info "Ensuring SQS FIFO queue: $queue_name"
+
+    local existing_url
+    existing_url=$(aws sqs get-queue-url --queue-name "$queue_name" --region "$AWS_REGION" --query 'QueueUrl' --output text 2>/dev/null || echo "")
+
+    if [ -n "$existing_url" ] && [ "$existing_url" != "None" ]; then
+        SQS_CHANNEL_QUEUE_URL="$existing_url"
+        log_info "Queue already exists: $SQS_CHANNEL_QUEUE_URL"
+    else
+        log_info "Creating SQS FIFO queue: $queue_name"
+        SQS_CHANNEL_QUEUE_URL=$(aws sqs create-queue \
+            --queue-name "$queue_name" \
+            --attributes '{
+                "FifoQueue": "true",
+                "ContentBasedDeduplication": "false",
+                "VisibilityTimeout": "900",
+                "MessageRetentionPeriod": "86400"
+            }' \
+            --region "$AWS_REGION" \
+            --query 'QueueUrl' \
+            --output text)
+        log_info "Created queue: $SQS_CHANNEL_QUEUE_URL"
+    fi
+}
+
+# Ensure DynamoDB table for collection state
+ensure_dynamodb_table() {
+    log_info "Ensuring DynamoDB table: $DYNAMODB_STATE_TABLE"
+
+    if aws dynamodb describe-table --table-name "$DYNAMODB_STATE_TABLE" --region "$AWS_REGION" >/dev/null 2>&1; then
+        log_info "Table already exists: $DYNAMODB_STATE_TABLE"
+    else
+        log_info "Creating DynamoDB table: $DYNAMODB_STATE_TABLE"
+        aws dynamodb create-table \
+            --table-name "$DYNAMODB_STATE_TABLE" \
+            --attribute-definitions AttributeName=pk,AttributeType=S \
+            --key-schema AttributeName=pk,KeyType=HASH \
+            --billing-mode PAY_PER_REQUEST \
+            --region "$AWS_REGION" >/dev/null
+
+        log_info "Waiting for table to become active..."
+        aws dynamodb wait table-exists --table-name "$DYNAMODB_STATE_TABLE" --region "$AWS_REGION"
+
+        aws dynamodb update-time-to-live \
+            --table-name "$DYNAMODB_STATE_TABLE" \
+            --time-to-live-specification 'Enabled=true,AttributeName=ttl' \
+            --region "$AWS_REGION" >/dev/null
+        log_info "TTL enabled on attribute 'ttl'"
+    fi
 }
 
 # Register ECS task definitions
 register_task_definitions() {
     log_info "Registering ECS task definitions..."
 
-    for task in collector analysis vod-collector; do
+    for task in collector analysis vod-collector discovery worker; do
         local task_def_file="ecs-task-$task.json"
 
         if [ ! -f "$task_def_file" ]; then
@@ -310,6 +409,8 @@ register_task_definitions() {
             -e "s/\${S3_BUCKET}/$S3_BUCKET/g" \
             -e "s#\${S3_PREFIX}#${S3_PREFIX}#g" \
             -e "s/\${IMAGE_TAG}/$IMAGE_TAG/g" \
+            -e "s#\${SQS_CHANNEL_QUEUE_URL}#${SQS_CHANNEL_QUEUE_URL}#g" \
+            -e "s/\${DYNAMODB_STATE_TABLE}/$DYNAMODB_STATE_TABLE/g" \
             -e "s/\"family\": \"vieweratlas-$task\"/\"family\": \"${SERVICE_PREFIX}-$task\"/" \
             -e "s|/ecs/vieweratlas-$task|/ecs/${SERVICE_PREFIX}-$task|" \
             "$task_def_file" > "$temp_file"
@@ -361,7 +462,7 @@ upsert_services() {
 
     ensure_cluster
 
-    for service in collector analysis vod-collector; do
+    for service in collector analysis vod-collector discovery worker; do
         local full_service_name="${SERVICE_PREFIX}-$service"
         local desired_count="0"
         case "$service" in
@@ -373,6 +474,12 @@ upsert_services() {
                 ;;
             vod-collector)
                 desired_count=${VOD_COLLECTOR_DESIRED_COUNT:-0}
+                ;;
+            discovery)
+                desired_count=${DISCOVERY_DESIRED_COUNT:-0}
+                ;;
+            worker)
+                desired_count=${WORKER_DESIRED_COUNT:-0}
                 ;;
         esac
 
@@ -431,7 +538,11 @@ main() {
     build_and_push "collector" "Dockerfile.collector"
     build_and_push "analysis" "Dockerfile.analysis"
     build_and_push "vod" "Dockerfile.vod"
+    build_and_push "discovery" "Dockerfile.discovery"
+    build_and_push "worker" "Dockerfile.worker"
 
+    ensure_sqs_queue
+    ensure_dynamodb_table
     ensure_iam_roles
     register_task_definitions
     upsert_services

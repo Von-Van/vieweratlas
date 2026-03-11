@@ -163,13 +163,38 @@ class VODConfig:
 
 
 @dataclass
+class SQSConfig:
+    """Configuration for SQS-based distributed task queue and DynamoDB dedup."""
+
+    enabled: bool = False
+    queue_url: str = ""  # SQS FIFO queue URL
+    dynamodb_state_table: str = "vieweratlas-collection-state"
+    worker_concurrency: int = 1  # Number of concurrent worker tasks
+    visibility_timeout_s: int = 900  # SQS message visibility timeout
+
+    def __post_init__(self):
+        env_queue = os.getenv("SQS_CHANNEL_QUEUE_URL")
+        if env_queue:
+            self.queue_url = env_queue
+        env_table = os.getenv("DYNAMODB_STATE_TABLE")
+        if env_table:
+            self.dynamodb_state_table = env_table
+        env_enabled = os.getenv("SQS_ENABLED")
+        if env_enabled:
+            self.enabled = env_enabled.lower() in ("true", "1", "yes")
+        if self.enabled and not self.queue_url:
+            raise ValueError("queue_url required when SQS is enabled")
+
+
+@dataclass
 class PipelineConfig:
     """Combined configuration for entire pipeline."""
-    
+
     collection: CollectionConfig = None
     analysis: AnalysisConfig = None
     vod: VODConfig = None
-    
+    sqs: SQSConfig = None
+
     # Storage backend
     storage_type: str = "file"  # 'file' or 's3'
     s3_bucket: Optional[str] = None  # Required if storage_type='s3'
@@ -192,6 +217,8 @@ class PipelineConfig:
             self.analysis = AnalysisConfig()
         if self.vod is None:
             self.vod = VODConfig()
+        if self.sqs is None:
+            self.sqs = SQSConfig()
 
         # Allow runtime environment to control storage backend selection.
         env_storage_type = os.getenv("STORAGE_TYPE")

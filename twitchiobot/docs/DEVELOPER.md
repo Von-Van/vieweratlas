@@ -11,30 +11,40 @@ This guide provides technical implementation details for developers.
 ## 📁 Module Overview
 
 ```
-twitchiobot/
-├── main.py                 # Pipeline orchestrator (collect → analyze → visualize)
-├── config.py              # Configuration system with 4 presets
-├── storage.py             # Storage abstraction (local files + AWS S3)
+twitchiobot/src/
+├── main.py                    # Pipeline orchestrator (collect → analyze → visualize)
+├── config.py                  # Configuration system with 4 presets + SQSConfig
+├── storage.py                 # Storage abstraction (local files + AWS S3 + Parquet)
 │
-├── get_viewers.py         # Twitch IRC chat collection with retry logic
-├── update_channels.py     # Fetch top channels via Helix API
-├── vod_collector.py       # VOD chat replay ingestion (TwitchDownloaderCLI)
-├── data_aggregator.py     # Load & aggregate viewer data from storage
-├── graph_builder.py       # Build overlap network with NetworkX
-├── community_detector.py  # Louvain community detection
-├── cluster_tagger.py      # Generate community labels (game/language)
-├── visualizer.py          # Create PNG & HTML visualizations
+├── get_viewers.py             # Twitch IRC chat collection → consolidated Parquet
+├── update_channels.py         # Fetch top channels via Helix API
+├── vod_collector.py           # VOD chat replay ingestion (TwitchDownloaderCLI)
+├── daily_collection_state.py  # Dedup state (JSON file or DynamoDB)
+├── data_aggregator.py         # Load & aggregate viewer data (JSON/CSV/Parquet)
+├── graph_builder.py           # Build overlap network with NetworkX
+├── community_detector.py      # Louvain community detection
+├── cluster_tagger.py          # Generate community labels (game/language)
+├── visualizer.py              # Create PNG & HTML visualizations
 │
-├── Dockerfile.collector   # Container for data collection
-├── Dockerfile.analysis    # Container for analysis pipeline
-├── Dockerfile.vod         # Container for VOD preprocessing
-├── docker-compose.yml     # Local Docker testing setup
-├── ecs-task-*.json        # AWS ECS Fargate task definitions
-├── deploy.sh              # Automated AWS deployment script
+├── sqs_task_queue.py          # SQS FIFO task queue (ChannelTask publish/receive)
+├── discovery.py               # Discovery service (find channels → publish to SQS)
+├── worker.py                  # Collector worker (consume SQS → write Parquet to S3)
 │
-├── config.yaml            # Configuration template
-├── .env.example           # Environment variables template
-└── requirements.txt       # Python dependencies
+├── config.yaml                # Configuration template
+├── .env.example               # Environment variables template
+└── requirements.txt           # Python dependencies
+
+twitchiobot/infrastructure/
+├── docker/
+│   ├── Dockerfile.collector   # Container for monolithic data collection
+│   ├── Dockerfile.analysis    # Container for analysis pipeline
+│   ├── Dockerfile.vod         # Container for VOD preprocessing
+│   ├── Dockerfile.discovery   # Container for discovery service
+│   └── Dockerfile.worker      # Container for distributed collector worker
+└── aws/
+    ├── deploy.sh              # Automated AWS deployment (ECR/ECS/SQS/DynamoDB)
+    ├── ecs-task-*.json        # AWS ECS Fargate task definitions
+    └── ...                    # Monitoring, schedules, rollback scripts
 ```
 
 ---
@@ -86,10 +96,11 @@ files = storage.list_files(prefix='raw/snapshots', suffix='.json')
 The analysis pipeline executes in 6 steps:
 
 **1. Aggregation** (`data_aggregator.py`)
-- Loads JSON/CSV logs from storage backend
+- Loads JSON/CSV/Parquet snapshots from storage backend
 - Loads VOD presence snapshots (Parquet or JSON)
 - Builds `{channel: set(viewers)}` structure
-- Generates data quality report with source breakdown
+- Returns 4-tuple: `(json_count, csv_count, vod_count, parquet_count)`
+- Generates data quality report with source breakdown and memory estimate
 
 **2. Graph Building** (`graph_builder.py`)
 - Computes overlaps (shared viewers between channels)
@@ -230,8 +241,8 @@ VOD download retries on transient failures (non-zero exit code, timeout):
 VOD snapshots are automatically loaded during analysis:
 ```python
 aggregator = DataAggregator("logs", storage=storage)
-json_count, csv_count, vod_count = aggregator.load_all()
-# VOD data merged with live data seamlessly
+json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
+# VOD and Parquet data merged with live data seamlessly
 ```
 
 ---
@@ -301,6 +312,51 @@ Load from YAML:
 from config import load_config_from_yaml
 config = load_config_from_yaml("config.yaml")
 ```
+
+---
+
+## 🏗️ Distributed Collection Architecture
+
+The pipeline supports two collection modes:
+
+**Monolithic mode** (original): `main.py collect` runs discovery + collection in a single process. Suitable for smaller deployments.
+
+**Distributed mode** (new): Separates discovery from collection for horizontal scaling.
+
+### Data Flow
+
+```
+EventBridge (hourly) → discovery.py → SQS FIFO queue → worker.py (N instances) → S3 Parquet
+                            ↕                                  ↕
+                      DynamoDB (dedup)                   DynamoDB (dedup)
+```
+
+### Components
+
+- **`discovery.py`**: Fetches top channels from Twitch API, filters already-collected channels via DynamoDB, publishes `ChannelTask` messages to SQS FIFO queue.
+- **`worker.py`**: Long-polls SQS, collects stream metadata per channel, writes consolidated Parquet to S3. Uses DynamoDB conditional writes for race-free dedup across multiple workers.
+- **`sqs_task_queue.py`**: Wraps SQS FIFO with batch publish (10/batch), long-poll receive, and message deletion. Uses channel name as `MessageGroupId` for ordering.
+- **`daily_collection_state.py`**: `DynamoDBCollectionState` class with composite key `{source}#{channel}#{utc_day}`, conditional put for atomic dedup, and 32-day TTL auto-expiry.
+
+### Configuration
+
+```bash
+export SQS_CHANNEL_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123/vieweratlas-channel-tasks.fifo
+export DYNAMODB_STATE_TABLE=vieweratlas-collection-state
+```
+
+Or via `SQSConfig` dataclass in `config.py`:
+```python
+sqs = SQSConfig(enabled=True, queue_url="...", dynamodb_state_table="...")
+```
+
+### Storage Format
+
+Collection now writes **one consolidated Parquet file per cycle** instead of per-channel JSON+CSV. Schema:
+```
+channel | timestamp | viewer_count | game_name | title | started_at | language | chatters_json
+```
+Files stored at: `raw/snapshots/YYYY/MM/DD/cycle_{timestamp}.parquet`
 
 ---
 
@@ -448,11 +504,14 @@ CloudWatch dashboard configuration in [monitoring-dashboard.yaml](monitoring-das
 ### Deployment Script
 
 **deploy.sh** automates:
-1. ECR repository creation (collector, analysis, vod)
+1. ECR repository creation (collector, analysis, vod, discovery, worker)
 2. Docker image builds
 3. Image push to ECR
-4. ECS task definition registration
-5. ECS service updates
+4. SQS FIFO queue creation
+5. DynamoDB table creation (with TTL)
+6. IAM roles with SQS/DynamoDB permissions
+7. ECS task definition registration
+8. ECS service updates
 
 **Usage:**
 ```bash

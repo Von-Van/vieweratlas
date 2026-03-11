@@ -200,7 +200,7 @@ class GraphBuilder:
             for node, attrs in self.graph.nodes(data=True):
                 viewers = attrs.get('viewers', 0)
                 viewer_count = attrs.get('viewer_count', 0)
-                game = attrs.get('game', 'Unknown').replace(',', ';')
+                game = attrs.get('game_name', attrs.get('game', 'Unknown')).replace(',', ';')
                 title = attrs.get('title', '').replace(',', ';')
                 
                 f.write(f"{node},{viewers},{viewer_count},{game},{title}\n")

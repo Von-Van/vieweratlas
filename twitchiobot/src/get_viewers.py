@@ -5,6 +5,7 @@ import logging
 import requests
 import asyncio
 from datetime import datetime
+from io import BytesIO
 from time import sleep
 from twitchio.ext import commands
 from dotenv import load_dotenv
@@ -183,6 +184,9 @@ class ChatLogger(commands.Bot):
             "skipped": 0
         }
 
+        # Collect successful channel data for batch Parquet write
+        parquet_rows = []
+
         for channel, users in self.chatters.items():
             if channel in self.failed_channels:
                 logger.warning(f"[{channel}] Skipping (previous failure): {self.failed_channels[channel]}")
@@ -193,23 +197,24 @@ class ChatLogger(commands.Bot):
                 logger.info(f"[{channel}] Skipping live snapshot: already collected today (UTC)")
                 self.collection_stats["skipped"] += 1
                 continue
-                
+
             stream_info = self.fetch_stream_info(channel)
-            
+
             if not stream_info:
                 logger.error(f"[{channel}] Failed to fetch stream info, skipping log")
                 self.collection_stats["failed"] += 1
                 continue
-            
+
             try:
-                viewer_count = stream_info.get("viewer_count", "Unavailable")
+                viewer_count = stream_info.get("viewer_count", 0)
                 game_name = stream_info.get("game_name", "Unknown")
-                title = stream_info.get("title", "Unavailable")
-                started_at = stream_info.get("started_at", "Unknown")
+                title = stream_info.get("title", "")
+                started_at = stream_info.get("started_at", "")
                 language = stream_info.get("language", stream_info.get("broadcaster_language", ""))
 
                 # Store in-memory summary for optional reuse
                 self.stream_data[channel] = {
+                    "channel": channel,
                     "timestamp": timestamp,
                     "viewer_count": viewer_count,
                     "game_name": game_name,
@@ -226,63 +231,65 @@ class ChatLogger(commands.Bot):
                 print(f"  Start Time  : {started_at}")
                 print(f"  Chatters    : {len(users)}")
 
-                filename_base = f"{channel}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                
-                # Use storage abstraction if available
-                if self.storage:
-                    # S3-friendly paths with date partitioning
-                    date_partition = datetime.now().strftime('%Y/%m/%d')
-                    json_key = f"raw/snapshots/{date_partition}/{filename_base}.json"
-                    csv_key = f"raw/chatter_logs/{date_partition}/{filename_base}.csv"
-                    
-                    # Upload JSON
-                    self.storage.upload_json(json_key, self.stream_data[channel])
-                    
-                    # Upload CSV
-                    csv_rows = []
-                    for user in sorted(users):
-                        csv_rows.append([
-                            timestamp, channel, viewer_count,
-                            game_name, title, started_at, user
-                        ])
-                    headers = ["timestamp", "channel", "viewer_count", 
-                              "game_name", "title", "started_at", "username"]
-                    self.storage.upload_csv(csv_key, csv_rows, headers=headers)
-                    
-                    logger.info(f"[{channel}] Saved: {self.storage.get_uri(json_key)}")
-                else:
-                    # Legacy local file storage
-                    json_path = os.path.join(self.output_dir, f"{filename_base}.json")
-                    csv_path = os.path.join(self.output_dir, f"{filename_base}.csv")
-
-                    # Save JSON
-                    with open(json_path, "w") as f:
-                        json.dump(self.stream_data[channel], f, indent=2)
-
-                    # Save CSV
-                    with open(csv_path, "w", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow([
-                            "timestamp", "channel", "viewer_count",
-                            "game_name", "title", "started_at", "username"
-                        ])
-                        for user in sorted(users):
-                            writer.writerow([
-                                timestamp, channel, viewer_count,
-                                game_name, title, started_at, user
-                            ])
-
-                    logger.info(f"[{channel}] Saved: {csv_path}, {json_path}")
+                parquet_rows.append({
+                    "channel": channel,
+                    "timestamp": timestamp,
+                    "viewer_count": viewer_count,
+                    "game_name": game_name,
+                    "title": title,
+                    "started_at": started_at,
+                    "language": language,
+                    "chatters_json": json.dumps(sorted(users)),
+                })
 
                 self.daily_state.mark_collected("live", channel)
                 self.collection_stats["successful"] += 1
-                
+
             except Exception as e:
-                logger.error(f"[{channel}] Error writing logs: {e}")
+                logger.error(f"[{channel}] Error processing {channel}: {e}")
                 self.collection_stats["failed"] += 1
-        
+
+        # Batch write: one Parquet file per cycle with all channels
+        if parquet_rows and self.storage:
+            self._flush_cycle_parquet(parquet_rows)
+        elif parquet_rows:
+            self._flush_cycle_parquet_local(parquet_rows)
+
         # Print summary statistics
         self.print_collection_stats()
+
+    def _flush_cycle_parquet(self, rows: list):
+        """Write all channel data for this cycle as a single Parquet file to storage."""
+        try:
+            import pandas as pd
+            df = pd.DataFrame(rows)
+            buf = BytesIO()
+            df.to_parquet(buf, index=False, engine="pyarrow")
+            parquet_bytes = buf.getvalue()
+
+            date_partition = datetime.now().strftime('%Y/%m/%d')
+            cycle_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            key = f"raw/snapshots/{date_partition}/cycle_{cycle_ts}.parquet"
+
+            self.storage.upload_parquet(key, parquet_bytes)
+            logger.info(f"Cycle Parquet saved ({len(rows)} channels): {self.storage.get_uri(key)}")
+        except Exception as e:
+            logger.error(f"Failed to write cycle Parquet: {e}")
+
+    def _flush_cycle_parquet_local(self, rows: list):
+        """Fallback: write Parquet to local filesystem without storage abstraction."""
+        try:
+            import pandas as pd
+            df = pd.DataFrame(rows)
+            date_dir = os.path.join(self.output_dir, "raw", "snapshots",
+                                    datetime.now().strftime('%Y/%m/%d'))
+            os.makedirs(date_dir, exist_ok=True)
+            cycle_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(date_dir, f"cycle_{cycle_ts}.parquet")
+            df.to_parquet(path, index=False, engine="pyarrow")
+            logger.info(f"Cycle Parquet saved locally ({len(rows)} channels): {path}")
+        except Exception as e:
+            logger.error(f"Failed to write local cycle Parquet: {e}")
     
     def print_collection_stats(self):
         """Print collection statistics."""

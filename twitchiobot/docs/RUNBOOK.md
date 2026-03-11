@@ -6,6 +6,9 @@ This runbook covers standard production operations for ViewerAtlas on AWS.
 
 - ECS service (always on): `vieweratlas-collector`
 - ECS scheduled tasks: `vieweratlas-analysis`, `vieweratlas-vod-collector`
+- ECS distributed services: `vieweratlas-discovery`, `vieweratlas-worker`
+- SQS FIFO queue: `vieweratlas-channel-tasks.fifo`
+- DynamoDB table: `vieweratlas-collection-state` (dedup state with 32-day TTL)
 - Schedules managed by: `twitchiobot/infrastructure/aws/create-schedules.sh`
 - Monitoring managed by: `twitchiobot/infrastructure/aws/apply-monitoring.sh`
 
@@ -19,6 +22,8 @@ This runbook covers standard production operations for ViewerAtlas on AWS.
    - `aws logs tail /ecs/vieweratlas-collector --region <region> --since 30m`
    - `aws logs tail /ecs/vieweratlas-analysis --region <region> --since 30m`
    - `aws logs tail /ecs/vieweratlas-vod-collector --region <region> --since 30m`
+   - `aws logs tail /ecs/vieweratlas-discovery --region <region> --since 30m`
+   - `aws logs tail /ecs/vieweratlas-worker --region <region> --since 30m`
 4. Check data freshness.
    - `bash smoke-test.sh`
 5. If deploy-related, identify current task definition revisions and image tags.
@@ -116,7 +121,15 @@ aws ecs update-service \
 - Confirm VOD schedule/rule target config and network settings
 - If using EFS queue persistence, verify mount and EFS health
 
-### E. Alarm/Notification Gaps
+### E. Discovery or Worker Task Failures
+
+- Check `/ecs/vieweratlas-discovery` and `/ecs/vieweratlas-worker` logs
+- Verify SQS queue exists and is not empty: `aws sqs get-queue-attributes --queue-url <url> --attribute-names ApproximateNumberOfMessages`
+- Verify DynamoDB table is accessible: `aws dynamodb describe-table --table-name vieweratlas-collection-state`
+- Confirm env vars `SQS_CHANNEL_QUEUE_URL` and `DYNAMODB_STATE_TABLE` in task definitions
+- If workers are stuck, check message visibility timeout (default 900s)
+
+### F. Alarm/Notification Gaps
 
 - Re-run `apply-monitoring.sh`
 - Confirm SNS topic exists and subscriptions are confirmed

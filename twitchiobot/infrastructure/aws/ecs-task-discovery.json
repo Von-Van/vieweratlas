@@ -1,0 +1,64 @@
+{
+  "family": "vieweratlas-discovery",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "containerDefinitions": [
+    {
+      "name": "discovery",
+      "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-discovery:${IMAGE_TAG}",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/vieweratlas-discovery",
+          "awslogs-region": "${AWS_REGION}",
+          "awslogs-stream-prefix": "discovery"
+        }
+      },
+      "environment": [
+        {
+          "name": "STORAGE_TYPE",
+          "value": "s3"
+        },
+        {
+          "name": "S3_BUCKET",
+          "value": "${S3_BUCKET}"
+        },
+        {
+          "name": "S3_PREFIX",
+          "value": "${S3_PREFIX}"
+        },
+        {
+          "name": "S3_REGION",
+          "value": "${AWS_REGION}"
+        },
+        {
+          "name": "SQS_CHANNEL_QUEUE_URL",
+          "value": "${SQS_CHANNEL_QUEUE_URL}"
+        },
+        {
+          "name": "DYNAMODB_STATE_TABLE",
+          "value": "${DYNAMODB_STATE_TABLE}"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "TWITCH_OAUTH_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token"
+        },
+        {
+          "name": "TWITCH_CLIENT_ID",
+          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id"
+        }
+      ]
+    }
+  ],
+  "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-discovery-task-role",
+  "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-discovery-execution-role"
+}

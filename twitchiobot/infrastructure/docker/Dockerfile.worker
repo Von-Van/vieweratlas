@@ -1,0 +1,24 @@
+# ViewerAtlas Collector Worker - Docker Image
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY src/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY src/*.py ./
+
+RUN mkdir -p /app/logs
+
+ENV PYTHONUNBUFFERED=1
+ENV LOGS_DIR=/app/logs
+
+HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \
+    CMD python -c "import os,time; f='/app/logs/.heartbeat'; exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f)<7200 else 1)"
+
+CMD ["python", "-u", "worker.py"]

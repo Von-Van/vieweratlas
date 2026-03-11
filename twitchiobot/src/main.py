@@ -340,9 +340,12 @@ class PipelineRunner:
     def _step_aggregate(self) -> Optional[DataAggregator]:
         """Aggregation step."""
         aggregator = DataAggregator(self.config.analysis.logs_dir, storage=self.storage)
-        json_count, csv_count, vod_count = aggregator.load_all()
+        json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
         self.logger.info(
-            f"Loaded {json_count} JSON snapshots + {csv_count} CSV records + {vod_count} VOD snapshots"
+            f"Loaded {json_count} JSON + {csv_count} CSV + {vod_count} VOD + {parquet_count} Parquet snapshots"
+        )
+        self.logger.info(
+            f"Viewer set memory estimate: {aggregator.get_viewer_memory_estimate_mb():.1f} MB"
         )
         
         stats = aggregator.get_statistics()
