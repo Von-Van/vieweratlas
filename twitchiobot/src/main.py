@@ -44,6 +44,7 @@ from config import (
 )
 from storage import get_storage
 from vod_collector import VODCollector
+from frontend_exporter import export_frontend_data
 
 load_dotenv()
 
@@ -315,9 +316,10 @@ class PipelineRunner:
             self.logger.info("\n[6/6] SAVING RESULTS")
             self.logger.info("-" * 70)
             self._step_save_results(
-                partition, labels, 
-                graph, aggregator, 
-                detection_stats, tagging_stats
+                partition, labels,
+                graph, aggregator,
+                detection_stats, tagging_stats,
+                communities
             )
             
             self.logger.info("\n" + "=" * 70)
@@ -478,8 +480,8 @@ class PipelineRunner:
             except Exception as e:
                 self.logger.warning(f"Interactive visualization failed: {e}")
     
-    def _step_save_results(self, partition, labels, graph, aggregator, 
-                          detection_stats, tagging_stats):
+    def _step_save_results(self, partition, labels, graph, aggregator,
+                          detection_stats, tagging_stats, communities=None):
         """Save results to files."""
         graph_stats = {
             "num_nodes": graph.number_of_nodes(),
@@ -508,6 +510,22 @@ class PipelineRunner:
             results_key = "processed/analysis_results.json"
             self.storage.upload_json(results_key, results)
             self.logger.info(f"✓ Results saved to {self.storage.get_uri(results_key)}")
+
+        # Export frontend-ready JSON for S3/CloudFront serving
+        if communities is not None:
+            try:
+                export_frontend_data(
+                    graph=graph,
+                    partition=partition,
+                    communities=communities,
+                    labels=labels,
+                    detection_stats=detection_stats,
+                    aggregator_stats=aggregator.get_statistics(),
+                    storage=self.storage,
+                )
+                self.logger.info("✓ Frontend data exported")
+            except Exception as e:
+                self.logger.warning(f"Frontend export failed (non-fatal): {e}")
     
     def wait_until_next_hour(self):
         """Wait until top of hour (or configured interval)."""

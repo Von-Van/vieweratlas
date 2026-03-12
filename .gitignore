@@ -9,6 +9,9 @@ twitchiobot/.env
 twitchiobot/config/.env
 twitchiobot/infrastructure/aws/.env
 
+#claude
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -44,6 +47,11 @@ twitchiobot/chatters_log.csv
 # Internal operational docs (deployment procedures, runbooks, checklists)
 twitchiobot/docs/*.md
 !twitchiobot/docs/DEVELOPER.md
+DEPLOYMENT_GUIDE.md
 
 # Security review artifacts
 security_best_practices_report.md
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
