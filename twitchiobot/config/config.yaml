@@ -46,6 +46,7 @@ vod:
   bucket_len_s: 60
   raw_dir: "vod_raw"
   queue_file: "vod_queue.json"
+  persist_raw_chat: false       # Privacy default: discard raw VOD messages after processing
   cli_path: "TwitchDownloaderCLI"
   auto_discover: false
   vod_limit_per_channel: 1      # One VOD collection per channel/day

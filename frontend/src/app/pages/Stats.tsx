@@ -16,6 +16,11 @@ const COMMUNITY_COLORS = [
   "#FF7B00", "#9147FF", "#1DB954", "#00E5CC", "#848494", "#FF4D6D", "#FFD700", "#4299E1",
 ];
 
+const compactNumber = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
 const CustomTooltipBar = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
     return (
@@ -136,7 +141,7 @@ export function Stats() {
             Dataset Statistics
           </h1>
           <p style={{ color: "#848494", fontSize: 15, lineHeight: 1.6, maxWidth: 550 }}>
-            Aggregated metrics from {overallStats.collectionPeriod}. All data collected via live Twitch chat sampling.
+            Aggregated channel-level metrics produced by the ViewerAtlas analysis pipeline for {overallStats.collectionPeriod}.
           </p>
         </div>
       </div>
@@ -153,7 +158,7 @@ export function Stats() {
           />
           <MetricCard
             icon={<Users size={18} style={{ color: "#00E5CC" }} />}
-            value="4.2M+"
+            value={compactNumber.format(overallStats.totalViewers)}
             label="Unique Viewers Observed"
             sub="Distinct chat participants"
             accent="#00E5CC"
@@ -181,8 +186,8 @@ export function Stats() {
           />
           <MetricCard
             icon={<Clock size={18} style={{ color: "#FFD700" }} />}
-            value="50d"
-            label="Collection Window"
+            value={compactNumber.format(overallStats.dataPoints)}
+            label="Presence Data Points"
             sub={overallStats.collectionPeriod}
             accent="#FFD700"
           />

@@ -663,18 +663,33 @@ class TestConfig:
             "  batch_size: 50\n"
             "  top_channels_limit: 200\n"
             "  collection_interval_minutes: 30\n"
+            "  wait_for_hour_alignment: false\n"
+            "  max_runtime_hours: 8\n"
+            "  max_collection_cycles: 12\n"
             "analysis:\n"
             "  overlap_threshold: 5\n"
             "  resolution: 1.5\n"
             "  min_community_size: 3\n"
+            "vod:\n"
+            "  persist_raw_chat: true\n"
+            "  max_vods_per_run: 7\n"
+            "  max_processing_hours: 2\n"
+            "  rate_limit_delay_s: 3\n"
         )
         config = load_config_from_yaml(str(yaml_file))
         assert config.collection.batch_size == 50
         assert config.collection.top_channels_limit == 200
         assert config.collection.collection_interval_minutes == 30
+        assert config.collection.wait_for_hour_alignment is False
+        assert config.collection.max_runtime_hours == 8
+        assert config.collection.max_collection_cycles == 12
         assert config.analysis.overlap_threshold == 5
         assert config.analysis.resolution == 1.5
         assert config.analysis.min_community_size == 3
+        assert config.vod.persist_raw_chat is True
+        assert config.vod.max_vods_per_run == 7
+        assert config.vod.max_processing_hours == 2
+        assert config.vod.rate_limit_delay_s == 3
 
     def test_yaml_missing_file_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):

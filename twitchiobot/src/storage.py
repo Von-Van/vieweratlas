@@ -120,11 +120,20 @@ class FileStorage(BaseStorage):
         """
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._base_dir_resolved = self.base_dir.resolve()
         logger.info(f"FileStorage initialized: {self.base_dir.absolute()}")
     
     def _resolve_path(self, key: str) -> Path:
-        """Resolve key to full filesystem path."""
-        return self.base_dir / key
+        """Resolve a logical key without allowing escape from the storage root."""
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Storage key must be a non-empty string")
+
+        path = (self.base_dir / key).resolve()
+        try:
+            path.relative_to(self._base_dir_resolved)
+        except ValueError as exc:
+            raise ValueError("Storage key must remain within the storage root") from exc
+        return path
     
     def upload_json(self, key: str, data: dict, **kwargs) -> bool:
         """Upload JSON data to local file."""
@@ -232,7 +241,7 @@ class FileStorage(BaseStorage):
     def list_files(self, prefix: str = "", suffix: str = "") -> List[str]:
         """List files matching prefix and suffix."""
         try:
-            search_dir = self.base_dir / prefix if prefix else self.base_dir
+            search_dir = self._resolve_path(prefix) if prefix else self._base_dir_resolved
             if not search_dir.exists():
                 return []
             
@@ -241,7 +250,7 @@ class FileStorage(BaseStorage):
             
             for path in search_dir.rglob(pattern):
                 if path.is_file():
-                    relative = path.relative_to(self.base_dir)
+                    relative = path.relative_to(self._base_dir_resolved)
                     files.append(str(relative))
             
             logger.debug(f"Listed {len(files)} files with prefix='{prefix}', suffix='{suffix}'")

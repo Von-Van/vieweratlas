@@ -83,7 +83,7 @@ if [ -z "$SNS_TOPIC_ARN" ]; then
 fi
 
 if ! aws sns get-topic-attributes --region "$AWS_REGION" --topic-arn "$SNS_TOPIC_ARN" >/dev/null 2>&1; then
-    fail "SNS topic not found: $SNS_TOPIC_ARN (see docs/DEPLOYMENT.md Phase 4.5)"
+    fail "SNS topic not found: $SNS_TOPIC_ARN (see infrastructure/aws/SNS_SETUP.md)"
 fi
 
 info "Applying monitoring using $MONITORING_CONFIG"

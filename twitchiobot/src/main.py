@@ -661,10 +661,13 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
         storage=storage,
         queue_file=config.vod.queue_file,
         raw_dir=config.vod.raw_dir,
+        persist_raw_chat=config.vod.persist_raw_chat,
         bucket_len_s=config.vod.bucket_len_s,
         cli_path=config.vod.cli_path,
         max_age_hours=config.vod.max_age_hours,
-        min_views=config.vod.min_views
+        min_views=config.vod.min_views,
+        max_processing_hours=config.vod.max_processing_hours,
+        rate_limit_delay_s=config.vod.rate_limit_delay_s
     )
 
     # Cost protection: limit VODs to process

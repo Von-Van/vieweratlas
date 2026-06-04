@@ -3,7 +3,7 @@ Frontend Data Exporter
 
 Transforms pipeline analysis outputs (NetworkX graph, community partition,
 labels, aggregator stats) into a JSON file matching the frontend's TypeScript
-type definitions. The output is written to storage at `public/frontend-data.json`
+type definitions. The output is written to storage at `data/frontend-data.json`
 so the React app can fetch it at runtime.
 """
 
@@ -55,7 +55,7 @@ def export_frontend_data(
     detection_stats: dict,
     aggregator_stats: dict,
     storage: Any,
-    output_key: str = "public/frontend-data.json",
+    output_key: str = "data/frontend-data.json",
 ) -> bool:
     """
     Build and upload the frontend-compatible JSON from pipeline outputs.

@@ -54,6 +54,10 @@ class CollectionConfig:
             raise ValueError("duration_per_batch must be positive")
         if self.top_channels_limit <= 0:
             raise ValueError("top_channels_limit must be positive")
+        if self.max_runtime_hours is not None and self.max_runtime_hours <= 0:
+            raise ValueError("max_runtime_hours must be positive or None")
+        if self.max_collection_cycles is not None and self.max_collection_cycles <= 0:
+            raise ValueError("max_collection_cycles must be positive or None")
         
         # Create logs directory if it doesn't exist
         Path(self.logs_dir).mkdir(exist_ok=True)
@@ -126,6 +130,7 @@ class VODConfig:
     # Storage
     raw_dir: str = "vod_raw"  # Directory for raw VOD chat JSON
     queue_file: str = "vod_queue.json"  # VOD processing queue
+    persist_raw_chat: bool = False  # Opt-in: retain downloaded VOD chat JSON
     
     # TwitchDownloaderCLI
     cli_path: str = "TwitchDownloaderCLI"  # Path to executable
@@ -156,6 +161,12 @@ class VODConfig:
             raise ValueError("max_age_days must be at least 1")
         if self.min_views < 0:
             raise ValueError("min_views cannot be negative")
+        if self.max_vods_per_run is not None and self.max_vods_per_run <= 0:
+            raise ValueError("max_vods_per_run must be positive or None")
+        if self.max_processing_hours is not None and self.max_processing_hours <= 0:
+            raise ValueError("max_processing_hours must be positive or None")
+        if self.rate_limit_delay_s < 0:
+            raise ValueError("rate_limit_delay_s cannot be negative")
         
         # Create directories if they don't exist
         if self.enabled:
@@ -381,7 +392,10 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         collection_interval_minutes=collection_dict.get("collection_interval_minutes", 60),
         batch_size=collection_dict.get("batch_size", 100),
         duration_per_batch=collection_dict.get("duration_per_batch", 60),
-        top_channels_limit=collection_dict.get("top_channels_limit", 5000)
+        top_channels_limit=collection_dict.get("top_channels_limit", 5000),
+        wait_for_hour_alignment=collection_dict.get("wait_for_hour_alignment", True),
+        max_runtime_hours=collection_dict.get("max_runtime_hours", 24),
+        max_collection_cycles=collection_dict.get("max_collection_cycles", 100)
     )
     
     analysis_config = AnalysisConfig(
@@ -400,12 +414,16 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         bucket_len_s=vod_dict.get("bucket_len_s", 60),
         raw_dir=vod_dict.get("raw_dir", "vod_raw"),
         queue_file=vod_dict.get("queue_file", "vod_queue.json"),
+        persist_raw_chat=vod_dict.get("persist_raw_chat", False),
         cli_path=vod_dict.get("cli_path", "TwitchDownloaderCLI"),
         auto_discover=vod_dict.get("auto_discover", False),
         vod_limit_per_channel=vod_dict.get("vod_limit_per_channel", 5),
         max_age_hours=max_age_hours,
         max_age_days=vod_dict.get("max_age_days", 14),
-        min_views=vod_dict.get("min_views", 0)
+        min_views=vod_dict.get("min_views", 0),
+        max_vods_per_run=vod_dict.get("max_vods_per_run", 50),
+        max_processing_hours=vod_dict.get("max_processing_hours", 4),
+        rate_limit_delay_s=vod_dict.get("rate_limit_delay_s", 2)
     )
     
     return PipelineConfig(

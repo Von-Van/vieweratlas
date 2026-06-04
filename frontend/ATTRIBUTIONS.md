@@ -1,3 +1,8 @@
-This Figma Make file includes components from [shadcn/ui](https://ui.shadcn.com/) used under [MIT license](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md).
+# Third-Party Notices
 
-This Figma Make file includes photos from [Unsplash](https://unsplash.com) used under [license](https://unsplash.com/license).
+ViewerAtlas includes adapted component source from
+[shadcn/ui](https://ui.shadcn.com/), distributed under the
+[MIT License](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md).
+
+Other third-party dependencies and their licenses are listed in
+`package-lock.json`.

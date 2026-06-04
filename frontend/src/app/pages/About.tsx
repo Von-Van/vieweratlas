@@ -1,4 +1,4 @@
-import { Github, ArrowRight, MessageSquare, GitMerge, Map, Shield, Code2, Cpu, BarChart2 } from "lucide-react";
+import { Github, ArrowRight, MessageSquare, GitMerge, Map, Shield, Code2, Cpu, BarChart2, Database } from "lucide-react";
 import { Link } from "react-router";
 
 const PIPELINE = [
@@ -8,12 +8,12 @@ const PIPELINE = [
     title: "Collect",
     subtitle: "Live Twitch Chat Sampling",
     color: "#9147FF",
-    desc: "ViewerAtlas connects to Twitch's IRC chat interface and samples chat messages from hundreds of concurrent streams every hour. By logging which viewer usernames are present in which channels, we build a co-occurrence matrix of viewer presence.",
+    desc: "ViewerAtlas connects to Twitch's IRC chat interface and samples configured channel batches. It records which usernames are observed in each collection window without storing message text, then builds a co-occurrence matrix of viewer presence.",
     details: [
-      "IRC bot connects to configured channel list",
-      "Logs unique chatters per stream per hour",
-      "Filters out bot accounts and sub-1-message users",
-      "Stores raw viewer-channel pairs in SQLite",
+      "IRC bot connects to configured channel batches",
+      "Records unique chatters observed per collection window",
+      "Writes batched Parquet presence snapshots",
+      "Supports local storage or encrypted S3 objects",
     ],
   },
   {
@@ -51,18 +51,18 @@ const TECH_STACK = [
   { icon: <MessageSquare size={16} style={{ color: "#00E5CC" }} />, name: "TwitchIO", desc: "IRC chat client" },
   { icon: <Cpu size={16} style={{ color: "#FF7B00" }} />, name: "NetworkX", desc: "Graph construction" },
   { icon: <GitMerge size={16} style={{ color: "#1DB954" }} />, name: "python-louvain", desc: "Community detection" },
-  { icon: <BarChart2 size={16} style={{ color: "#FF4D6D" }} />, name: "Matplotlib / Gephi", desc: "Visualization" },
-  { icon: <Github size={16} style={{ color: "#FFD700" }} />, name: "SQLite", desc: "Raw data storage" },
+  { icon: <Database size={16} style={{ color: "#FF4D6D" }} />, name: "PyArrow / Parquet", desc: "Columnar snapshots" },
+  { icon: <BarChart2 size={16} style={{ color: "#FFD700" }} />, name: "React / Vite", desc: "Interactive portfolio UI" },
 ];
 
 const FAQ = [
   {
     q: "Does ViewerAtlas store personal user data?",
-    a: "No. ViewerAtlas only records the presence of a username in a chat — it does not store message content, account details, or any personal information. Usernames in the dataset are pseudonymous Twitch handles.",
+    a: "ViewerAtlas stores observed Twitch usernames in raw presence snapshots. By default, downloaded VOD message content is discarded after presence extraction, though operators can explicitly opt in to retain raw VOD artifacts. Handles are pseudonymous identifiers and may still be personal data.",
   },
   {
     q: "How often is the data updated?",
-    a: "The pipeline runs every hour, sampling chat presence across the tracked channel list. The community graph is re-computed daily using the accumulated data.",
+    a: "Collection and analysis schedules are configurable. The current pipeline prevents duplicate live collection for the same channel on the same UTC day, while analysis can run on a separate schedule.",
   },
   {
     q: "How does the Louvain algorithm work?",
@@ -226,7 +226,7 @@ export function About() {
             Tech Stack
           </h2>
           <p style={{ color: "#848494", fontSize: 14, marginBottom: 20 }}>
-            Built with open-source Python tooling.
+            Built with an open-source Python data stack and a React visualization layer.
           </p>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
             {TECH_STACK.map((tech) => (
@@ -275,7 +275,7 @@ export function About() {
                   marginBottom: 8,
                 }}
               >
-                Privacy by Design
+                Privacy-Conscious Design
               </h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
@@ -284,10 +284,11 @@ export function About() {
                   </p>
                   <ul className="mt-3 flex flex-col gap-2">
                     {[
-                      "No message content is ever stored",
-                      "Only aggregated viewer presence counts are kept",
+                      "Message content is not retained by default",
+                      "Raw presence data is kept private by default",
+                      "The public frontend receives channel-level aggregates",
                       "No account details or profile data collected",
-                      "Data is automatically purged after 90 days",
+                      "Example AWS retention controls expire raw data",
                     ].map((item) => (
                       <li key={item} className="flex items-start gap-2">
                         <div
@@ -301,7 +302,7 @@ export function About() {
                 </div>
                 <div>
                   <p style={{ color: "#848494", fontSize: 14, lineHeight: 1.7 }}>
-                    The data pipeline only tracks whether a username sent at least one message in a channel during a sampling window — not what they said, not how often, and not who they are. The final graphs display only aggregated channel-level statistics.
+                    The pipeline tracks whether a username appeared in a channel during a sampling window, not what they said. Raw handles remain sensitive operational data; the portfolio frontend is designed to expose only aggregated channel-level statistics.
                   </p>
                 </div>
               </div>

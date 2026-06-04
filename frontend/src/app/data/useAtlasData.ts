@@ -38,12 +38,16 @@ export interface AtlasDataState {
   data: AtlasData | null;
   loading: boolean;
   error: string | null;
+  source: "loading" | "live" | "demo";
+  notice: string | null;
 }
 
 export const AtlasDataContext = createContext<AtlasDataState>({
   data: null,
   loading: true,
   error: null,
+  source: "loading",
+  notice: null,
 });
 
 export function useAtlasData(): AtlasDataState {

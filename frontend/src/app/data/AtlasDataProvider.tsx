@@ -1,61 +1,89 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { AtlasDataContext, type AtlasData, type AtlasDataState } from "./useAtlasData";
 import * as mockData from "./mockData";
+import { validateAtlasData } from "./validateAtlasData";
 
-const DATA_URL = import.meta.env.VITE_DATA_URL as string | undefined;
+const DATA_URL = import.meta.env.VITE_DATA_URL?.trim();
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+const demoData: AtlasData = {
+  communities: mockData.communities,
+  channels: mockData.channels,
+  edges: mockData.edges,
+  overallStats: mockData.overallStats,
+  topCommunitiesBySize: mockData.topCommunitiesBySize,
+  mostConnectedChannels: mockData.mostConnectedChannels,
+};
+
+function resolveSameOriginDataUrl(value: string): string {
+  const url = new URL(value, window.location.origin);
+  if (url.origin !== window.location.origin || !["http:", "https:"].includes(url.protocol)) {
+    throw new Error("VITE_DATA_URL must point to the same origin");
+  }
+  return url.toString();
+}
 
 export function AtlasDataProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AtlasDataState>({
     data: null,
     loading: true,
     error: null,
+    source: "loading",
+    notice: null,
   });
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      // If no remote URL configured, fall back to bundled mock data
       if (!DATA_URL) {
         setState({
-          data: {
-            communities: mockData.communities,
-            channels: mockData.channels,
-            edges: mockData.edges,
-            overallStats: mockData.overallStats,
-            topCommunitiesBySize: mockData.topCommunitiesBySize,
-            mostConnectedChannels: mockData.mostConnectedChannels,
-          },
+          data: demoData,
           loading: false,
           error: null,
+          source: "demo",
+          notice: "Portfolio preview using a bundled demonstration dataset.",
         });
         return;
       }
 
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
+
       try {
-        const res = await fetch(DATA_URL);
+        const res = await fetch(resolveSameOriginDataUrl(DATA_URL), {
+          headers: { Accept: "application/json" },
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json: AtlasData = await res.json();
+        const contentLength = Number(res.headers.get("content-length") ?? 0);
+        if (contentLength > MAX_RESPONSE_BYTES) throw new Error("Atlas data response is too large");
+
+        const json: unknown = await res.json();
+        const data = validateAtlasData(json);
         if (!cancelled) {
-          setState({ data: json, loading: false, error: null });
+          setState({
+            data,
+            loading: false,
+            error: null,
+            source: "live",
+            notice: null,
+          });
         }
       } catch (err) {
         if (!cancelled) {
-          // On fetch failure, fall back to mock data so the site still works
-          console.warn("Failed to fetch live data, using mock data:", err);
+          console.warn("Live atlas data unavailable; using demonstration data.", err);
           setState({
-            data: {
-              communities: mockData.communities,
-              channels: mockData.channels,
-              edges: mockData.edges,
-              overallStats: mockData.overallStats,
-              topCommunitiesBySize: mockData.topCommunitiesBySize,
-              mostConnectedChannels: mockData.mostConnectedChannels,
-            },
+            data: demoData,
             loading: false,
-            error: null,
+            error: "Live data could not be loaded.",
+            source: "demo",
+            notice: "Live data is unavailable; showing the bundled demonstration dataset.",
           });
         }
+      } finally {
+        window.clearTimeout(timeoutId);
       }
     }
 

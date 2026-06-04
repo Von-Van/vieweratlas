@@ -3,6 +3,9 @@ name: Deploy Preflight
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   preflight:
     runs-on: ubuntu-latest

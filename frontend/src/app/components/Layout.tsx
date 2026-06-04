@@ -1,6 +1,10 @@
 import { Link, useLocation, Outlet } from "react-router";
 import { useState } from "react";
-import { Menu, X, Globe, Github } from "lucide-react";
+import { Menu, X, Globe, Github, Info } from "lucide-react";
+import { useAtlasData } from "../data/useAtlasData";
+
+const REPO_URL = "https://github.com/Von-Van/vieweratlas";
+const DATA_POLICY_URL = `${REPO_URL}/blob/main/twitchiobot/docs/DATA_POLICY.md`;
 
 const navLinks = [
   { to: "/map", label: "Community Map" },
@@ -11,11 +15,13 @@ const navLinks = [
 export function Layout() {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { source, notice } = useAtlasData();
 
   return (
     <div style={{ background: "#0E0E10", minHeight: "100vh", color: "#EFEFF1" }}>
       {/* Navbar */}
       <nav
+        aria-label="Primary navigation"
         className="sticky top-0 z-50"
         style={{
           background: "rgba(14, 14, 16, 0.85)",
@@ -84,7 +90,7 @@ export function Layout() {
           {/* Right side */}
           <div className="hidden md:flex items-center gap-3">
             <a
-              href="https://github.com/Von-Van/vieweratlas"
+              href={REPO_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all"
@@ -135,6 +141,8 @@ export function Layout() {
 
           {/* Mobile menu btn */}
           <button
+            aria-expanded={mobileOpen}
+            aria-label={mobileOpen ? "Close navigation menu" : "Open navigation menu"}
             className="md:hidden p-2 rounded-lg"
             style={{ color: "#848494", background: "transparent", border: "none", cursor: "pointer" }}
             onClick={() => setMobileOpen(!mobileOpen)}
@@ -170,7 +178,7 @@ export function Layout() {
             ))}
             <div className="mt-2 flex flex-col gap-2">
               <a
-                href="https://github.com/Von-Van/vieweratlas"
+                href={REPO_URL}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-2 px-3 py-2 rounded-lg"
@@ -189,6 +197,25 @@ export function Layout() {
           </div>
         )}
       </nav>
+
+      {source === "demo" && (
+        <div
+          role="status"
+          className="px-4 py-2.5 flex items-center justify-center gap-2 text-center"
+          style={{
+            color: "#D8C7FF",
+            background: "rgba(145, 71, 255, 0.12)",
+            borderBottom: "1px solid rgba(145, 71, 255, 0.3)",
+            fontSize: 12,
+          }}
+        >
+          <Info size={14} aria-hidden="true" />
+          <span>
+            <strong style={{ color: "#EFEFF1" }}>Demo data:</strong>{" "}
+            {notice ?? "Showing the bundled portfolio dataset."}
+          </span>
+        </div>
+      )}
 
       {/* Main */}
       <main><Outlet /></main>
@@ -254,9 +281,9 @@ export function Layout() {
                   Project
                 </div>
                 {[
-                  { href: "https://github.com/Von-Van/vieweratlas", label: "GitHub Repo" },
-                  { href: "#", label: "Data Pipeline" },
-                  { href: "#", label: "Privacy Policy" },
+                  { href: REPO_URL, label: "GitHub Repo" },
+                  { href: `${REPO_URL}#architecture`, label: "Data Pipeline" },
+                  { href: DATA_POLICY_URL, label: "Data Policy" },
                 ].map((l) => (
                   <div key={l.label} style={{ marginBottom: 8 }}>
                     <a

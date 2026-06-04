@@ -17,7 +17,7 @@ const FEATURES = [
   {
     icon: <Activity size={20} style={{ color: "#9147FF" }} />,
     title: "Live Chat Sampling",
-    desc: "Continuously samples Twitch chat to track which viewers are present across multiple channels simultaneously.",
+    desc: "Samples configured Twitch channel batches and records unique chatters observed during each collection window.",
     accent: "#9147FF",
   },
   {
@@ -39,6 +39,11 @@ const FEATURES = [
     accent: "#1DB954",
   },
 ];
+
+const compactNumber = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 
 function StatCard({
   value,
@@ -275,7 +280,7 @@ export function Landing() {
                 fontSize: 28,
               }}
             >
-              {overallStats.totalChannels.toLocaleString()}+
+              {overallStats.totalChannels.toLocaleString()}
             </div>
             <div
               style={{
@@ -298,7 +303,7 @@ export function Landing() {
                 fontSize: 28,
               }}
             >
-              4.2M+
+              {compactNumber.format(overallStats.totalViewers)}
             </div>
             <div
               style={{

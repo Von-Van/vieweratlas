@@ -1,15 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'"
+    />
+    <meta name="referrer" content="strict-origin-when-cross-origin" />
+    <meta name="theme-color" content="#0E0E10" />
+    <meta
+      name="description"
+      content="ViewerAtlas is an open-source data pipeline and interactive visualization for mapping Twitch communities through shared audience presence."
+    />
+    <meta property="og:title" content="ViewerAtlas | Twitch Community Mapping" />
+    <meta
+      property="og:description"
+      content="Explore an interactive portfolio demo backed by a Python graph-analysis pipeline."
+    />
+    <meta property="og:type" content="website" />
+    <title>ViewerAtlas | Twitch Community Mapping</title>
+  </head>
 
-  <!DOCTYPE html>
-  <html lang="en">
-    <head>
-      <meta charset="UTF-8" />
-      <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>ViewerAtlas</title>
-    </head>
-
-    <body>
-      <div id="root"></div>
-      <script type="module" src="/src/main.tsx"></script>
-    </body>
-  </html>
-  
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -13,6 +13,8 @@ Design based on: vodintegr.txt specification
 import json
 import subprocess
 import logging
+import re
+import time
 import requests
 from pathlib import Path
 from typing import Dict, List, Set, Optional, Tuple
@@ -29,6 +31,23 @@ except ImportError:
     HAS_STORAGE = False
 
 logger = logging.getLogger(__name__)
+
+TWITCH_CHANNEL_LOGIN = re.compile(r"^[a-z0-9_]{1,25}$")
+TWITCH_VOD_ID = re.compile(r"^[0-9]{1,32}$")
+
+
+def _validate_channel_login(channel_login: str) -> str:
+    channel = str(channel_login).strip().lower()
+    if not TWITCH_CHANNEL_LOGIN.fullmatch(channel):
+        raise ValueError("Invalid Twitch channel login")
+    return channel
+
+
+def _validate_vod_id(vod_id: str) -> str:
+    normalized = str(vod_id).strip()
+    if not TWITCH_VOD_ID.fullmatch(normalized):
+        raise ValueError("Invalid Twitch VOD ID")
+    return normalized
 
 
 @dataclass
@@ -327,6 +346,9 @@ class VODQueue:
     
     def add_vod(self, vod_id: str, channel_login: str, vod_created_at: Optional[str] = None):
         """Add VOD to queue"""
+        vod_id = _validate_vod_id(vod_id)
+        channel_login = _validate_channel_login(channel_login)
+
         # Check if already exists
         for item in self.queue:
             if item['vod_id'] == vod_id:
@@ -336,7 +358,7 @@ class VODQueue:
         now = datetime.now().isoformat()
         self.queue.append({
             'vod_id': vod_id,
-            'channel_login': channel_login.lower(),
+            'channel_login': channel_login,
             'status': 'pending',
             'attempt_count': 0,
             'next_attempt_at': now,
@@ -552,7 +574,8 @@ def get_recent_vods_batch(
     channels: List[str],
     limit_per_channel: int = 5,
     max_age_hours: int = 24,
-    min_views: int = 0
+    min_views: int = 0,
+    rate_limit_delay_s: int = 0
 ) -> List[Tuple[str, str, str]]:
     """
     Fetch recent VODs for multiple channels efficiently.
@@ -567,7 +590,7 @@ def get_recent_vods_batch(
         List of (vod_id, channel_login, vod_created_at) tuples
     """
     all_vods = []
-    for channel in channels:
+    for index, channel in enumerate(channels):
         vods = get_recent_vods(
             channel,
             limit=limit_per_channel,
@@ -575,6 +598,8 @@ def get_recent_vods_batch(
             min_views=min_views
         )
         all_vods.extend(vods)
+        if rate_limit_delay_s > 0 and index < len(channels) - 1:
+            time.sleep(rate_limit_delay_s)
     
     logger.info(f"Discovered {len(all_vods)} total VODs across {len(channels)} channels")
     return all_vods
@@ -592,10 +617,13 @@ class VODCollector:
         storage: Optional[BaseStorage] = None,
         queue_file: str = "vod_queue.json",
         raw_dir: str = "vod_raw",
+        persist_raw_chat: bool = False,
         bucket_len_s: int = 60,
         cli_path: str = "TwitchDownloaderCLI",
         max_age_hours: int = 24,
-        min_views: int = 0
+        min_views: int = 0,
+        max_processing_hours: Optional[int] = 4,
+        rate_limit_delay_s: int = 2
     ):
         """
         Initialize VOD collector.
@@ -604,10 +632,13 @@ class VODCollector:
             storage: Storage backend (auto-detects if None)
             queue_file: Path to VOD queue file
             raw_dir: Directory for raw VOD chat JSON files
+            persist_raw_chat: Retain downloaded message-bearing JSON in storage
             bucket_len_s: Bucket window size in seconds
             cli_path: Path to TwitchDownloaderCLI
             max_age_hours: Maximum VOD age in hours (default 24)
             min_views: Minimum view count filter (default 0)
+            max_processing_hours: Stop processing after this many hours
+            rate_limit_delay_s: Delay between per-channel discovery API calls
         """
         # Initialize storage backend
         if storage is not None:
@@ -620,6 +651,7 @@ class VODCollector:
         self.queue = VODQueue(queue_file)
         self.raw_dir = Path(raw_dir)
         self.raw_dir.mkdir(exist_ok=True)
+        self.persist_raw_chat = persist_raw_chat
         if self.storage:
             self.daily_state = DailyCollectionState(storage=self.storage)
         else:
@@ -631,6 +663,8 @@ class VODCollector:
         self.parser = VODChatParser(bucket_len_s)
         self.max_age_hours = max_age_hours
         self.min_views = min_views
+        self.max_processing_hours = max_processing_hours
+        self.rate_limit_delay_s = rate_limit_delay_s
     
     def add_vods_for_channels(self, channels: List[str], vod_limit: int = 5):
         """
@@ -649,7 +683,8 @@ class VODCollector:
             channels,
             limit_per_channel=vod_limit,
             max_age_hours=self.max_age_hours,
-            min_views=self.min_views
+            min_views=self.min_views,
+            rate_limit_delay_s=self.rate_limit_delay_s
         )
 
         queued_today = set()
@@ -681,8 +716,14 @@ class VODCollector:
             logger.info("No pending VODs in queue")
             return False
         
-        vod_id = vod['vod_id']
-        channel = vod['channel_login']
+        try:
+            vod_id = _validate_vod_id(vod['vod_id'])
+            channel = _validate_channel_login(vod['channel_login'])
+        except (KeyError, ValueError) as exc:
+            logger.error("Rejecting invalid VOD queue item: %s", exc)
+            if "vod_id" in vod:
+                self.queue.update_status(str(vod["vod_id"]), 'failed', error=str(exc))
+            return False
         
         if self.daily_state.has_collected("vod", channel):
             logger.info(f"[{channel}] Skipping VOD {vod_id}: already collected today (UTC)")
@@ -701,8 +742,8 @@ class VODCollector:
                 self.queue.update_status(vod_id, 'failed', error="download failed")
                 return False
             
-            # Step 2: Store raw JSON (if using S3)
-            if self.storage:
+            # Step 2: Optionally retain raw message-bearing JSON.
+            if self.storage and self.persist_raw_chat:
                 raw_key = f"raw/vod_chat/channel={channel}/vod_id={vod_id}/chat.json"
                 with open(raw_path, 'r') as f:
                     raw_data = json.load(f)
@@ -792,8 +833,15 @@ class VODCollector:
             max_vods: Maximum number of VODs to process (None = all)
         """
         processed = 0
+        started_at = time.monotonic()
         while True:
             if max_vods and processed >= max_vods:
+                break
+            if (
+                self.max_processing_hours is not None
+                and (time.monotonic() - started_at) / 3600 >= self.max_processing_hours
+            ):
+                logger.warning("VOD processing time limit reached; stopping cleanly")
                 break
             
             if not self.process_next_vod():

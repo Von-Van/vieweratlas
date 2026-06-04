@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from daily_collection_state import DailyCollectionState
 from get_viewers import ChatLogger
 from storage import FileStorage
-from vod_collector import VODCollector, get_recent_vods
+from vod_collector import VODCollector, VODQueue, get_recent_vods
 
 
 def test_daily_collection_state_roundtrip(tmp_path):
@@ -48,9 +48,19 @@ def test_chatlogger_skips_second_live_collection_same_day(tmp_path):
     with patch.object(ChatLogger, "fetch_stream_info", return_value=stream_info):
         asyncio.run(bot.log_results())
 
-    snapshot_files = storage.list_files(prefix="raw/snapshots", suffix=".json")
+    snapshot_files = storage.list_files(prefix="raw/snapshots", suffix=".parquet")
     assert len(snapshot_files) == 1
     assert bot.collection_stats["skipped"] == 1
+
+
+@pytest.mark.parametrize("key", ["../outside.json", "/tmp/outside.json", "nested/../../outside.json"])
+def test_file_storage_rejects_paths_outside_root(tmp_path, key):
+    storage = FileStorage(base_dir=str(tmp_path / "logs"))
+
+    assert storage.upload_json(key, {"unsafe": True}) is False
+    assert storage.list_files(prefix=key) == []
+    with pytest.raises(ValueError, match="storage root"):
+        storage.get_uri(key)
 
 
 def test_vod_discovery_enforces_one_per_channel_per_day(tmp_path):
@@ -76,6 +86,21 @@ def test_vod_discovery_enforces_one_per_channel_per_day(tmp_path):
 
     queued_ids = {item["vod_id"] for item in collector.queue.queue}
     assert queued_ids == {"222", "444"}
+
+
+@pytest.mark.parametrize(
+    ("vod_id", "channel"),
+    [
+        ("../../123", "valid_channel"),
+        ("123", "../../outside"),
+        ("123", "channel/other"),
+    ],
+)
+def test_vod_queue_rejects_unsafe_identifiers(tmp_path, vod_id, channel):
+    queue = VODQueue(str(tmp_path / "vod_queue.json"))
+
+    with pytest.raises(ValueError):
+        queue.add_vod(vod_id, channel)
 
 
 def test_vod_processing_skips_when_channel_already_collected_today(tmp_path):

@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   test-and-validate:
     runs-on: ubuntu-latest
@@ -22,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r twitchiobot/src/requirements.txt
+          pip install -r twitchiobot/requirements-dev.txt
 
       - name: Run pytest
         working-directory: twitchiobot
@@ -54,3 +57,17 @@ jobs:
                   json.load(file_handle)
               print(f"OK: {path}")
           PY
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
