@@ -341,18 +341,21 @@ class S3Storage(BaseStorage):
         # Initialize S3 client
         self.s3 = boto3.client('s3', region_name=region)
         
-        # Verify bucket access
+        # Verify bucket access without requiring an unrestricted ListBucket grant.
+        # HeadBucket is authorized as s3:ListBucket and cannot be scoped to this
+        # storage instance's prefix, whereas GetBucketLocation is bucket metadata
+        # only. Object and listing permissions remain restricted by IAM prefixes.
         try:
-            self.s3.head_bucket(Bucket=bucket)
+            self.s3.get_bucket_location(Bucket=bucket)
             logger.info(f"S3Storage initialized: s3://{bucket}/{self.prefix}")
         except ClientError as e:
-            error_code = e.response['Error']['Code']
-            if error_code == '404':
+            error_code = str(e.response.get('Error', {}).get('Code', ''))
+            if error_code in {'404', 'NoSuchBucket'}:
                 raise ValueError(f"S3 bucket not found: {bucket}")
-            elif error_code == '403':
+            elif error_code in {'403', 'AccessDenied'}:
                 raise ValueError(f"Access denied to S3 bucket: {bucket}")
             else:
-                raise ValueError(f"S3 bucket error: {e}")
+                raise ValueError(f"S3 bucket access check failed ({error_code or 'unknown error'})")
         except NoCredentialsError:
             raise ValueError("AWS credentials not found. Configure with aws configure or environment variables.")
     

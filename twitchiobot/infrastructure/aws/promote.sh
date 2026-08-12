@@ -5,13 +5,14 @@
 #   IMAGE_TAG=abc1234 bash promote.sh
 #
 # The script:
-#   1. Verifies the image tag exists in ECR for all three services
+#   1. Verifies the image tag exists in ECR for collector and analysis
 #   2. Updates prod ECS task definitions to use the validated tag
-#   3. Force-deploys prod ECS services
-#   4. Waits for services to stabilize
-#   5. Runs smoke-test.sh against prod
+#   3. Updates any historical ECS services while keeping desired count zero
+#
+# Scheduled tasks must still pass the controlled rollout in DEPLOYMENT.md.
 
 set -euo pipefail
+export AWS_PAGER=""
 
 load_env_file() {
     local env_file=".env"
@@ -41,6 +42,8 @@ load_env_file
 AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
+DYNAMODB_STATE_TABLE=${DYNAMODB_STATE_TABLE:-vieweratlas-collection-state}
+TWITCH_CREDENTIALS_SECRET_ID=${TWITCH_CREDENTIALS_SECRET_ID:-vieweratlas/twitch/credentials}
 
 # Prod always uses the prod SERVICE_PREFIX / cluster
 PROD_SERVICE_PREFIX="vieweratlas"
@@ -73,7 +76,7 @@ info "  AWS Account: $AWS_ACCOUNT_ID  Region: $AWS_REGION"
 # Step 1: Verify image tag exists in ECR for all services
 # ---------------------------------------------------------------------------
 info "Verifying image tag ${IMAGE_TAG} exists in ECR..."
-for service in collector analysis vod; do
+for service in collector analysis; do
     repo="vieweratlas-${service}"
     image_exists=$(aws ecr describe-images \
         --repository-name "$repo" \
@@ -93,7 +96,7 @@ done
 info "Registering prod task definitions with IMAGE_TAG=${IMAGE_TAG}..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for task in collector analysis vod-collector; do
+for task in collector analysis; do
     task_def_file="${SCRIPT_DIR}/ecs-task-${task}.json"
     if [ ! -f "$task_def_file" ]; then
         warn "Task definition file not found: $task_def_file — skipping"
@@ -106,6 +109,8 @@ for task in collector analysis vod-collector; do
         -e "s/\${S3_BUCKET}/$S3_BUCKET/g" \
         -e "s#\${S3_PREFIX}#${S3_PREFIX}#g" \
         -e "s/\${IMAGE_TAG}/$IMAGE_TAG/g" \
+        -e "s/\${DYNAMODB_STATE_TABLE}/$DYNAMODB_STATE_TABLE/g" \
+        -e "s#\${TWITCH_CREDENTIALS_SECRET_ID}#${TWITCH_CREDENTIALS_SECRET_ID}#g" \
         "$task_def_file" > "$temp_file"
 
     # Strip EFS volume references if EFS_ID not set (prod may not use EFS)
@@ -137,7 +142,7 @@ done
 # Step 3: Force-deploy prod ECS services
 # ---------------------------------------------------------------------------
 info "Deploying to prod cluster=${PROD_CLUSTER}..."
-for service in collector analysis vod-collector; do
+for service in collector analysis; do
     full_service_name="${PROD_SERVICE_PREFIX}-${service}"
 
     task_def_arn=$(aws ecs describe-task-definition \
@@ -168,29 +173,10 @@ for service in collector analysis vod-collector; do
         --cluster "$PROD_CLUSTER" \
         --service "$full_service_name" \
         --task-definition "$task_def_arn" \
+        --desired-count 0 \
         --force-new-deployment \
         --region "$AWS_REGION" >/dev/null
 done
 
-# ---------------------------------------------------------------------------
-# Step 4: Wait for collector service to stabilize
-# ---------------------------------------------------------------------------
-info "Waiting for prod collector service to stabilize..."
-aws ecs wait services-stable \
-    --region "$AWS_REGION" \
-    --cluster "$PROD_CLUSTER" \
-    --services "${PROD_SERVICE_PREFIX}-collector"
-info "Prod collector service is stable"
-
-# ---------------------------------------------------------------------------
-# Step 5: Run smoke test against prod
-# ---------------------------------------------------------------------------
-info "Running smoke test against prod..."
-ENVIRONMENT=prod \
-AWS_REGION="$AWS_REGION" \
-ECS_CLUSTER="$PROD_CLUSTER" \
-S3_BUCKET="$S3_BUCKET" \
-S3_PREFIX="$S3_PREFIX" \
-bash "${SCRIPT_DIR}/smoke-test.sh"
-
-info "Promotion complete: IMAGE_TAG=${IMAGE_TAG} is live in prod"
+info "Promotion registered: IMAGE_TAG=${IMAGE_TAG}"
+warn "Schedules were not changed. Run the small, 100-channel, and full 1,200-channel surveys in DEPLOYMENT.md before enabling production schedules."

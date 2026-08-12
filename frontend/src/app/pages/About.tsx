@@ -8,11 +8,11 @@ const PIPELINE = [
     title: "Collect",
     subtitle: "Live Twitch Chat Sampling",
     color: "#9147FF",
-    desc: "ViewerAtlas connects to Twitch's IRC chat interface and samples configured channel batches. It records which usernames are observed in each collection window without storing message text, then builds a co-occurrence matrix of viewer presence.",
+    desc: "ViewerAtlas subscribes to Twitch EventSub chat events for fixed channel batches. It records each active message author once per five-minute channel sample—using a stable Twitch user ID with the current login—without storing message text, then builds a co-occurrence matrix of audience activity.",
     details: [
-      "IRC bot connects to configured channel batches",
-      "Records unique chatters observed per collection window",
-      "Writes batched Parquet presence snapshots",
+      "EventSub samples strict batches of up to 100 live channels",
+      "Records unique active message authors, not lurkers",
+      "Writes private, batched Parquet presence snapshots",
       "Supports local storage or encrypted S3 objects",
     ],
   },
@@ -48,7 +48,7 @@ const PIPELINE = [
 
 const TECH_STACK = [
   { icon: <Code2 size={16} style={{ color: "#9147FF" }} />, name: "Python 3.11", desc: "Core data pipeline" },
-  { icon: <MessageSquare size={16} style={{ color: "#00E5CC" }} />, name: "TwitchIO", desc: "IRC chat client" },
+  { icon: <MessageSquare size={16} style={{ color: "#00E5CC" }} />, name: "TwitchIO", desc: "EventSub WebSocket client" },
   { icon: <Cpu size={16} style={{ color: "#FF7B00" }} />, name: "NetworkX", desc: "Graph construction" },
   { icon: <GitMerge size={16} style={{ color: "#1DB954" }} />, name: "python-louvain", desc: "Community detection" },
   { icon: <Database size={16} style={{ color: "#FF4D6D" }} />, name: "PyArrow / Parquet", desc: "Columnar snapshots" },
@@ -58,11 +58,11 @@ const TECH_STACK = [
 const FAQ = [
   {
     q: "Does ViewerAtlas store personal user data?",
-    a: "ViewerAtlas stores observed Twitch usernames in raw presence snapshots. By default, downloaded VOD message content is discarded after presence extraction, though operators can explicitly opt in to retain raw VOD artifacts. Handles are pseudonymous identifiers and may still be personal data.",
+    a: "ViewerAtlas stores the Twitch user ID and current normalized login of each active message author in private raw survey snapshots for up to 90 days. It does not store lurkers, message text, fragments, message counts, or per-message timestamps. The public website receives only aggregate channel and community data.",
   },
   {
     q: "How often is the data updated?",
-    a: "Collection and analysis schedules are configurable. The current pipeline prevents duplicate live collection for the same channel on the same UTC day, while analysis can run on a separate schedule.",
+    a: "Production surveys start at 6:00 AM, 2:00 PM, and 10:00 PM Eastern time and usually take about 80 minutes. Analysis runs separately at 1:00 AM Eastern. Daylight-saving changes are handled automatically.",
   },
   {
     q: "How does the Louvain algorithm work?",
@@ -70,11 +70,11 @@ const FAQ = [
   },
   {
     q: "Can I run this locally?",
-    a: "Yes! The full source is on GitHub. You'll need a Twitch API token and a list of channels to track. The README has full setup instructions.",
+    a: "Yes. The full source and guided deployment instructions are on GitHub. Collection requires a dedicated Twitch app and bot authorization for the user:read:chat scope.",
   },
   {
     q: "Is this affiliated with Twitch?",
-    a: "No. ViewerAtlas is an independent, open-source research project. It uses publicly available Twitch chat data via the IRC interface. It is not affiliated with, endorsed by, or sponsored by Twitch Interactive, Inc.",
+    a: "No. ViewerAtlas is an independent, open-source research project. It observes active chat-author events through Twitch's EventSub API and is not affiliated with, endorsed by, or sponsored by Twitch Interactive, Inc.",
   },
 ];
 
@@ -302,7 +302,7 @@ export function About() {
                 </div>
                 <div>
                   <p style={{ color: "#848494", fontSize: 14, lineHeight: 1.7 }}>
-                    The pipeline tracks whether a username appeared in a channel during a sampling window, not what they said. Raw handles remain sensitive operational data; the portfolio frontend is designed to expose only aggregated channel-level statistics.
+                    The pipeline tracks whether an active message author appeared in a channel during a sampling window, not what they said. Raw IDs and logins remain sensitive operational data; the portfolio frontend is designed to expose only aggregated channel-level statistics.
                   </p>
                 </div>
               </div>

@@ -14,6 +14,7 @@ import os
 import sys
 import tempfile
 import shutil
+import asyncio
 from pathlib import Path
 from collections import defaultdict
 
@@ -45,6 +46,7 @@ from frontend_exporter import FrontendExportConfig, export_frontend_data
 from sqs_task_queue import SQSTaskQueue, ChannelTask
 from discovery import run_discovery
 from worker import _collect_channel, _flush_parquet, run_worker_loop
+from storage import S3Storage
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -726,6 +728,23 @@ class TestConfig:
         with pytest.raises(ValueError):
             CollectionConfig(duration_per_batch=-1)
 
+    def test_collection_config_survey_env_overrides(self, monkeypatch):
+        monkeypatch.setenv("SURVEY_TOP_CHANNELS_LIMIT", "7")
+        monkeypatch.setenv("SURVEY_BATCH_SIZE", "4")
+        monkeypatch.setenv("SURVEY_WINDOW_SECONDS", "12")
+        monkeypatch.setenv("SURVEY_TIMEOUT_SECONDS", "90")
+
+        config = CollectionConfig()
+        assert config.top_channels_limit == 7
+        assert config.batch_size == 4
+        assert config.duration_per_batch == 12
+        assert config.survey_timeout_seconds == 90
+
+    def test_collection_config_rejects_invalid_survey_env_override(self, monkeypatch):
+        monkeypatch.setenv("SURVEY_BATCH_SIZE", "101")
+        with pytest.raises(ValueError, match="100-room"):
+            CollectionConfig()
+
     def test_analysis_config_validation(self):
         with pytest.raises(ValueError):
             AnalysisConfig(overlap_threshold=-1)
@@ -1230,6 +1249,19 @@ class MockS3Storage:
 class TestS3Integration:
     """Tests for S3 storage backend path through DataAggregator (mocked)."""
 
+    def test_storage_startup_uses_bucket_metadata_not_unscoped_listing(self):
+        """The least-privilege task role must not need an unscoped ListBucket."""
+        s3 = MagicMock()
+        with patch("storage.boto3.client", return_value=s3):
+            storage = S3Storage(
+                bucket="private-surveys",
+                prefix="vieweratlas/raw/snapshots/v2",
+            )
+
+        s3.get_bucket_location.assert_called_once_with(Bucket="private-surveys")
+        s3.head_bucket.assert_not_called()
+        assert storage.prefix == "vieweratlas/raw/snapshots/v2/"
+
     @pytest.fixture
     def live_snapshots(self):
         return [
@@ -1412,6 +1444,84 @@ class TestParquetSnapshots:
         agg.load_parquet_snapshots()
         mb = agg.get_viewer_memory_estimate_mb()
         assert mb >= 0
+
+    def test_v2_loader_keeps_completed_empty_rows_and_skips_failures(self, tmp_path):
+        import pandas as pd
+        from io import BytesIO
+
+        rows = [
+            {
+                "schema_version": 2,
+                "channel": "completed_with_authors",
+                "collection_status": "completed",
+                "chatters_json": '["ALICE", "bob"]',
+                "chatter_ids_json": '["1", "2"]',
+            },
+            {
+                "schema_version": 2,
+                "channel": "completed_empty",
+                "collection_status": "completed",
+                "chatters_json": "[]",
+                "chatter_ids_json": "[]",
+            },
+            {
+                "schema_version": 2,
+                "channel": "failed_channel",
+                "collection_status": "subscription_failed",
+                "chatters_json": "[]",
+                "chatter_ids_json": "[]",
+            },
+        ]
+        output = BytesIO()
+        pd.DataFrame(rows).to_parquet(output, index=False, engine="pyarrow")
+        storage = MockS3Storage(
+            parquet_data={
+                "raw/snapshots/v2/date=2026-08-12/session=test/batch=01.parquet": output.getvalue()
+            }
+        )
+        storage._json_uploads[
+            "raw/snapshots/v2/date=2026-08-12/session=test/manifest.json"
+        ] = {"status": "complete_with_errors"}
+
+        agg = DataAggregator(str(tmp_path), storage=storage)
+        assert agg.load_parquet_snapshots() == 2
+        viewers = agg.get_channel_viewers()
+        assert viewers["completed_with_authors"] == {"alice", "bob"}
+        assert viewers["completed_empty"] == set()
+        assert "failed_channel" not in viewers
+
+    @pytest.mark.parametrize("manifest_status", [None, "running", "partial"])
+    def test_v2_loader_skips_session_without_terminal_manifest(
+        self, tmp_path, manifest_status
+    ):
+        import pandas as pd
+        from io import BytesIO
+
+        output = BytesIO()
+        pd.DataFrame(
+            [
+                {
+                    "schema_version": 2,
+                    "channel": "must_not_be_loaded",
+                    "collection_status": "completed",
+                    "chatters_json": '["alice"]',
+                    "chatter_ids_json": '["1"]',
+                }
+            ]
+        ).to_parquet(output, index=False, engine="pyarrow")
+        storage = MockS3Storage(
+            parquet_data={
+                "raw/snapshots/v2/date=2026-08-12/session=unfinished/batch=01.parquet": output.getvalue()
+            }
+        )
+        if manifest_status is not None:
+            storage._json_uploads[
+                "raw/snapshots/v2/date=2026-08-12/session=unfinished/manifest.json"
+            ] = {"status": manifest_status}
+
+        agg = DataAggregator(str(tmp_path), storage=storage)
+        assert agg.load_parquet_snapshots() == 0
+        assert "must_not_be_loaded" not in agg.get_channel_viewers()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2041,3 +2151,85 @@ class TestGraphCsvUpload:
         landed = tmp_path / "store" / "curated" / "analysis" / "2026-03-11" / "graph_nodes.csv"
         assert landed.exists()
         assert landed.read_text() == "channel,viewers\na,1\n"
+
+
+class TestScheduledAnalysisOutcome:
+    """A scheduled task must fail closed when analysis or persistence fails."""
+
+    @staticmethod
+    def _runner_with_storage(storage):
+        from main import PipelineRunner
+
+        runner = object.__new__(PipelineRunner)
+        runner.config = PipelineConfig(
+            analysis=AnalysisConfig(
+                output_dir="out",
+                enable_static_viz=False,
+                enable_interactive_viz=False,
+                export_graph_csv=False,
+            )
+        )
+        runner.storage = storage
+        runner.logger = MagicMock()
+        return runner
+
+    @staticmethod
+    def _save_args():
+        graph = nx.Graph()
+        graph.add_node("channel-a", viewer_count=10)
+        aggregator = MagicMock()
+        aggregator.get_statistics.return_value = {
+            "total_channels": 1,
+            "total_unique_viewers_across_all": 1,
+        }
+        return {
+            "partition": {"channel-a": 0},
+            "labels": {0: "Test"},
+            "graph": graph,
+            "aggregator": aggregator,
+            "detection_stats": {"num_communities": 1, "modularity": 0.0},
+            "tagging_stats": {},
+            "communities": {0: ["channel-a"]},
+        }
+
+    def test_private_analysis_result_write_failure_is_fatal(self):
+        class FailedStorage(MockS3Storage):
+            def upload_json(self, key, data, **kwargs):
+                return False
+
+        runner = self._runner_with_storage(FailedStorage())
+
+        with pytest.raises(IOError, match="private analysis results"):
+            runner._step_save_results(**self._save_args())
+
+    def test_public_frontend_write_failure_is_fatal(self):
+        runner = self._runner_with_storage(MockS3Storage())
+
+        with patch("main.export_frontend_data", return_value=False):
+            with pytest.raises(IOError, match="public frontend data"):
+                runner._step_save_results(**self._save_args())
+
+    def test_mode_analyze_reports_success_and_failure_milestones(self, caplog):
+        import main as app_main
+
+        caplog.set_level("INFO")
+
+        successful = MagicMock()
+        successful._validate_prerequisites.return_value = True
+        successful.run_analysis_pipeline.return_value = {
+            "status": "success",
+            "num_channels": 2,
+            "num_communities": 1,
+            "num_edges": 1,
+        }
+        failed = MagicMock()
+        failed._validate_prerequisites.return_value = True
+        failed.run_analysis_pipeline.return_value = {"status": "error"}
+
+        with patch("main.PipelineRunner", return_value=successful):
+            assert asyncio.run(app_main.mode_analyze(PipelineConfig())) is True
+        with patch("main.PipelineRunner", return_value=failed):
+            assert asyncio.run(app_main.mode_analyze(PipelineConfig())) is False
+
+        assert "ANALYSIS_COMPLETED" in caplog.text
+        assert "ANALYSIS_FAILED" in caplog.text

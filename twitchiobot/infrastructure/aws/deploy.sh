@@ -4,6 +4,7 @@
 # Idempotent flow for first-time and repeat deployments.
 
 set -euo pipefail
+export AWS_PAGER=""
 
 load_env_file() {
     local env_file=".env"
@@ -57,14 +58,15 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
 ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
-ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-DISABLED}
+ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
 DYNAMODB_STATE_TABLE=${DYNAMODB_STATE_TABLE:-vieweratlas-collection-state}
-SQS_CHANNEL_QUEUE_URL=${SQS_CHANNEL_QUEUE_URL:-}  # populated by ensure_sqs_queue
 LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
 BUDGET_LIMIT=${BUDGET_LIMIT:-50}
+ALERT_EMAIL=${ALERT_EMAIL:-}
+TWITCH_CREDENTIALS_SECRET_ID=${TWITCH_CREDENTIALS_SECRET_ID:-vieweratlas/twitch/credentials}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
@@ -125,7 +127,7 @@ validate_required_deployment_inputs() {
 }
 
 validate_network_configuration() {
-    local subnet_id subnet_vpc_id security_group_vpc_id expected_vpc_id
+    local subnet_id subnet_vpc_id security_group_vpc_id expected_vpc_id route_table_id route_target
     local -a subnet_ids
 
     IFS=',' read -r -a subnet_ids <<< "$SUBNET_IDS"
@@ -176,22 +178,75 @@ validate_network_configuration() {
         log_error "SECURITY_GROUP_ID must belong to the same VPC as SUBNET_IDS"
         exit 1
     fi
+
+    # Scheduled Fargate tasks must reach Twitch and AWS over HTTPS. With a
+    # public IP, every selected subnet needs a direct Internet Gateway route.
+    # Without one, it needs a NAT route. Checking this here prevents tasks that
+    # launch successfully but can never connect to EventSub.
+    for subnet_id in "${subnet_ids[@]}"; do
+        route_table_id=$(aws ec2 describe-route-tables \
+            --filters "Name=association.subnet-id,Values=$subnet_id" \
+            --region "$AWS_REGION" \
+            --query 'RouteTables[0].RouteTableId' \
+            --output text 2>/dev/null || true)
+        if [ -z "$route_table_id" ] || [ "$route_table_id" = "None" ]; then
+            route_table_id=$(aws ec2 describe-route-tables \
+                --filters "Name=vpc-id,Values=$expected_vpc_id" "Name=association.main,Values=true" \
+                --region "$AWS_REGION" \
+                --query 'RouteTables[0].RouteTableId' \
+                --output text 2>/dev/null || true)
+        fi
+        if [ -z "$route_table_id" ] || [ "$route_table_id" = "None" ]; then
+            log_error "Could not resolve a route table for subnet $subnet_id"
+            exit 1
+        fi
+
+        if [ "$ASSIGN_PUBLIC_IP" = "ENABLED" ]; then
+            route_target=$(aws ec2 describe-route-tables \
+                --route-table-ids "$route_table_id" \
+                --region "$AWS_REGION" \
+                --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].GatewayId | [0]' \
+                --output text 2>/dev/null || true)
+            if ! [[ "$route_target" =~ ^igw- ]]; then
+                log_error "Subnet $subnet_id needs a 0.0.0.0/0 Internet Gateway route when ASSIGN_PUBLIC_IP=ENABLED"
+                exit 1
+            fi
+        else
+            route_target=$(aws ec2 describe-route-tables \
+                --route-table-ids "$route_table_id" \
+                --region "$AWS_REGION" \
+                --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId | [0]' \
+                --output text 2>/dev/null || true)
+            if ! [[ "$route_target" =~ ^nat- ]]; then
+                route_target=$(aws ec2 describe-route-tables \
+                    --route-table-ids "$route_table_id" \
+                    --region "$AWS_REGION" \
+                    --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].InstanceId | [0]' \
+                    --output text 2>/dev/null || true)
+            fi
+            if ! [[ "$route_target" =~ ^(nat-|i-) ]]; then
+                log_error "ASSIGN_PUBLIC_IP=DISABLED requires a NAT route for subnet $subnet_id"
+                log_error "These public ViewerAtlas subnets use an Internet Gateway, so set ASSIGN_PUBLIC_IP=ENABLED in .env"
+                exit 1
+            fi
+        fi
+    done
 }
 
 verify_required_secrets() {
     local secret_name secret_arn
 
-    for secret_name in vieweratlas/twitch/oauth_token vieweratlas/twitch/client_id; do
-        secret_arn=$(aws secretsmanager describe-secret \
-            --secret-id "$secret_name" \
-            --region "$AWS_REGION" \
-            --query 'ARN' \
-            --output text 2>/dev/null || true)
-        if [ -z "$secret_arn" ] || [ "$secret_arn" = "None" ]; then
-            log_error "Required AWS Secrets Manager secret is missing: $secret_name"
-            exit 1
-        fi
-    done
+    secret_name="$TWITCH_CREDENTIALS_SECRET_ID"
+    secret_arn=$(aws secretsmanager describe-secret \
+        --secret-id "$secret_name" \
+        --region "$AWS_REGION" \
+        --query 'ARN' \
+        --output text 2>/dev/null || true)
+    if [ -z "$secret_arn" ] || [ "$secret_arn" = "None" ]; then
+        log_error "Required AWS Secrets Manager secret is missing: $secret_name"
+        log_error "Run ./authorize-twitch.sh before deploying."
+        exit 1
+    fi
 }
 
 # Check prerequisites
@@ -235,18 +290,13 @@ check_prerequisites() {
     log_info "  S3 Prefix:   $S3_PREFIX"
     log_info "  Image Tag:   $IMAGE_TAG"
     log_info "  Push latest: $PUSH_LATEST"
-    if [ -n "${EFS_ID:-}" ]; then
-        log_info "  EFS ID:      $EFS_ID"
-    else
-        log_warn "  EFS_ID not set — EFS volume mounts will be stripped from task definitions (VOD queue will be task-local/ephemeral)"
-    fi
 }
 
 # Create ECR repositories if they don't exist
 create_ecr_repos() {
     log_info "Ensuring ECR repositories..."
 
-    for repo in vieweratlas-collector vieweratlas-analysis vieweratlas-vod vieweratlas-discovery vieweratlas-worker; do
+    for repo in vieweratlas-collector vieweratlas-analysis; do
         if ! aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" >/dev/null 2>&1; then
             log_info "Creating repository: $repo"
             aws ecr create-repository \
@@ -311,10 +361,11 @@ build_and_push() {
 ensure_iam_roles() {
     log_info "Ensuring IAM roles and policies..."
 
-    local trust_file s3_policy_file secrets_policy_file
+    local trust_file analysis_s3_policy_file collector_s3_policy_file collector_runtime_policy_file
     trust_file=$(mktemp)
-    s3_policy_file=$(mktemp)
-    secrets_policy_file=$(mktemp)
+    analysis_s3_policy_file=$(mktemp)
+    collector_s3_policy_file=$(mktemp)
+    collector_runtime_policy_file=$(mktemp)
 
     cat > "$trust_file" <<JSON
 {
@@ -330,10 +381,15 @@ ensure_iam_roles() {
 JSON
 
     local s3_object_arn="arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX%/}/*"
-    cat > "$s3_policy_file" <<JSON
+    cat > "$analysis_s3_policy_file" <<JSON
 {
   "Version": "2012-10-17",
   "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetBucketLocation"],
+      "Resource": ["arn:aws:s3:::${S3_BUCKET}"]
+    },
     {
       "Effect": "Allow",
       "Action": ["s3:PutObject", "s3:GetObject"],
@@ -353,16 +409,57 @@ JSON
 }
 JSON
 
-    cat > "$secrets_policy_file" <<JSON
+    local survey_object_arn="arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX%/}/raw/snapshots/v2/*"
+    local survey_list_prefix="${S3_PREFIX%/}/raw/snapshots/v2/*"
+    cat > "$collector_s3_policy_file" <<JSON
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": ["secretsmanager:GetSecretValue"],
+      "Action": ["s3:GetBucketLocation"],
+      "Resource": ["arn:aws:s3:::${S3_BUCKET}"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": ["${survey_object_arn}"]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::${S3_BUCKET}"],
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["${survey_list_prefix}"]
+        }
+      }
+    }
+  ]
+}
+JSON
+
+    cat > "$collector_runtime_policy_file" <<JSON
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"],
       "Resource": [
-        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token*",
-        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id*"
+        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${TWITCH_CREDENTIALS_SECRET_ID}*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem",
+        "dynamodb:DeleteItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/${DYNAMODB_STATE_TABLE}"
       ]
     }
   ]
@@ -371,6 +468,7 @@ JSON
 
     ensure_task_role() {
         local role_name=$1
+        local policy_file=$2
         if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
             log_info "Creating IAM role: $role_name"
             aws iam create-role --role-name "$role_name" --assume-role-policy-document "file://$trust_file" >/dev/null
@@ -380,12 +478,11 @@ JSON
         aws iam put-role-policy \
             --role-name "$role_name" \
             --policy-name ViewerAtlasS3Access \
-            --policy-document "file://$s3_policy_file" >/dev/null
+            --policy-document "file://$policy_file" >/dev/null
     }
 
     ensure_execution_role() {
         local role_name=$1
-        local include_secrets=$2
         if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
             log_info "Creating IAM role: $role_name"
             aws iam create-role --role-name "$role_name" --assume-role-policy-document "file://$trust_file" >/dev/null
@@ -396,72 +493,55 @@ JSON
         aws iam attach-role-policy \
             --role-name "$role_name" \
             --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy >/dev/null
+    }
 
-        if [ "$include_secrets" = "yes" ]; then
-            aws iam put-role-policy \
-                --role-name "$role_name" \
-                --policy-name ViewerAtlasSecretsAccess \
-                --policy-document "file://$secrets_policy_file" >/dev/null
+    ensure_task_role "${SERVICE_PREFIX}-collector-task-role" "$collector_s3_policy_file"
+    ensure_task_role "${SERVICE_PREFIX}-analysis-task-role" "$analysis_s3_policy_file"
+
+    # The survey retrieves and atomically rotates Twitch credentials at runtime,
+    # and uses the existing state table for its overlap-prevention lease.
+    aws iam put-role-policy \
+        --role-name "${SERVICE_PREFIX}-collector-task-role" \
+        --policy-name ViewerAtlasCollectorRuntimeAccess \
+        --policy-document "file://$collector_runtime_policy_file" >/dev/null
+
+    ensure_execution_role "${SERVICE_PREFIX}-collector-execution-role"
+    ensure_execution_role "${SERVICE_PREFIX}-analysis-execution-role"
+
+    # Old revisions injected separate Twitch secrets through execution roles.
+    # The EventSub collector reads the one atomic credential through its task
+    # role, so remove the obsolete inline policy anywhere an old task role may
+    # still exist. Treat AccessDenied as a deployment failure rather than
+    # silently retaining unnecessary secret access.
+    remove_retired_secret_policy() {
+        local role_name=$1 error_output
+        if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+            return
+        fi
+        if error_output=$(aws iam delete-role-policy \
+            --role-name "$role_name" \
+            --policy-name ViewerAtlasSecretsAccess 2>&1); then
+            log_info "Removed retired Twitch secret policy from $role_name"
+        elif [[ "$error_output" != *"NoSuchEntity"* ]]; then
+            log_error "Could not remove the retired Twitch secret policy from $role_name"
+            return 1
         fi
     }
 
-    local sqs_dynamo_policy_file
-    sqs_dynamo_policy_file=$(mktemp)
-    cat > "$sqs_dynamo_policy_file" <<JSON
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "sqs:SendMessage",
-        "sqs:SendMessageBatch",
-        "sqs:ReceiveMessage",
-        "sqs:DeleteMessage",
-        "sqs:GetQueueUrl",
-        "sqs:GetQueueAttributes"
-      ],
-      "Resource": ["arn:aws:sqs:${AWS_REGION}:${AWS_ACCOUNT_ID}:${SERVICE_PREFIX}-channel-tasks.fifo"]
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:Query"
-      ],
-      "Resource": ["arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/${DYNAMODB_STATE_TABLE}"]
-    }
-  ]
-}
-JSON
-
-    ensure_task_role "${SERVICE_PREFIX}-collector-task-role"
-    ensure_task_role "${SERVICE_PREFIX}-analysis-task-role"
-    ensure_task_role "${SERVICE_PREFIX}-vod-collector-task-role"
-    ensure_task_role "${SERVICE_PREFIX}-discovery-task-role"
-    ensure_task_role "${SERVICE_PREFIX}-worker-task-role"
-
-    # Attach SQS+DynamoDB policy to discovery and worker task roles
-    for role in "${SERVICE_PREFIX}-discovery-task-role" "${SERVICE_PREFIX}-worker-task-role"; do
-        aws iam put-role-policy \
-            --role-name "$role" \
-            --policy-name ViewerAtlasSQSDynamoAccess \
-            --policy-document "file://$sqs_dynamo_policy_file" >/dev/null
+    for retired_role in \
+        "${SERVICE_PREFIX}-collector-execution-role" \
+        "${SERVICE_PREFIX}-vod-collector-execution-role" \
+        "${SERVICE_PREFIX}-discovery-execution-role" \
+        "${SERVICE_PREFIX}-worker-execution-role"; do
+        remove_retired_secret_policy "$retired_role"
     done
 
-    ensure_execution_role "${SERVICE_PREFIX}-collector-execution-role" "yes"
-    ensure_execution_role "${SERVICE_PREFIX}-analysis-execution-role" "no"
-    ensure_execution_role "${SERVICE_PREFIX}-vod-collector-execution-role" "yes"
-    ensure_execution_role "${SERVICE_PREFIX}-discovery-execution-role" "yes"
-    ensure_execution_role "${SERVICE_PREFIX}-worker-execution-role" "yes"
-
-    rm -f "$trust_file" "$s3_policy_file" "$secrets_policy_file" "$sqs_dynamo_policy_file"
+    rm -f "$trust_file" "$analysis_s3_policy_file" "$collector_s3_policy_file" "$collector_runtime_policy_file"
 }
 
 ensure_log_groups() {
     log_info "Ensuring CloudWatch log groups..."
-    for service in collector analysis vod-collector discovery worker; do
+    for service in collector analysis; do
         local log_group="/ecs/${SERVICE_PREFIX}-${service}"
         aws logs create-log-group --log-group-name "$log_group" --region "$AWS_REGION" >/dev/null 2>&1 || true
         aws logs put-retention-policy \
@@ -469,34 +549,6 @@ ensure_log_groups() {
             --retention-in-days "$LOG_RETENTION_DAYS" \
             --region "$AWS_REGION" >/dev/null
     done
-}
-
-# Ensure SQS FIFO queue exists
-ensure_sqs_queue() {
-    local queue_name="${SERVICE_PREFIX}-channel-tasks.fifo"
-    log_info "Ensuring SQS FIFO queue: $queue_name"
-
-    local existing_url
-    existing_url=$(aws sqs get-queue-url --queue-name "$queue_name" --region "$AWS_REGION" --query 'QueueUrl' --output text 2>/dev/null || echo "")
-
-    if [ -n "$existing_url" ] && [ "$existing_url" != "None" ]; then
-        SQS_CHANNEL_QUEUE_URL="$existing_url"
-        log_info "Queue already exists: $SQS_CHANNEL_QUEUE_URL"
-    else
-        log_info "Creating SQS FIFO queue: $queue_name"
-        SQS_CHANNEL_QUEUE_URL=$(aws sqs create-queue \
-            --queue-name "$queue_name" \
-            --attributes '{
-                "FifoQueue": "true",
-                "ContentBasedDeduplication": "false",
-                "VisibilityTimeout": "900",
-                "MessageRetentionPeriod": "86400"
-            }' \
-            --region "$AWS_REGION" \
-            --query 'QueueUrl' \
-            --output text)
-        log_info "Created queue: $SQS_CHANNEL_QUEUE_URL"
-    fi
 }
 
 # Ensure DynamoDB table for collection state
@@ -517,11 +569,22 @@ ensure_dynamodb_table() {
         log_info "Waiting for table to become active..."
         aws dynamodb wait table-exists --table-name "$DYNAMODB_STATE_TABLE" --region "$AWS_REGION"
 
+    fi
+
+    local ttl_status
+    ttl_status=$(aws dynamodb describe-time-to-live \
+        --table-name "$DYNAMODB_STATE_TABLE" \
+        --region "$AWS_REGION" \
+        --query 'TimeToLiveDescription.TimeToLiveStatus' \
+        --output text 2>/dev/null || true)
+    if [ "$ttl_status" = "DISABLED" ] || [ -z "$ttl_status" ] || [ "$ttl_status" = "None" ]; then
         aws dynamodb update-time-to-live \
             --table-name "$DYNAMODB_STATE_TABLE" \
             --time-to-live-specification 'Enabled=true,AttributeName=ttl' \
             --region "$AWS_REGION" >/dev/null
-        log_info "TTL enabled on attribute 'ttl'"
+        log_info "TTL enabling on attribute 'ttl'"
+    else
+        log_info "DynamoDB TTL state: $ttl_status"
     fi
 }
 
@@ -529,7 +592,7 @@ ensure_dynamodb_table() {
 register_task_definitions() {
     log_info "Registering ECS task definitions..."
 
-    for task in collector analysis vod-collector discovery worker; do
+    for task in collector analysis; do
         local task_def_file="ecs-task-$task.json"
 
         if [ ! -f "$task_def_file" ]; then
@@ -544,8 +607,8 @@ register_task_definitions() {
             -e "s/\${S3_BUCKET}/$S3_BUCKET/g" \
             -e "s#\${S3_PREFIX}#${S3_PREFIX}#g" \
             -e "s/\${IMAGE_TAG}/$IMAGE_TAG/g" \
-            -e "s#\${SQS_CHANNEL_QUEUE_URL}#${SQS_CHANNEL_QUEUE_URL}#g" \
             -e "s/\${DYNAMODB_STATE_TABLE}/$DYNAMODB_STATE_TABLE/g" \
+            -e "s#\${TWITCH_CREDENTIALS_SECRET_ID}#${TWITCH_CREDENTIALS_SECRET_ID}#g" \
             -e "s/\"family\": \"vieweratlas-$task\"/\"family\": \"${SERVICE_PREFIX}-$task\"/" \
             -e "s|/ecs/vieweratlas-$task|/ecs/${SERVICE_PREFIX}-$task|" \
             -e "s#role/vieweratlas-#role/${SERVICE_PREFIX}-#g" \
@@ -615,73 +678,45 @@ network_config_arg() {
     echo "awsvpcConfiguration={subnets=[${subnets_csv}],securityGroups=[${security_group}],assignPublicIp=${assign_public_ip}}"
 }
 
-upsert_services() {
-    log_info "Ensuring ECS services in cluster: $ECS_CLUSTER"
-
+quiesce_long_running_services() {
+    log_info "Keeping all one-shot task families at ECS service desired count 0"
     ensure_cluster
 
+    # Scheduler launches collector and analysis tasks directly. Do not create
+    # permanent services. If services from an older deployment exist, update the
+    # current task definition where applicable and force desired count to zero.
     for service in collector analysis vod-collector discovery worker; do
         local full_service_name="${SERVICE_PREFIX}-$service"
-        local desired_count="0"
-        case "$service" in
-            collector)
-                desired_count=${COLLECTOR_DESIRED_COUNT:-1}
-                ;;
-            analysis)
-                desired_count=${ANALYSIS_DESIRED_COUNT:-0}
-                ;;
-            vod-collector)
-                desired_count=${VOD_COLLECTOR_DESIRED_COUNT:-0}
-                ;;
-            discovery)
-                desired_count=${DISCOVERY_DESIRED_COUNT:-0}
-                ;;
-            worker)
-                desired_count=${WORKER_DESIRED_COUNT:-0}
-                ;;
-        esac
-
-        local task_def_arn
-        task_def_arn=$(aws ecs describe-task-definition \
-            --task-definition "$full_service_name" \
-            --region "$AWS_REGION" \
-            --query 'taskDefinition.taskDefinitionArn' \
-            --output text)
-
-        local status
+        local status task_def_arn
         status=$(aws ecs describe-services \
             --cluster "$ECS_CLUSTER" \
             --services "$full_service_name" \
             --region "$AWS_REGION" \
             --query 'services[0].status' \
             --output text 2>/dev/null || echo "MISSING")
+        [ "$status" = "ACTIVE" ] || continue
 
-        if [ "$status" = "ACTIVE" ]; then
-            log_info "Updating service: $full_service_name"
+        if [[ "$service" =~ ^(collector|analysis)$ ]]; then
+            task_def_arn=$(aws ecs describe-task-definition \
+                --task-definition "$full_service_name" \
+                --region "$AWS_REGION" \
+                --query 'taskDefinition.taskDefinitionArn' \
+                --output text)
+            log_info "Updating and stopping legacy service: $full_service_name"
             aws ecs update-service \
                 --cluster "$ECS_CLUSTER" \
                 --service "$full_service_name" \
                 --task-definition "$task_def_arn" \
-                --network-configuration "$(network_config_arg "$SUBNET_IDS" "$SECURITY_GROUP_ID" "$ASSIGN_PUBLIC_IP")" \
-                --force-new-deployment \
+                --desired-count 0 \
                 --region "$AWS_REGION" >/dev/null
-            continue
+        else
+            log_info "Stopping retired distributed service: $full_service_name"
+            aws ecs update-service \
+                --cluster "$ECS_CLUSTER" \
+                --service "$full_service_name" \
+                --desired-count 0 \
+                --region "$AWS_REGION" >/dev/null
         fi
-
-        if [ -z "$SUBNET_IDS" ] || [ -z "$SECURITY_GROUP_ID" ]; then
-            log_warn "Skipping create for $full_service_name (set SUBNET_IDS and SECURITY_GROUP_ID for first-time service creation)"
-            continue
-        fi
-
-        log_info "Creating service: $full_service_name"
-        aws ecs create-service \
-            --cluster "$ECS_CLUSTER" \
-            --service-name "$full_service_name" \
-            --task-definition "$task_def_arn" \
-            --desired-count "$desired_count" \
-            --launch-type FARGATE \
-            --network-configuration "$(network_config_arg "$SUBNET_IDS" "$SECURITY_GROUP_ID" "$ASSIGN_PUBLIC_IP")" \
-            --region "$AWS_REGION" >/dev/null
     done
 }
 
@@ -700,33 +735,23 @@ main() {
         exit 1
     fi
 
-    # Create this at the start of the real deployment. IAM role changes can take
-    # a short time to propagate, and image builds provide that time before ECS
-    # needs the role during service creation.
-    ensure_ecs_service_linked_role
-
     create_ecr_repos
     ensure_s3_bucket_security_controls
     ecr_login
 
     build_and_push "collector" "Dockerfile.collector"
     build_and_push "analysis" "Dockerfile.analysis"
-    build_and_push "vod" "Dockerfile.vod"
-    build_and_push "discovery" "Dockerfile.discovery"
-    build_and_push "worker" "Dockerfile.worker"
 
-    ensure_sqs_queue
     ensure_dynamodb_table
     ensure_iam_roles
     ensure_log_groups
     register_task_definitions
-    upsert_services
+    quiesce_long_running_services
 
     log_info "Deployment completed successfully"
     log_info ""
-    log_info "Secrets required in AWS Secrets Manager:"
-    log_info "  vieweratlas/twitch/oauth_token"
-    log_info "  vieweratlas/twitch/client_id"
+    log_info "Twitch credential secret: $TWITCH_CREDENTIALS_SECRET_ID"
+    log_info "The collector runs only through EventBridge Scheduler; ECS service desired count is 0."
     log_info ""
     log_info "Deployed image tag: $IMAGE_TAG"
 }

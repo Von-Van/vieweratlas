@@ -17,11 +17,12 @@
 # ============================================
 collection:
   logs_dir: "logs"
-  top_channels_limit: 5000      # Target top 5000 channels
-  batch_size: 50                # Fewer channels per batch
-  duration_per_batch: 45        # 45 seconds per batch
-  wait_for_hour_alignment: true
-  collection_interval_minutes: 60
+  top_channels_limit: 1200      # Freeze the approximate top 1200 at survey start
+  batch_size: 100               # Twitch's normal concurrent-room ceiling
+  duration_per_batch: 300       # Equal five-minute active-author window
+  survey_timeout_seconds: 7200  # Abort a survey that exceeds two hours
+  wait_for_hour_alignment: false # Scheduling is handled by EventBridge Scheduler
+  collection_interval_minutes: 480
   # Cost protection
   max_runtime_hours: 8          # Stop after 8 hours
   max_collection_cycles: 24     # Stop after 24 cycles

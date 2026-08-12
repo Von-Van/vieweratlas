@@ -2,6 +2,7 @@
 # Safe AWS deployment wrapper with cost controls and preflight checks.
 
 set -euo pipefail
+export AWS_PAGER=""
 
 load_env_file() {
     local env_file=".env"
@@ -73,17 +74,16 @@ fi
 AWS_REGION=${AWS_REGION:-us-east-1}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
+S3_KEY_PREFIX="${S3_PREFIX%/}"
+[ -z "$S3_KEY_PREFIX" ] || S3_KEY_PREFIX="${S3_KEY_PREFIX}/"
 ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
-ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-DISABLED}
+ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 ALERT_EMAIL=${ALERT_EMAIL:-}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
-COLLECTOR_DESIRED_COUNT=${COLLECTOR_DESIRED_COUNT:-1}
+COLLECTOR_DESIRED_COUNT=0
 ANALYSIS_DESIRED_COUNT=${ANALYSIS_DESIRED_COUNT:-0}
-VOD_COLLECTOR_DESIRED_COUNT=${VOD_COLLECTOR_DESIRED_COUNT:-0}
-DISCOVERY_DESIRED_COUNT=${DISCOVERY_DESIRED_COUNT:-0}
-WORKER_DESIRED_COUNT=${WORKER_DESIRED_COUNT:-0}
 BUDGET_LIMIT=${BUDGET_LIMIT:-50}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -134,7 +134,7 @@ info "S3 Prefix: $S3_PREFIX"
 info "ECS Cluster: $ECS_CLUSTER"
 info "Image Tag: $IMAGE_TAG"
 info "Push latest: $PUSH_LATEST"
-info "Desired counts: collector=$COLLECTOR_DESIRED_COUNT analysis=$ANALYSIS_DESIRED_COUNT vod=$VOD_COLLECTOR_DESIRED_COUNT discovery=$DISCOVERY_DESIRED_COUNT worker=$WORKER_DESIRED_COUNT"
+info "All ECS services remain at desired count 0; EventBridge Scheduler launches one-shot tasks"
 if [ -n "$SUBNET_IDS" ] && [ -n "$SECURITY_GROUP_ID" ]; then
     info "Network config supplied for service/schedule creation"
 else
@@ -144,9 +144,9 @@ fi
 
 echo ""
 echo "Cost guardrail summary (from config):"
-echo "  collection.max_runtime_hours: $MAX_RUNTIME_HOURS"
-echo "  collection.max_collection_cycles: $MAX_COLLECTION_CYCLES"
-echo "  vod.max_vods_per_run: $MAX_VODS_PER_RUN"
+echo "  survey task hard limit: 2 hours"
+echo "  expected survey duration: roughly 80 minutes"
+echo "  VOD/discovery/worker paths: disabled and not deployed"
 
 if [ -z "$ALERT_EMAIL" ]; then
     err "ALERT_EMAIL is required so budget notifications have an owner"
@@ -214,12 +214,14 @@ JSON
 ]
 JSON
 
-    aws budgets create-budget \
+    if aws budgets create-budget \
         --account-id "$AWS_ACCOUNT_ID" \
         --budget file:///tmp/vieweratlas-budget.json \
-        --notifications-with-subscribers file:///tmp/vieweratlas-budget-notifications.json >/dev/null 2>&1 || \
-        warn "Budget already exists or could not be created"
-    info "Budget alert configured at USD $BUDGET_LIMIT"
+        --notifications-with-subscribers file:///tmp/vieweratlas-budget-notifications.json >/dev/null 2>&1; then
+        info "Budget alert configured at USD $BUDGET_LIMIT"
+    else
+        warn "Budget already exists or could not be changed; deployment will continue"
+    fi
 fi
 
 aws s3 mb "s3://${S3_BUCKET}" --region "$AWS_REGION" >/dev/null 2>&1 || true
@@ -242,9 +244,16 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
 {
   "Rules": [
     {
-      "ID": "DeleteOldRawLogs",
+      "ID": "DeleteSurveySnapshotsV2After90Days",
       "Status": "Enabled",
-      "Filter": {"Prefix": "${S3_PREFIX}raw/snapshots/"},
+      "Filter": {"Prefix": "${S3_KEY_PREFIX}raw/snapshots/v2/"},
+      "Expiration": {"Days": 90},
+      "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
+    },
+    {
+      "ID": "DeleteLegacyRawLogs",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "${S3_KEY_PREFIX}raw/snapshots/"},
       "Transitions": [
         {"Days": 30, "StorageClass": "STANDARD_IA"},
         {"Days": 90, "StorageClass": "GLACIER_IR"}
@@ -254,7 +263,7 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
     {
       "ID": "DeleteOldVODRaw",
       "Status": "Enabled",
-      "Filter": {"Prefix": "${S3_PREFIX}raw/vod_chat/"},
+      "Filter": {"Prefix": "${S3_KEY_PREFIX}raw/vod_chat/"},
       "Transitions": [
         {"Days": 30, "StorageClass": "STANDARD_IA"}
       ],
@@ -263,7 +272,7 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
     {
       "ID": "ArchiveProcessedData",
       "Status": "Enabled",
-      "Filter": {"Prefix": "${S3_PREFIX}curated/"},
+      "Filter": {"Prefix": "${S3_KEY_PREFIX}curated/"},
       "Transitions": [
         {"Days": 90, "StorageClass": "STANDARD_IA"}
       ]
@@ -278,10 +287,7 @@ aws s3api put-bucket-lifecycle-configuration \
 
 for log_group in \
     "/ecs/${SERVICE_PREFIX}-collector" \
-    "/ecs/${SERVICE_PREFIX}-analysis" \
-    "/ecs/${SERVICE_PREFIX}-vod-collector" \
-    "/ecs/${SERVICE_PREFIX}-discovery" \
-    "/ecs/${SERVICE_PREFIX}-worker"; do
+    "/ecs/${SERVICE_PREFIX}-analysis"; do
     aws logs create-log-group --log-group-name "$log_group" >/dev/null 2>&1 || true
     aws logs put-retention-policy --log-group-name "$log_group" --retention-in-days 7 >/dev/null
 done
@@ -300,14 +306,12 @@ IMAGE_TAG="$IMAGE_TAG" \
 PUSH_LATEST="$PUSH_LATEST" \
 COLLECTOR_DESIRED_COUNT="$COLLECTOR_DESIRED_COUNT" \
 ANALYSIS_DESIRED_COUNT="$ANALYSIS_DESIRED_COUNT" \
-VOD_COLLECTOR_DESIRED_COUNT="$VOD_COLLECTOR_DESIRED_COUNT" \
-DISCOVERY_DESIRED_COUNT="$DISCOVERY_DESIRED_COUNT" \
-WORKER_DESIRED_COUNT="$WORKER_DESIRED_COUNT" \
 bash ./deploy.sh
 
 info "Safe deployment completed"
 echo ""
 echo "Post-deploy checks:"
-echo "  1) bash ./smoke-test.sh"
-echo "  2) aws logs tail /ecs/${SERVICE_PREFIX}-collector --follow --region $AWS_REGION"
-echo "  3) aws s3 ls s3://$S3_BUCKET/${S3_PREFIX}raw/snapshots/ --recursive | tail"
+echo "  1) Create schedules PAUSED:"
+echo "     SURVEY_SCHEDULE_STATE=DISABLED ANALYSIS_SCHEDULE_STATE=DISABLED ./create-schedules.sh"
+echo "  2) Follow DEPLOYMENT.md: small, batch, then full survey tests"
+echo "  3) Enable schedules only after all three tests pass"

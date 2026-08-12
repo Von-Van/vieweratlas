@@ -9,16 +9,17 @@ mapping Twitch communities through shared audience presence. It turns sampled
 chat participation into a weighted channel-overlap graph, detects communities
 with the Louvain algorithm, and exports an explorable React frontend.
 
-> **Portfolio status:** the project is deployment-ready but is not currently
-> hosted. The frontend clearly labels its bundled demonstration dataset and
-> switches to validated aggregate data when `VITE_DATA_URL` is configured.
+> **Deployment status:** the repository supports the live AWS deployment
+> described below. A local frontend still labels its bundled demonstration
+> dataset and switches to validated aggregate data when `VITE_DATA_URL` is
+> configured.
 
 ## Why It Is Interesting
 
 - End-to-end system: Twitch collection, Parquet storage, graph analysis, and a
   production-built visualization
-- Local and AWS execution paths with Docker, ECS, S3, SQS, DynamoDB, CloudFront,
-  monitoring, rollback, and cost controls
+- Local and AWS execution paths with Docker, ECS, S3, DynamoDB, CloudFront,
+  EventBridge Scheduler, monitoring, rollback, and cost controls
 - Privacy-conscious public boundary: raw presence data stays private while the
   browser receives channel-level aggregates
 - Security gates for Python and npm dependencies, static analysis, tests,
@@ -28,7 +29,7 @@ with the Louvain algorithm, and exports an explorable React frontend.
 
 ```mermaid
 flowchart LR
-    Twitch["Twitch chat + Helix API"] --> Collect["Collection services"]
+    Twitch["Twitch EventSub + Helix API"] --> Collect["Scheduled survey task"]
     Collect --> Private["Private Parquet presence snapshots"]
     Private --> Graph["NetworkX overlap graph"]
     Graph --> Louvain["Louvain community detection"]
@@ -39,9 +40,10 @@ flowchart LR
 ## What It Does
 
 1. Discovers channels through the Twitch Helix API.
-2. Samples live chatters in configurable channel batches.
-3. Optionally processes VOD chat, discarding raw message-bearing artifacts by
-   default after extracting presence snapshots.
+2. Samples unique active message authors through EventSub in equal five-minute
+   channel batches; it does not collect lurkers or message text.
+3. Keeps the older VOD preprocessor available only for local development; VOD
+   collection is disabled in the production deployment.
 4. Aggregates snapshots into channel-to-viewer sets.
 5. Builds a weighted overlap graph where shared viewers determine edge weight.
 6. Detects and labels communities.
@@ -49,8 +51,8 @@ flowchart LR
 
 ## Public Data Boundary
 
-Raw presence snapshots contain observed Twitch usernames and must remain private.
-Usernames are pseudonymous identifiers and may still be personal data. The
+Raw presence snapshots contain Twitch author IDs and logins and must remain private.
+Those are pseudonymous identifiers and may still be personal data. The
 public frontend is designed to receive only `data/frontend-data.json`, which
 contains channel-level nodes, overlaps, community labels, and aggregate metrics.
 
@@ -65,12 +67,14 @@ policy and [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
 cd twitchiobot
 python -m pip install -r requirements-dev.txt
 cp config/.env.example .env
-cp channels.example.txt channels.txt
 pytest -q
 python src/main.py analyze default
 ```
 
-Collection modes also require `TWITCH_CLIENT_ID` and `TWITCH_OAUTH_TOKEN`.
+The production survey uses the guided authorization step in the deployment
+guide. It atomically stores the Client ID, Client Secret, bot account ID,
+access token, and refresh token together in one AWS Secrets Manager secret;
+none of those values belongs in the deployment `.env` file.
 
 ### Frontend
 
@@ -91,10 +95,10 @@ Run from `twitchiobot/`:
 
 ```bash
 python src/main.py analyze [default|rigorous|explorer|debug|config.yaml]
-python src/main.py collect [default|rigorous|explorer|debug|config.yaml]
-python src/main.py continuous [default|rigorous|explorer|debug|config.yaml]
-python src/main.py preprocess_vods config.yaml [max_vods]
+python src/main.py survey config.yaml
 ```
+
+The older VOD command is not part of the supported production rollout.
 
 ## Deployment Design
 
@@ -104,14 +108,26 @@ non-root containers, monitoring, rollback, and conservative cost limits.
 
 ```bash
 cd twitchiobot/infrastructure/aws
+export AWS_PAGER=""
+./authorize-twitch.sh
 ./safe-deploy.sh
+SURVEY_SCHEDULE_STATE=DISABLED \
+ANALYSIS_SCHEDULE_STATE=DISABLED \
 ./create-schedules.sh
 ./apply-monitoring.sh
-./smoke-test.sh
+./run-survey-test.sh small
+./run-survey-test.sh batch
+./run-survey-test.sh full
+SURVEY_SCHEDULE_STATE=ENABLED \
+ANALYSIS_SCHEDULE_STATE=ENABLED \
+./create-schedules.sh
 ```
 
-These commands create real cloud resources and costs. Review the scripts and the
-environment template before use.
+Run that sequence in order; do not enable the schedules unless all three tests
+pass. A full survey takes roughly 80 minutes and has a two-hour safety limit.
+The enabled schedules run surveys at 6:00 AM, 2:00 PM, and 10:00 PM Eastern and
+analysis at 1:00 AM Eastern. These commands create real cloud resources and
+costs, so review the deployment guide and environment template first.
 
 ## Repository Map
 
@@ -124,6 +140,8 @@ environment template before use.
 ## Documentation
 
 - [Frontend guide](frontend/README.md)
+- [Deployment guide](twitchiobot/docs/DEPLOYMENT.md)
+- [Daily operations](twitchiobot/docs/DAILY_OPERATIONS.md)
 - [Developer guide](twitchiobot/docs/DEVELOPER.md)
 - [Data policy](twitchiobot/docs/DATA_POLICY.md)
 - [Security policy](SECURITY.md)

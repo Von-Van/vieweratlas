@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -30,7 +31,7 @@ def test_fetch_top_channels_retries_timeout(monkeypatch):
     response = MagicMock()
     response.raise_for_status.return_value = None
     response.json.return_value = {
-        "data": [{"user_login": "StreamerA"}],
+        "data": [{"user_id": "1", "user_login": "StreamerA"}],
         "pagination": {},
     }
 
@@ -71,3 +72,51 @@ def test_update_channel_list_raises_on_empty(monkeypatch):
 
     with pytest.raises(ChannelDiscoveryError, match="No channels returned"):
         update_channels.update_channel_list(limit=10)
+
+
+def test_fetch_top_streams_returns_structured_unique_ranked_targets(monkeypatch):
+    monkeypatch.setenv("TWITCH_CLIENT_ID", "client")
+    monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "token")
+
+    first = MagicMock()
+    first.raise_for_status.return_value = None
+    first.json.return_value = {
+        "data": [
+            {
+                "user_id": "10",
+                "user_login": "Alpha",
+                "viewer_count": 900,
+                "game_id": "g1",
+                "game_name": "Game",
+                "language": "EN",
+                "title": "Live",
+                "started_at": "2026-01-01T00:00:00Z",
+            },
+            {"user_id": "20", "user_login": "Beta", "viewer_count": 800},
+        ],
+        "pagination": {"cursor": "next"},
+    }
+    second = MagicMock()
+    second.raise_for_status.return_value = None
+    second.json.return_value = {
+        "data": [
+            {"user_id": "20", "user_login": "Beta", "viewer_count": 790},
+            {"user_id": "30", "user_login": "Gamma", "viewer_count": 700},
+        ],
+        "pagination": {},
+    }
+    session = MagicMock()
+    session.get.side_effect = [first, second]
+
+    streams = update_channels.fetch_top_streams(
+        limit=3,
+        session=session,
+        now=lambda: datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+
+    assert [stream.broadcaster_user_id for stream in streams] == ["10", "20", "30"]
+    assert [stream.rank for stream in streams] == [1, 2, 3]
+    assert streams[0].broadcaster_login == "alpha"
+    assert streams[0].language == "en"
+    assert streams[0].selection_source == "top_ranked"
+    assert session.get.call_count == 2

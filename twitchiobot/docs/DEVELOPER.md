@@ -1,730 +1,183 @@
-# ViewerAtlas: Developer Guide
+# ViewerAtlas Developer Guide
 
-This directory contains the ViewerAtlas application code.
+This guide describes the current EventSub survey release. The old Twitch IRC
+collector, continuously running collector mode, discovery/SQS workers, and VOD
+tasks are retained only as inactive source history. Do not deploy or restart
+them.
 
-**For comprehensive documentation, see [../../README.md](../../README.md)**
+For operator-facing instructions, use [DEPLOYMENT.md](DEPLOYMENT.md) and
+[DAILY_OPERATIONS.md](DAILY_OPERATIONS.md). This page focuses on the current
+code and its contracts.
 
-This guide provides technical implementation details for developers.
+## Supported entry points
 
----
-
-## 📁 Module Overview
-
-```
-twitchiobot/src/
-├── main.py                    # Pipeline orchestrator (collect → analyze → visualize)
-├── config.py                  # Configuration system with 4 presets + SQSConfig
-├── storage.py                 # Storage abstraction (local files + AWS S3 + Parquet)
-│
-├── get_viewers.py             # Twitch IRC chat collection → consolidated Parquet
-├── update_channels.py         # Fetch top channels via Helix API
-├── vod_collector.py           # VOD chat replay ingestion (TwitchDownloaderCLI)
-├── daily_collection_state.py  # Dedup state (JSON file or DynamoDB)
-├── data_aggregator.py         # Load & aggregate viewer data (JSON/CSV/Parquet)
-├── graph_builder.py           # Build overlap network with NetworkX
-├── community_detector.py      # Louvain community detection
-├── cluster_tagger.py          # Generate community labels (game/language)
-├── visualizer.py              # Create PNG & HTML visualizations
-│
-├── sqs_task_queue.py          # SQS FIFO task queue (ChannelTask publish/receive)
-├── discovery.py               # Discovery service (find channels → publish to SQS)
-├── worker.py                  # Collector worker (consume SQS → write Parquet to S3)
-│
-├── config.yaml                # Configuration template
-├── .env.example               # Environment variables template
-└── requirements.txt           # Python dependencies
-
-twitchiobot/infrastructure/
-├── docker/
-│   ├── Dockerfile.collector   # Container for monolithic data collection
-│   ├── Dockerfile.analysis    # Container for analysis pipeline
-│   ├── Dockerfile.vod         # Container for VOD preprocessing
-│   ├── Dockerfile.discovery   # Container for discovery service
-│   └── Dockerfile.worker      # Container for distributed collector worker
-└── aws/
-    ├── deploy.sh              # Automated AWS deployment (ECR/ECS/SQS/DynamoDB)
-    ├── ecs-task-*.json        # AWS ECS Fargate task definitions
-    └── ...                    # Monitoring, schedules, rollback scripts
-```
-
----
-
-## 🔧 Implementation Details
-
-### Storage Abstraction (storage.py)
-
-The storage module provides a unified interface for both local file system and AWS S3:
-
-**Base Interface:**
-```python
-class BaseStorage(ABC):
-    @abstractmethod
-    def upload_json(self, key: str, data: dict) -> str:
-        """Upload JSON data to storage"""
-    
-    @abstractmethod
-    def download_json(self, key: str) -> dict:
-        """Download JSON data from storage"""
-    
-    @abstractmethod
-    def list_files(self, prefix: str = "", suffix: str = "") -> list[str]:
-        """List files matching prefix and suffix"""
-```
-
-**Implementations:**
-- `FileStorage`: Local filesystem (backward compatible)
-- `S3Storage`: AWS S3 with encryption, pagination, retry logic
-
-**Usage:**
-```python
-from storage import get_storage
-
-# Auto-detect from environment
-storage = get_storage()
-
-# Upload with date partitioning
-storage.upload_json('raw/snapshots/2026/01/07/channel_123.json', data)
-
-# List files
-files = storage.list_files(prefix='raw/snapshots', suffix='.json')
-```
-
----
-
-## 📊 Pipeline Implementation
-
-The analysis pipeline executes in 6 steps:
-
-**1. Aggregation** (`data_aggregator.py`)
-- Loads JSON/CSV/Parquet snapshots from storage backend
-- Loads VOD presence snapshots (Parquet or JSON)
-- Builds `{channel: set(viewers)}` structure
-- Returns 4-tuple: `(json_count, csv_count, vod_count, parquet_count)`
-- Generates data quality report with source breakdown and memory estimate
-
-**2. Graph Building** (`graph_builder.py`)
-- Computes overlaps (shared viewers between channels)
-- Creates weighted graph with NetworkX
-- Exports nodes/edges CSVs for Gephi
-
-**3. Community Detection** (`community_detector.py`)
-- Applies Louvain modularity optimization
-- Detects tightly-connected groups
-- Reports modularity score
-
-**4. Tagging** (`cluster_tagger.py`)
-- Analyzes dominant game per community
-- Detects language/region patterns
-- Generates human-readable labels
-
-**5. Visualization** (`visualizer.py`)
-- Creates static PNG with force-directed layout
-- Generates interactive HTML (PyVis)
-- Color-codes nodes by community
-
-**6. Results** (`main.py`)
-- Saves results to storage backend (local or S3)
-- Exports graph data for Gephi
-
----
-
-## 🎥 VOD Collection (Optional)
-
-VOD (Video On Demand) collection supplements live data with historical chat replay.
-
-### Overview
-
-**Purpose:** Ingest historical VOD chat messages as time-bucketed presence snapshots compatible with live collection.
-
-**Pipeline:** VOD Queue → Download (TwitchDownloaderCLI) → Parse → Bucketize (60s windows) → Write Parquet Snapshots
-
-**Output Format:** Canonical `PresenceSnapshot` records with `source=vod`, stored as Parquet under:
-```
-curated/presence_snapshots/source=vod/channel=<login>/vod=<id>/part-0000.parquet
-```
-
-### Setup
-
-1. **Install TwitchDownloaderCLI:**
-   ```bash
-   # macOS/Linux
-   wget https://github.com/lay295/TwitchDownloader/releases/latest/download/TwitchDownloaderCLI-LinuxX64.zip
-   unzip TwitchDownloaderCLI-LinuxX64.zip
-   chmod +x TwitchDownloaderCLI
-   sudo mv TwitchDownloaderCLI /usr/local/bin/
-   ```
-
-2. **Enable in config.yaml:**
-   ```yaml
-   vod:
-     enabled: true
-     bucket_len_s: 60  # Must match live collection window
-     cli_path: "/usr/local/bin/TwitchDownloaderCLI"
-     auto_discover: true
-     vod_limit_per_channel: 5
-   ```
-
-3. **Set Twitch credentials:**
-   ```bash
-   export TWITCH_CLIENT_ID=your_client_id
-   export TWITCH_OAUTH_TOKEN=oauth:your_token
-   ```
-
-### Usage
-
-**Automatic discovery and processing:**
-```bash
-# Auto-discover VODs from channels.txt and process queue
-python main.py preprocess_vods config.yaml
-
-# Process up to 10 VODs
-python main.py preprocess_vods config.yaml 10
-```
-
-**Manual VOD management:**
-```bash
-# Add specific VOD
-python vod_collector.py add --vod-id 1234567890 --channel xqc
-
-# Discover recent VODs
-python vod_collector.py discover --channels-file channels.txt --vod-limit 5
-
-# Process queue
-python vod_collector.py process --max-vods 10
-
-# Check queue status
-python vod_collector.py stats
-```
-
-### PresenceSnapshot Format
-
-VOD snapshots are bucketized into 60-second windows and stored with canonical fields:
-
-```json
-{
-  "platform": "twitch",
-  "source": "vod",
-  "channel": "xqc",
-  "content_id": "vod:1234567890",
-  "bucket_len_s": 60,
-  "offset_s": 120,
-  "chatters": ["user1", "user2", "user3"],
-  "viewer_count": 3,
-  "timestamp": "vod:1234567890_offset_120"
-}
-```
-
-### Filtering
-
-VOD processing includes automatic filtering to focus on relevant content:
-- **Age filter:** Only processes VODs from the last 14 days (configurable via `max_age_days`)
-- **View count filter:** Optional minimum view count threshold (default: 0)
-- **Channel filter:** Only discovers VODs from channels in your collection list (channels.txt or top channels)
-
-```yaml
-vod:
-  max_age_days: 14  # Only VODs from last 2 weeks
-  min_views: 100    # Only VODs with 100+ views
-```
-
-### Retry & Backoff
-
-VOD download retries on transient failures (non-zero exit code, timeout):
-- **Max attempts:** 4 (1 initial + 3 retries)
-- **Delays between retries:** 10s, 30s, 60s (`_DOWNLOAD_RETRY_DELAYS`)
-- **No retry on:** `FileNotFoundError` (TwitchDownloaderCLI not installed)
-- **Lease duration:** 15 minutes (prevents duplicate processing)
-- **Stale lease recovery:** Automatically releases expired leases
-
-### Integration
-
-VOD snapshots are automatically loaded during analysis:
-```python
-aggregator = DataAggregator("logs", storage=storage)
-json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
-# VOD and Parquet data merged with live data seamlessly
-```
-
----
-
-## 🔬 Configuration System
-
-### Configuration Classes
-
-See `src/config.py` for the authoritative field list. Key defaults:
-
-```python
-@dataclass
-class CollectionConfig:
-    top_channels_limit: int = 5000
-    batch_size: int = 100
-    duration_per_batch: int = 60          # seconds sampled per batch
-    collection_interval_minutes: int = 60
-    max_runtime_hours: Optional[int] = 24     # cost protection
-    max_collection_cycles: Optional[int] = 100
-    logs_dir: str = "logs"
-
-@dataclass
-class AnalysisConfig:
-    overlap_threshold: int = 1            # min shared viewers for an edge
-    weighting_mode: str = "shared_count"
-    min_channel_viewers: int = 1          # drop channels below this audience size
-    min_user_appearances: int = 1         # drop viewers seen in fewer channels
-    include_isolated_nodes: bool = True   # keep channels with no overlaps
-    resolution: float = 1.0               # Louvain resolution
-    min_community_size: int = 1           # discard communities below this size
-    static_viz_dpi: int = 300
-    label_top_n_nodes: int = 15
-    frontend_max_channels: int = 1000     # public browser graph caps
-    output_dir: str = "community_analysis"
-
-@dataclass
-class PipelineConfig:
-    collection: CollectionConfig
-    analysis: AnalysisConfig
-    vod: VODConfig
-    sqs: SQSConfig
-    storage_type: str = "file"  # "file" or "s3"
-    s3_bucket: Optional[str] = None
-    s3_prefix: str = "vieweratlas/"
-    s3_region: str = "us-east-1"
-    log_level: str = "INFO"
-```
-
-The analysis defaults are deliberately permissive: `min_channel_viewers`,
-`min_user_appearances` and `min_community_size` all default to `1`, so nothing is
-filtered until you opt in. Raise them to cut noise from a real dataset.
-
-### Configuration Presets
-
-**Default** - Balanced approach (overlap_threshold=1)  
-**Rigorous** - TwitchAtlas-style (overlap_threshold=300, min_community_size=10)  
-**Explorer** - Fine-grained (resolution=2.0, verbose logging)  
-**Debug** - Small dataset (100 channels, very verbose)
-
-### YAML Configuration
-
-Every field of `CollectionConfig`, `AnalysisConfig`, `VODConfig` and `SQSConfig`
-is settable from YAML under its matching section. Storage and logging settings
-are top-level keys, not a nested section. Unknown keys raise a `ValueError`
-rather than being silently ignored, so a typo fails immediately.
-
-```yaml
-collection:
-  logs_dir: "logs"
-  collection_interval_minutes: 60
-  top_channels_limit: 5000
-
-analysis:
-  overlap_threshold: 300
-  resolution: 1.0
-  min_community_size: 5
-  min_user_appearances: 2
-  include_isolated_nodes: false
-
-sqs:
-  enabled: false
-  queue_url: ""
-
-storage_type: "s3"
-s3_bucket: "vieweratlas-data-lake"
-s3_prefix: "vieweratlas/"
-s3_region: "us-east-1"
-
-log_level: "INFO"
-```
-
-Load from YAML:
-```python
-from config import load_config_from_yaml
-config = load_config_from_yaml("config.yaml")
-```
-
-`OVERLAP_THRESHOLD`, `MIN_COMMUNITY_SIZE`, `RESOLUTION` and `LOG_LEVEL`
-environment variables override the corresponding YAML values.
-
----
-
-## 🏗️ Distributed Collection Architecture
-
-The pipeline supports two collection modes:
-
-**Monolithic mode** (original): `main.py collect` runs discovery + collection in a single process. Suitable for smaller deployments.
-
-**Distributed mode** (new): Separates discovery from collection for horizontal scaling.
-
-### Data Flow
-
-```
-EventBridge (hourly) → discovery.py → SQS FIFO queue → worker.py (N instances) → S3 Parquet
-                            ↕                                  ↕
-                      DynamoDB (dedup)                   DynamoDB (dedup)
-```
-
-### Components
-
-- **`discovery.py`**: Fetches top channels from Twitch API, filters already-collected channels via DynamoDB, publishes `ChannelTask` messages to SQS FIFO queue.
-- **`worker.py`**: Long-polls SQS, collects stream metadata per channel, writes consolidated Parquet to S3. Uses DynamoDB conditional writes for race-free dedup across multiple workers.
-- **`sqs_task_queue.py`**: Wraps SQS FIFO with batch publish (10/batch), long-poll receive, and message deletion. Uses channel name as `MessageGroupId` for ordering.
-- **`daily_collection_state.py`**: `DynamoDBCollectionState` class with composite key `{source}#{channel}#{utc_day}`, conditional put for atomic dedup, and 32-day TTL auto-expiry.
-
-### Configuration
+Run commands from `twitchiobot/`:
 
 ```bash
-export SQS_CHANNEL_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123/vieweratlas-channel-tasks.fifo
-export DYNAMODB_STATE_TABLE=vieweratlas-collection-state
+python src/main.py survey config.yaml
+python src/main.py analyze config.yaml
 ```
 
-Or via `SQSConfig` dataclass in `config.py`:
-```python
-sqs = SQSConfig(enabled=True, queue_url="...", dynamodb_state_table="...")
+`survey` is a one-shot process: it acquires the DynamoDB lease, completes one
+cohort, writes its terminal manifest, releases the lease, and exits. It is the
+only supported production collection entry point. `analyze` reads eligible
+private snapshots and produces aggregate public data.
+
+Production VOD, discovery, worker, and long-running collector services must
+remain at desired count zero. They are excluded from the normal build and
+deployment path.
+
+## Survey flow
+
+The current collection path is split across these modules:
+
+- `update_channels.py` defines `ChannelTargetProvider` and the current
+  `TopStreamsProvider`. It freezes up to 1,200 unique broadcaster IDs from
+  structured Helix stream records without filling failed targets from below
+  the frozen ranking.
+- `eventsub_survey.py` owns the TwitchIO 3.2.2 EventSub WebSocket, join limiter,
+  common listening windows, retries, teardown, v2 rows, and survey manifest.
+- `twitch_credentials.py` loads and atomically rotates the single Twitch
+  credential.
+- `survey_lease.py` prevents overlapping survey tasks.
+- `storage.py` writes private Parquet and manifest objects.
+
+A normal full survey processes twelve strict batches of no more than 100
+channels. New joins are limited to 20 per ten seconds. Each batch begins its
+shared 300-second listening window only after its successful subscriptions are
+ready or setup retries are exhausted. All subscriptions are deleted before the
+next batch begins.
+
+The collector retries an individual subscription setup twice. A hard WebSocket
+loss clears the in-memory results and restarts the whole batch, up to two
+retries, because Twitch does not replay missed events. A full run normally
+takes roughly 80 minutes and has a 7,200-second application timeout.
+
+The production schedule uses EventBridge Scheduler with timezone
+`America/New_York`, flexible timing disabled, and these local expressions:
+
+- survey: `cron(0 6,14,22 * * ? *)`;
+- analysis: `cron(0 1 * * ? *)`.
+
+## Author and privacy rules
+
+`channel.chat.message` events contribute only a stable Twitch author ID and a
+normalized lowercase login. Authors are unique within each
+`(survey_session_id, channel_id)` pair. The collector excludes its own bot and
+Shared Chat messages originating in another broadcaster's room.
+
+The collector does not persist message text, fragments, per-message
+timestamps, or message counts. A channel with no active authors during the
+window is a successful zero-author observation. Logs contain operational
+milestones and counts, never author identities or credential values.
+
+See [DATA_POLICY.md](DATA_POLICY.md) for retention and access requirements.
+
+## Private v2 data contract
+
+Each completed batch is written to:
+
+```text
+raw/snapshots/v2/date=YYYY-MM-DD/session=<id>/batch=<nn>.parquet
 ```
 
-### Storage Format
+The session folder also contains `manifest.json`. Manifest states are
+`running`, `complete`, `complete_with_errors`, and `partial`. Analysis accepts
+only terminal complete cohorts, skips failed or partial channel observations,
+and keeps legacy snapshot compatibility during migration.
 
-Collection now writes **one consolidated Parquet file per cycle** instead of per-channel JSON+CSV. Schema:
-```
-channel | timestamp | viewer_count | game_name | title | started_at | language | chatters_json
-```
-Files stored at: `raw/snapshots/YYYY/MM/DD/cycle_{timestamp}.parquet`
+Every channel row records its frozen rank and discovery metadata, exact common
+window, collection status, unique-author count, and aligned deterministic JSON
+arrays for author IDs and logins. These files are private. Current v2 objects
+expire after 90 days and noncurrent versions after seven days.
 
----
+The public `data/frontend-data.json` schema is unchanged. It contains aggregate
+channel and graph results only; it must never receive author IDs, logins, raw
+arrays, or survey manifests.
 
-## 🐳 Docker Implementation
+## Twitch authentication
 
-### Collector Container
+Production uses one Secrets Manager JSON credential containing:
 
-**Dockerfile.collector:**
-- Base: `python:3.11-slim`
-- Runs `get_viewers.py` continuously
-- Health check: Verifies logs directory
+- Client ID;
+- Client Secret;
+- bot user ID;
+- access token; and
+- refresh token.
 
-**Build and run:**
-```bash
-docker build -t vieweratlas-collector -f Dockerfile.collector .
-docker run -d \
-  -e TWITCH_OAUTH_TOKEN=oauth:token \
-  -e STORAGE_TYPE=s3 \
-  vieweratlas-collector
-```
+The bot authorization requests only `user:read:chat`. Access and refresh tokens
+are persisted together whenever Twitch rotates them. Use
+`infrastructure/aws/authorize-twitch.sh`; never assemble or edit the production
+secret by hand, and never put its fields in `.env`.
 
-### Analysis Container
+`TWITCH_CREDENTIALS_SECRET_ID` identifies the one secret. The collector role is
+limited to that secret, the DynamoDB lease operations, and private v2 survey
+storage. Development tests should use injected credential stores rather than
+real production tokens.
 
-**Dockerfile.analysis:**
-- Base: `python:3.11-slim`
-- Includes matplotlib/networkx dependencies
-- Runs `main.py analyze` pipeline
+## Configuration and canaries
 
-**Build and run:**
-```bash
-docker build -t vieweratlas-analysis -f Dockerfile.analysis .
-docker run -d \
-  -e STORAGE_TYPE=s3 \
-  vieweratlas-analysis
-```
+The production values live in `config/config.yaml` and the AWS task definition.
+The relevant collection defaults are 1,200 targets, batches of 100, a
+300-second window, two subscription retries, two full-batch retries, and a
+7,200-second timeout. A batch size above 100 is rejected.
 
-### Docker Compose
-
-Local testing with both services:
-```bash
-cp .env.example .env
-# Edit .env with credentials
-docker-compose up -d
-docker-compose logs -f
-```
-
-**Services:**
-- `collector`: Live chat collection
-- `analysis`: Community detection pipeline
-- `vod-collector`: VOD preprocessing (optional)
-
----
-
-## ☁️ AWS Deployment
-
-### IAM Roles
-
-VOD collector requires two IAM roles (see [iam-roles.json](../infrastructure/aws/iam-roles.json)):
-
-**Task Role** (`vieweratlas-vod-collector-task-role`):
-- S3 read/write access to vieweratlas/* prefix
-- CloudWatch Logs write access
-
-**Execution Role** (`vieweratlas-vod-collector-execution-role`):
-- ECR image pull permissions
-- Secrets Manager access for Twitch credentials
-- CloudWatch Logs creation
-
-```bash
-# Create roles using provided templates
-aws iam create-role --role-name vieweratlas-vod-collector-task-role \
-  --assume-role-policy-document file://iam-roles.json
-
-aws iam create-role --role-name vieweratlas-vod-collector-execution-role \
-  --assume-role-policy-document file://iam-roles.json
-```
-
-### EventBridge Scheduling
-
-Schedule VOD processing runs (see [eventbridge-schedules.json](../infrastructure/aws/eventbridge-schedules.json)):
-
-**Daily at 2 AM UTC:**
-```bash
-aws events put-rule --name vieweratlas-vod-daily \
-  --schedule-expression 'cron(0 2 * * ? *)' \
-  --description 'Run VOD collector daily'
-```
-
-**Every 6 hours:**
-```bash
-aws events put-rule --name vieweratlas-vod-hourly \
-  --schedule-expression 'rate(6 hours)'
-```
-
-### Athena/Glue Queries
-
-Query curated VOD snapshots using Athena (see [athena-schema.sql](../infrastructure/aws/athena-schema.sql)):
-
-```sql
--- Create external table
-CREATE EXTERNAL TABLE vieweratlas_vod_snapshots (...)
-STORED AS PARQUET
-LOCATION 's3://your-bucket/vieweratlas/curated/presence_snapshots/';
-
--- Query VOD statistics
-SELECT channel, COUNT(*) as vod_count
-FROM vieweratlas_vod_snapshots
-WHERE source = 'vod'
-GROUP BY channel;
-```
-
-### Monitoring
-
-CloudWatch dashboard configuration in [monitoring-dashboard.yaml](../infrastructure/aws/monitoring-dashboard.yaml):
-
-**Key Metrics:**
-- VOD queue status (pending/processing/completed/failed)
-- Processing rate and duration
-- Backoff attempt distribution
-- ECS task CPU/memory utilization
-
-**Alarms:**
-- High queue backlog (>1000 pending)
-- High failure rate (>20%)
-- Processing stalled (no VODs in 6 hours)
-
-### ECS Task Definitions
-
-**ecs-task-collector.json:**
-- Fargate task for continuous collection
-- Secrets Manager integration for Twitch credentials
-- CloudWatch Logs integration
-
-**ecs-task-analysis.json:**
-- Fargate task for analysis pipeline
-- Larger resources (1024 CPU, 2048 MB)
-- S3 read/write permissions
-
-**ecs-task-vod-collector.json:**
-- Fargate task for VOD preprocessing
-- TwitchDownloaderCLI bundled in image
-- EFS mount for shared VOD queue
-- EventBridge scheduling (hourly/daily)
-
-### Deployment Script
-
-**deploy.sh** automates:
-1. ECR repository creation (collector, analysis, vod, discovery, worker)
-2. Docker image builds
-3. Image push to ECR
-4. SQS FIFO queue creation
-5. DynamoDB table creation (with TTL)
-6. IAM roles with SQS/DynamoDB permissions
-7. ECS task definition registration
-8. ECS service updates
-
-**Usage:**
-```bash
-export AWS_REGION=us-east-1
-export S3_BUCKET=vieweratlas-data-lake
-export ECS_CLUSTER=vieweratlas-cluster
-export EFS_ID=fs-12345678  # For VOD queue sharing
-./deploy.sh
-```
-
----
-
-## 🧪 Testing
-
-### Storage Backend Tests
+The controlled-rollout helper supplies temporary task overrides for the only
+supported canary sizes:
 
 ```bash
-python storage.py
+./run-survey-test.sh small
+./run-survey-test.sh batch
+./run-survey-test.sh full
 ```
 
-### Module Tests
+Run them in that order. The first is five channels for one minute, the second
+is 100 channels for five minutes, and the third is the complete 1,200-channel
+survey. Schedule activation comes only after all three succeed.
 
-```python
-from data_aggregator import DataAggregator
-from graph_builder import GraphBuilder
+## AWS execution and observability
 
-# Test aggregation
-agg = DataAggregator("logs")
-agg.load_all()
-print(agg.get_data_quality_report())
+The normal deployment builds only collector and analysis images. The collector
+runs as a 0.5-vCPU, 1-GB Fargate task and stays stopped between scheduled
+surveys. The application-level DynamoDB lease rejects accidental overlap.
 
-# Test graph building
-builder = GraphBuilder(overlap_threshold=50)
-graph = builder.build_graph(agg.channel_viewers)
-print(f"Nodes: {graph.number_of_nodes()}")
-print(f"Edges: {graph.number_of_edges()}")
-```
+Identity-free milestones are `SURVEY_STARTED`, `BATCH_COMPLETED`,
+`SURVEY_COMPLETED`, `SURVEY_PARTIAL`, `ANALYSIS_COMPLETED`, and
+`ANALYSIS_FAILED`. Monitoring uses these milestones instead of a long-running
+service heartbeat. The strict smoke test additionally requires both analysis
+objects to be newer than the latest completed survey manifest.
 
-### Integration Test
+Pause with `pause-schedules.sh`; it preserves schedule targets and does not
+depend on ECS, IAM, or VPC validation. CloudFront continues serving the last
+valid public dataset. Rollback must never reactivate the retired IRC collector.
+
+## Verification
+
+Install development dependencies and run the tests from `twitchiobot/`:
 
 ```bash
-python main.py analyze debug
-ls -lh community_analysis/
+python -m pip install -r requirements-dev.txt
+pytest -q
 ```
 
----
+Infrastructure scripts can be checked without changing AWS:
 
-## 📈 Performance Considerations
-
-### Data Collection
-- **Batch size**: 100 channels per batch (configurable)
-- **Retry logic**: 3 attempts with exponential backoff (1s, 2s, 4s)
-- **Collection interval**: 3600s (1 hour) default
-
-### Analysis
-- **Memory usage**: ~500MB for 1000 channels
-- **Computation time**: ~2-5 minutes for 1000 channels
-- **Graph density**: Target 0.01-0.10 for good performance
-- **Community detection**: O(n log n) with Louvain
-
-### S3 Storage
-- **Uploads**: SSE-AES256 encryption automatic
-- **Date partitioning**: Enables efficient Athena queries
-- **List operations**: Paginated (1000 objects per page)
-- **Retry logic**: 3 attempts for transient failures
-
----
-
-## 🛠️ Extending ViewerAtlas
-
-### Adding New Storage Backends
-
-Implement the `BaseStorage` interface:
-
-```python
-from storage import BaseStorage
-
-class MyStorage(BaseStorage):
-    def upload_json(self, key: str, data: dict) -> str:
-        # Implementation
-        pass
-    
-    def download_json(self, key: str) -> dict:
-        # Implementation
-        pass
-    
-    # ... implement other required methods
+```bash
+bash -n infrastructure/aws/*.sh
+python -m json.tool infrastructure/aws/ecs-task-collector.json >/dev/null
+python -m json.tool infrastructure/aws/ecs-task-analysis.json >/dev/null
 ```
 
-Register in `get_storage()`:
-```python
-def get_storage(storage_type=None, **kwargs):
-    if storage_type == 'mystorage':
-        return MyStorage(**kwargs)
-    # ... existing logic
-```
+For a real rollout, follow [DEPLOYMENT.md](DEPLOYMENT.md). It deploys in a
+paused state and enforces the `small` → `batch` → `full` order before schedule
+activation.
 
-### Custom Community Detection
+## Deferred work
 
-Replace Louvain with your algorithm:
-
-```python
-from community_detector import CommunityDetector
-
-class MyCommunityDetector(CommunityDetector):
-    def detect_communities(self, graph):
-        partition = {}  # {node: community_id}
-        modularity = self.calculate_modularity(graph, partition)
-        return partition, modularity
-```
-
-### Custom Visualization
-
-```python
-from visualizer import Visualizer
-
-class MyVisualizer(Visualizer):
-    def visualize_3d(self, graph, partition, labels):
-        # 3D visualization implementation
-        pass
-```
-
----
-
-## 📚 API Reference
-
-### PipelineRunner
-
-```python
-class PipelineRunner:
-    def __init__(self, config: PipelineConfig):
-        """Initialize pipeline with configuration"""
-    
-    def run_collection_cycle(self) -> None:
-        """Run one collection cycle"""
-    
-    def run_analysis_pipeline(self, config_name: str = "default") -> dict:
-        """Run full analysis pipeline, return results"""
-    
-    def run_continuous(self, config_name: str = "default") -> None:
-        """Run continuous collection + analysis"""
-```
-
-### DataAggregator
-
-```python
-class DataAggregator:
-    def __init__(self, logs_dir: str, storage: Optional[BaseStorage] = None):
-        """Initialize with logs directory or storage backend"""
-    
-    def load_all(self, filter_by_repeat: bool = False) -> None:
-        """Load all snapshots and chatter logs"""
-    
-    def filter_by_repeat_viewers(self, min_appearances: int = 2) -> dict:
-        """Filter for viewers appearing in N+ channels"""
-    
-    def get_data_quality_report(self) -> dict:
-        """Get statistics about data quality"""
-```
-
-### GraphBuilder
-
-```python
-class GraphBuilder:
-    def __init__(self, overlap_threshold: int = 1):
-        """Initialize with minimum overlap threshold"""
-    
-    def build_graph(self, channel_viewers: dict) -> nx.Graph:
-        """Build weighted overlap graph"""
-    
-    def export_for_gephi(self, graph: nx.Graph, output_dir: str) -> None:
-        """Export nodes and edges CSVs for Gephi"""
-```
-
----
-
-## 📖 Additional Resources
-
-- **Main README**: [../../README.md](../../README.md) - Complete user guide
-- **NetworkX**: https://networkx.org/
-- **Louvain Algorithm**: https://python-louvain.readthedocs.io/
-- **TwitchIO**: https://twitchio.dev/
-
----
-
-**For usage instructions and troubleshooting, see [../../README.md](../../README.md)**
+- Graph mathematics and the 30/60/90-day presentation controls are a separate
+  follow-up that will consume the stable IDs already captured.
+- Website channel opt-in is reserved by `selection_source` values `opt_in` and
+  `both`, but is not implemented in this release.
+- The cost estimate is calculated after the first complete production survey
+  from measured Fargate runtime, public IPv4 time, Parquet size, storage,
+  requests, logs, and Secrets Manager usage.

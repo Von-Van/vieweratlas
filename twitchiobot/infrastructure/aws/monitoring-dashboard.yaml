@@ -1,194 +1,68 @@
-# ViewerAtlas Monitoring Dashboard Configuration
-# Import into CloudWatch or Grafana
+# ViewerAtlas scheduled-survey monitoring. apply-monitoring.sh turns this into
+# a CloudWatch dashboard; alarms are applied directly by that script.
 
 dashboard_config:
-  name: "ViewerAtlas-VOD-Collection"
+  name: "ViewerAtlas-Surveys"
   widgets:
     - type: "metric"
-      title: "VOD Queue Status"
+      title: "Scheduled survey outcomes"
       metrics:
-        - name: "VODQueuePending"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
-          stat: "Average"
-          period: 300
-        - name: "VODQueueProcessing"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
-          stat: "Average"
-          period: 300
-        - name: "VODQueueCompleted"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
+        - name: "SurveyStartedCount"
+          namespace: "ViewerAtlas/Collector"
           stat: "Sum"
-          period: 3600
-        - name: "VODQueueFailed"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
+          period: 28800
+        - name: "SurveyTerminalCount"
+          namespace: "ViewerAtlas/Collector"
           stat: "Sum"
-          period: 3600
+          period: 28800
+        - name: "SurveyPartialCount"
+          namespace: "ViewerAtlas/Collector"
+          stat: "Sum"
+          period: 28800
 
     - type: "metric"
-      title: "VOD Processing Rate"
+      title: "Collector errors"
       metrics:
-        - name: "VODsProcessedSuccess"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
+        - name: "CollectorErrorCount"
+          namespace: "ViewerAtlas/Collector"
           stat: "Sum"
-          period: 3600
-        - name: "VODsProcessedFailure"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
-          stat: "Sum"
-          period: 3600
-
-    - type: "metric"
-      title: "VOD Processing Duration"
-      metrics:
-        - name: "VODProcessingDurationSeconds"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
-          stat: "Average"
           period: 300
 
     - type: "metric"
-      title: "VOD Snapshots Generated"
+      title: "Daily analysis outcomes"
       metrics:
-        - name: "VODSnapshotsGenerated"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
+        - name: "AnalysisCompletedCount"
+          namespace: "ViewerAtlas/Analysis"
           stat: "Sum"
-          period: 3600
+          period: 21600
+        - name: "AnalysisFailedCount"
+          namespace: "ViewerAtlas/Analysis"
+          stat: "Sum"
+          period: 21600
 
     - type: "log"
-      title: "VOD Collector Logs"
-      log_group: "/ecs/vieweratlas-vod-collector"
+      title: "Survey milestones (no viewer identities)"
+      log_group: "/ecs/vieweratlas-collector"
       query: |
         fields @timestamp, @message
-        | filter @message like /VOD/
+        | filter @message like /SURVEY_/ or @message like /BATCH_COMPLETED/
         | sort @timestamp desc
         | limit 100
 
-    - type: "metric"
-      title: "Backoff Distribution"
-      metrics:
-        - name: "VODBackoffAttempts"
-          namespace: "ViewerAtlas"
-          dimensions:
-            - name: "Component"
-              value: "VODCollector"
-            - name: "AttemptNumber"
-              value: "*"
-          stat: "Sum"
-          period: 3600
+    - type: "log"
+      title: "Recent collector errors"
+      log_group: "/ecs/vieweratlas-collector"
+      query: |
+        fields @timestamp, @message
+        | filter @message like /ERROR/ or @message like /Traceback/
+        | sort @timestamp desc
+        | limit 100
 
-    - type: "metric"
-      title: "ECS Task Health"
-      metrics:
-        - name: "CPUUtilization"
-          namespace: "AWS/ECS"
-          dimensions:
-            - name: "ServiceName"
-              value: "vieweratlas-vod-collector"
-            - name: "ClusterName"
-              value: "vieweratlas-cluster"
-          stat: "Average"
-          period: 300
-        - name: "MemoryUtilization"
-          namespace: "AWS/ECS"
-          dimensions:
-            - name: "ServiceName"
-              value: "vieweratlas-vod-collector"
-            - name: "ClusterName"
-              value: "vieweratlas-cluster"
-          stat: "Average"
-          period: 300
-
-  # SNS Topic for Alerts
-  sns_topic:
-    name: "vieweratlas-alerts"
-    display_name: "ViewerAtlas Alerts"
-    subscriptions:
-      - protocol: "email"
-        endpoint: "${ALERT_EMAIL}"  # Set via environment variable
-      # Add additional subscriptions as needed:
-      # - protocol: "sms"
-      #   endpoint: "+1234567890"
-      # - protocol: "lambda"
-      #   endpoint: "arn:aws:lambda:region:account:function:notify"
-
-  alarms:
-    - name: "VODQueueBacklogHigh"
-      description: "Alert when VOD queue pending count exceeds 1000"
-      metric: "VODQueuePending"
-      threshold: 1000
-      comparison: "GreaterThanThreshold"
-      evaluation_periods: 2
-      period: 300
-      statistic: "Average"
-      alarm_actions:
-        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
-      treat_missing_data: "notBreaching"
-
-    - name: "VODFailureRateHigh"
-      description: "Alert when VOD failure rate exceeds 20%"
-      metric_math:
-        expression: "failures / (successes + failures) * 100"
-        metrics:
-          - id: "failures"
-            metric: "VODsProcessedFailure"
-          - id: "successes"
-            metric: "VODsProcessedSuccess"
-      threshold: 20
-      comparison: "GreaterThanThreshold"
-      evaluation_periods: 2
-      period: 3600
-      alarm_actions:
-        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
-      treat_missing_data: "notBreaching"
-
-    - name: "VODProcessingStalled"
-      description: "Alert when no VODs processed in 6 hours"
-      metric: "VODsProcessedSuccess"
-      threshold: 1
-      comparison: "LessThanThreshold"
-      evaluation_periods: 1
-      period: 21600  # 6 hours
-      statistic: "Sum"
-      alarm_actions:
-        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
-      treat_missing_data: "breaching"
-
-    - name: "ECSTaskFailures"
-      description: "Alert when ECS tasks fail repeatedly"
-      metric: "TasksStoppedReason"
-      namespace: "AWS/ECS"
-      dimensions:
-        - name: "ServiceName"
-          value: "vieweratlas-vod-collector"
-        - name: "ClusterName"
-          value: "vieweratlas-cluster"
-      threshold: 3
-      comparison: "GreaterThanThreshold"
-      evaluation_periods: 1
-      period: 900  # 15 minutes
-      statistic: "Sum"
-      alarm_actions:
-        - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
-      treat_missing_data: "notBreaching"
+    - type: "log"
+      title: "Daily analysis milestones and failures"
+      log_group: "/ecs/vieweratlas-analysis"
+      query: |
+        fields @timestamp, @message
+        | filter @message like /ANALYSIS_COMPLETED/ or @message like /ANALYSIS_FAILED/
+        | sort @timestamp desc
+        | limit 50

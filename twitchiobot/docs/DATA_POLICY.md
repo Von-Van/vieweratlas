@@ -1,76 +1,105 @@
 # ViewerAtlas Data Policy (Operational)
 
-This document defines what ViewerAtlas can store, the public/private data boundary,
-retention expectations, and operator responsibilities. It is an operational
-template, not a claim that a production deployment currently exists.
+This policy describes the EventSub survey release. It is an operational control,
+not a substitute for legal or privacy review.
 
-## 1. Data Classes Stored
+## Private survey data
 
-1. Raw live chat presence snapshots
-- Location: `raw/snapshots/`
-- Contains: channel metadata and Twitch usernames observed in snapshot windows
-- Classification: private operational data; usernames are pseudonymous identifiers
-  and may still be personal data
+ViewerAtlas observes only people who actively send a message during a channel's
+five-minute sample. It does not collect lurkers or fetch the channel's general
+viewer list.
 
-2. Raw VOD chat artifacts (disabled by default)
-- Location: `raw/vod_chat/`
-- Contains: downloaded VOD chat JSON, including message content and metadata
-- Default: not retained; `vod.persist_raw_chat` must be explicitly enabled
-- Classification: private operational data with a shorter recommended retention
+For each channel and survey session, the collector stores one unique entry per
+stable Twitch user ID, alongside the user's normalized login at that time. A
+person sending many messages still creates only one entry in that channel's
+sample. Twitch user ID, not spelling or capitalization of the login, controls
+deduplication.
 
-3. Curated presence and analysis outputs
-- Location: `curated/presence_snapshots/`, `curated/analysis/`
-- Contains: normalized/processed presence datasets, overlap graph outputs, partition results
+The collector does **not** store:
 
-4. Public frontend export
-- Location: `data/frontend-data.json`
-- Contains: channel-level graph nodes, weighted overlaps, community labels, and
-  aggregate statistics
-- Excludes: raw chatter usernames and message content
+- message text or fragments;
+- per-message timestamps;
+- message counts;
+- a person's activity in logs; or
+- duplicated author entries within the same channel/session.
 
-5. Operational logs
-- CloudWatch log groups:
-  - `/ecs/vieweratlas-collector`
-  - `/ecs/vieweratlas-analysis`
-  - `/ecs/vieweratlas-vod-collector`
+Survey files live under:
 
-## 2. Retention Windows
+```text
+raw/snapshots/v2/date=YYYY-MM-DD/session=<session-id>/
+```
 
-Recommended AWS defaults, enforced only after the included infrastructure scripts
-are applied and verified:
+Each folder contains an operational manifest and one private Parquet file per
+batch. Author IDs and logins are personal data even though ViewerAtlas uses them
+as pseudonymous analytical identifiers. The bucket must remain private.
 
-- `raw/snapshots/`: Standard-IA at 30 days, Glacier IR at 90 days, expire at 365 days
-- `raw/vod_chat/`: Standard-IA at 30 days, expire at 90 days
-- `curated/`: Standard-IA at 90 days (no expiration)
-- CloudWatch logs: retain 7 days
+## Public data
 
-The public frontend export should be regenerated from curated aggregates and must
-not be replaced with a raw presence file.
+The CloudFront website may receive only aggregated channel/community results in
+`data/frontend-data.json`. It must never contain Twitch author IDs, logins,
+messages, raw author arrays, or the private survey manifest.
 
-## 3. Deletion Behavior
+The frontend schema stays unchanged in this release. A smoke test enforces this
+private/public boundary after deployment.
 
-- S3 lifecycle rules perform automatic expiry/transitions.
-- Operators may perform manual deletions for incident/compliance reasons.
-- Queue/state files on ephemeral storage are not durable by default unless EFS is configured.
+## Retention
 
-## 4. Access and Secrets Handling
+- Current versions under `raw/snapshots/v2/` expire after **90 days**.
+- Replaced or deleted versions under that prefix expire after **seven days**.
+- Legacy `raw/snapshots/` data retains its former 365-day lifecycle while it is
+  migrated or allowed to age out.
+- Raw VOD chat remains disabled; its existing 90-day rule is kept only for any
+  old objects already present.
+- Curated aggregate data moves to Standard-IA after 90 days and does not contain
+  raw author arrays.
+- Collector and analysis CloudWatch logs expire after seven days.
 
-- Twitch credentials are stored in AWS Secrets Manager, not in source control.
-- IAM roles are scoped for ECS tasks and schedule execution.
-- Secrets must not be logged or echoed in normal operational output.
-- Raw presence and optional raw VOD data must remain behind private storage
-  access controls. Only `data/frontend-data.json` is intended for public delivery.
+Bucket versioning must remain enabled or the noncurrent-version rule cannot do
+its job. Operators should verify lifecycle rules after every infrastructure
+change.
 
-## 5. Operator Responsibilities
+## Credentials and access
 
-1. Keep lifecycle and retention policies applied and validated.
-2. Ensure SNS alarm subscriptions remain confirmed and monitored.
-3. Rotate Twitch credentials on schedule or on compromise suspicion.
-4. Validate data freshness with smoke tests after deploys/incidents.
-5. Respond to deletion requests in accordance with applicable policy/legal requirements.
-6. Review Twitch's terms and applicable privacy law before collecting or
-   publishing data.
+Production Twitch credentials are one JSON document in AWS Secrets Manager,
+normally `vieweratlas/twitch/credentials`. It contains the Client ID, Client
+Secret, bot user ID, access token, and refresh token. The collector reads and
+atomically rotates that credential; it must never log the document or individual
+secret values.
 
-## 6. Explicit Deferral
+The collector task role is limited to:
 
-This file documents operational policy intent. It is not a substitute for formal legal/compliance review.
+- object read/write access under the private
+  `raw/snapshots/v2/` survey prefix, plus the minimum bucket metadata and
+  prefix-list access needed to use that location;
+- `GetSecretValue` and `PutSecretValue` for that one Twitch secret; and
+- the DynamoDB item operations required for the survey overlap-prevention lease.
+
+The public S3/CloudFront path must not grant access to `raw/`.
+
+## Survey status and failures
+
+Manifests may be `running`, `complete`, `complete_with_errors`, or `partial`.
+Operational logs contain only session IDs, batch numbers, channel counts, and
+failure categories. They intentionally omit viewer identity.
+
+A quiet channel with no active message authors is a completed observation, not
+a failure. A partial survey must not be treated as a complete cohort by analysis.
+
+## Deferred collection modes
+
+VOD collection and the discovery/SQS worker path remain disabled. The future
+website opt-in feature will require broadcaster authorization, revocation
+handling, and a private opt-in registry. It may use the reserved
+`selection_source` values `opt_in` and `both`, but must preserve the same public
+privacy boundary before activation.
+
+## Operator responsibilities
+
+1. Keep S3, manifests, and raw survey files private.
+2. Confirm the 90-day/seven-day lifecycle rules and seven-day log retention.
+3. Use the guided authorization helper instead of copying tokens into files.
+4. Pause schedules during incidents or untested updates.
+5. Investigate `SURVEY_PARTIAL` alarms and verify recovery with a controlled
+   survey, then run `smoke-test.sh` after the following 1:00 AM analysis.
+6. Honor applicable deletion requirements and review Twitch terms and privacy
+   obligations before expanding collection.

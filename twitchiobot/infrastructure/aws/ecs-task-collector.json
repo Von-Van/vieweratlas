@@ -2,8 +2,8 @@
   "family": "vieweratlas-collector",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
-  "cpu": "256",
-  "memory": "512",
+  "cpu": "512",
+  "memory": "1024",
   "ephemeralStorage": {
     "sizeInGiB": 21
   },
@@ -12,6 +12,7 @@
       "name": "collector",
       "image": "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/vieweratlas-collector:${IMAGE_TAG}",
       "essential": true,
+      "command": ["python", "-u", "main.py", "survey", "config.yaml"],
       "logConfiguration": {
         "logDriver": "awslogs",
         "options": {
@@ -42,27 +43,15 @@
           "value": "INFO"
         },
         {
-          "name": "CHANNELS_FILE",
-          "value": "/app/channels.txt"
-        }
-      ],
-      "secrets": [
-        {
-          "name": "TWITCH_OAUTH_TOKEN",
-          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token"
+          "name": "DYNAMODB_STATE_TABLE",
+          "value": "${DYNAMODB_STATE_TABLE}"
         },
         {
-          "name": "TWITCH_CLIENT_ID",
-          "valueFrom": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id"
+          "name": "TWITCH_CREDENTIALS_SECRET_ID",
+          "value": "${TWITCH_CREDENTIALS_SECRET_ID}"
         }
       ],
-      "healthCheck": {
-        "command": ["CMD-SHELL", "test -d /app/logs || exit 1"],
-        "interval": 30,
-        "timeout": 5,
-        "retries": 3,
-        "startPeriod": 60
-      }
+      "stopTimeout": 120
     }
   ],
   "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-collector-task-role",

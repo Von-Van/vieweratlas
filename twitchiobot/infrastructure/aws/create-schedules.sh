@@ -1,256 +1,281 @@
 #!/bin/bash
-# Create or update EventBridge schedules for analysis and VOD ECS tasks.
+# Idempotently create the one-shot survey and daily analysis schedules with
+# EventBridge Scheduler. Scheduler time zones are required so Eastern daylight
+# saving changes do not shift the intended local run times.
 
 set -euo pipefail
+export AWS_PAGER=""
 
 load_env_file() {
     local env_file=".env"
-    if [ ! -f "$env_file" ]; then
-        return
-    fi
-
+    [ -f "$env_file" ] || return
     while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            ''|'#'*) continue ;;
-        esac
+        case "$line" in ''|'#'*) continue ;; esac
         line="${line#export }"
-        if [[ ! "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-            continue
-        fi
+        [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
         local key="${line%%=*}"
         local value="${line#*=}"
-        value="${value%\"}"
-        value="${value#\"}"
-        value="${value%\'}"
-        value="${value#\'}"
+        value="${value%\"}"; value="${value#\"}"
+        value="${value%\'}"; value="${value#\'}"
+        # Explicit command-line environment values take precedence over .env.
+        [ -z "${!key+x}" ] || continue
         export "$key=$value"
     done < "$env_file"
 }
 
 load_env_file
 
-# Environment-aware naming (mirrors deploy.sh)
 ENVIRONMENT="${ENVIRONMENT:-prod}"
 if [ "$ENVIRONMENT" = "prod" ]; then
     SERVICE_PREFIX="vieweratlas"
-    _DEFAULT_CLUSTER="vieweratlas-cluster"
+    DEFAULT_CLUSTER="vieweratlas-cluster"
 else
     SERVICE_PREFIX="vieweratlas-${ENVIRONMENT}"
-    _DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
+    DEFAULT_CLUSTER="vieweratlas-${ENVIRONMENT}-cluster"
 fi
 
 AWS_REGION=${AWS_REGION:-us-east-1}
-ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
-ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-DISABLED}
+AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-}
+ECS_CLUSTER=${ECS_CLUSTER:-$DEFAULT_CLUSTER}
+ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
-AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-}
-ANALYSIS_SCHEDULE=${ANALYSIS_SCHEDULE:-cron(0 3 * * ? *)}
-VOD_SCHEDULE=${VOD_SCHEDULE:-rate(6 hours)}
-ENABLE_VOD_SCHEDULE=${ENABLE_VOD_SCHEDULE:-false}
-ANALYSIS_RULE_NAME=${ANALYSIS_RULE_NAME:-${SERVICE_PREFIX}-analysis-daily}
-VOD_RULE_NAME=${VOD_RULE_NAME:-${SERVICE_PREFIX}-vod-6h}
-EVENTBRIDGE_ROLE_NAME=${EVENTBRIDGE_ROLE_NAME:-${SERVICE_PREFIX}-eventbridge-ecs-role}
+SCHEDULE_TIMEZONE=${SCHEDULE_TIMEZONE:-America/New_York}
+SURVEY_SCHEDULE=${SURVEY_SCHEDULE:-cron(0 6,14,22 * * ? *)}
+ANALYSIS_SCHEDULE=${ANALYSIS_SCHEDULE:-cron(0 1 * * ? *)}
+SURVEY_SCHEDULE_NAME=${SURVEY_SCHEDULE_NAME:-${SERVICE_PREFIX}-survey-three-daily}
+ANALYSIS_SCHEDULE_NAME=${ANALYSIS_SCHEDULE_NAME:-${SERVICE_PREFIX}-analysis-daily}
+SURVEY_SCHEDULE_STATE=${SURVEY_SCHEDULE_STATE:-ENABLED}
+ANALYSIS_SCHEDULE_STATE=${ANALYSIS_SCHEDULE_STATE:-ENABLED}
+SCHEDULER_ROLE_NAME=${SCHEDULER_ROLE_NAME:-${SERVICE_PREFIX}-scheduler-ecs-role}
+LEGACY_ANALYSIS_RULE_NAME=${LEGACY_ANALYSIS_RULE_NAME:-${SERVICE_PREFIX}-analysis-daily}
+LEGACY_VOD_RULE_NAME=${LEGACY_VOD_RULE_NAME:-${SERVICE_PREFIX}-vod-6h}
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 err() { echo -e "${RED}[ERROR]${NC} $1"; }
+fail() { err "$1"; exit 1; }
 
-if ! command -v aws >/dev/null 2>&1; then
-    err "AWS CLI is required"
-    exit 1
-fi
+command -v aws >/dev/null 2>&1 || fail "AWS CLI is required"
+command -v python3 >/dev/null 2>&1 || fail "python3 is required"
+[ -n "$SUBNET_IDS" ] || fail "SUBNET_IDS is required"
+[ -n "$SECURITY_GROUP_ID" ] || fail "SECURITY_GROUP_ID is required"
+[[ "$ASSIGN_PUBLIC_IP" =~ ^(ENABLED|DISABLED)$ ]] || fail "ASSIGN_PUBLIC_IP must be ENABLED or DISABLED"
+[[ "$SURVEY_SCHEDULE_STATE" =~ ^(ENABLED|DISABLED)$ ]] || fail "SURVEY_SCHEDULE_STATE must be ENABLED or DISABLED"
+[[ "$ANALYSIS_SCHEDULE_STATE" =~ ^(ENABLED|DISABLED)$ ]] || fail "ANALYSIS_SCHEDULE_STATE must be ENABLED or DISABLED"
 
-if [ -z "$AWS_REGION" ] || [ -z "$ECS_CLUSTER" ]; then
-    err "AWS_REGION and ECS_CLUSTER are required"
-    exit 1
-fi
+validate_subnet_egress() {
+    local subnet_id vpc_id route_table_id route_target
+    local -a subnet_ids
+    IFS=',' read -r -a subnet_ids <<< "$SUBNET_IDS"
+    for subnet_id in "${subnet_ids[@]}"; do
+        vpc_id=$(aws ec2 describe-subnets \
+            --subnet-ids "$subnet_id" --region "$AWS_REGION" \
+            --query 'Subnets[0].VpcId' --output text 2>/dev/null || true)
+        [ -n "$vpc_id" ] && [ "$vpc_id" != "None" ] || fail "Subnet was not found: $subnet_id"
+        route_table_id=$(aws ec2 describe-route-tables \
+            --filters "Name=association.subnet-id,Values=$subnet_id" \
+            --region "$AWS_REGION" --query 'RouteTables[0].RouteTableId' \
+            --output text 2>/dev/null || true)
+        if [ -z "$route_table_id" ] || [ "$route_table_id" = "None" ]; then
+            route_table_id=$(aws ec2 describe-route-tables \
+                --filters "Name=vpc-id,Values=$vpc_id" "Name=association.main,Values=true" \
+                --region "$AWS_REGION" --query 'RouteTables[0].RouteTableId' \
+                --output text 2>/dev/null || true)
+        fi
+        [ -n "$route_table_id" ] && [ "$route_table_id" != "None" ] || \
+            fail "No route table found for subnet $subnet_id"
 
-if [ -z "$SUBNET_IDS" ] || [ -z "$SECURITY_GROUP_ID" ]; then
-    err "SUBNET_IDS and SECURITY_GROUP_ID are required"
-    exit 1
-fi
+        if [ "$ASSIGN_PUBLIC_IP" = "ENABLED" ]; then
+            route_target=$(aws ec2 describe-route-tables \
+                --route-table-ids "$route_table_id" --region "$AWS_REGION" \
+                --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].GatewayId | [0]' \
+                --output text 2>/dev/null || true)
+            [[ "$route_target" =~ ^igw- ]] || \
+                fail "Subnet $subnet_id needs an Internet Gateway default route when ASSIGN_PUBLIC_IP=ENABLED"
+        else
+            route_target=$(aws ec2 describe-route-tables \
+                --route-table-ids "$route_table_id" --region "$AWS_REGION" \
+                --query 'RouteTables[0].Routes[?DestinationCidrBlock==`0.0.0.0/0`].NatGatewayId | [0]' \
+                --output text 2>/dev/null || true)
+            [[ "$route_target" =~ ^nat- ]] || \
+                fail "ASSIGN_PUBLIC_IP=DISABLED requires NAT egress; set it to ENABLED for the current public subnets"
+        fi
+    done
+}
 
-if [ "$ENABLE_VOD_SCHEDULE" != "true" ] && [ "$ENABLE_VOD_SCHEDULE" != "false" ]; then
-    err "ENABLE_VOD_SCHEDULE must be true or false"
-    exit 1
-fi
+validate_subnet_egress
 
 if [ -z "$AWS_ACCOUNT_ID" ]; then
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 fi
 
 CLUSTER_ARN="arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}"
-ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${EVENTBRIDGE_ROLE_NAME}"
+ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SCHEDULER_ROLE_NAME}"
 
+SURVEY_TASK_ARN=$(aws ecs describe-task-definition \
+    --task-definition "${SERVICE_PREFIX}-collector" \
+    --region "$AWS_REGION" \
+    --query 'taskDefinition.taskDefinitionArn' \
+    --output text)
 ANALYSIS_TASK_ARN=$(aws ecs describe-task-definition \
     --task-definition "${SERVICE_PREFIX}-analysis" \
     --region "$AWS_REGION" \
     --query 'taskDefinition.taskDefinitionArn' \
     --output text)
 
-VOD_TASK_ARN=""
-if [ "$ENABLE_VOD_SCHEDULE" = "true" ]; then
-    VOD_TASK_ARN=$(aws ecs describe-task-definition \
-        --task-definition "${SERVICE_PREFIX}-vod-collector" \
-        --region "$AWS_REGION" \
-        --query 'taskDefinition.taskDefinitionArn' \
-        --output text)
-fi
+ensure_scheduler_role() {
+    local trust_file policy_file
+    trust_file=$(mktemp)
+    policy_file=$(mktemp)
 
-ensure_eventbridge_role() {
-    local trust_json policy_json task_resources role_resources
-    trust_json=$(mktemp)
-    policy_json=$(mktemp)
-
-    task_resources="\"arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-analysis:*\""
-    role_resources="\"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-task-role\", \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-execution-role\""
-    if [ "$ENABLE_VOD_SCHEDULE" = "true" ]; then
-        task_resources+=", \"arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-vod-collector:*\""
-        role_resources+=", \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-task-role\", \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-execution-role\""
-    fi
-
-    cat > "$trust_json" <<JSON
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {"Service": "events.amazonaws.com"},
-      "Action": "sts:AssumeRole"
-    }
-  ]
+    python3 - "$trust_file" <<'PY'
+import json, sys
+payload = {
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Principal": {"Service": "scheduler.amazonaws.com"},
+        "Action": "sts:AssumeRole",
+    }],
 }
-JSON
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
 
-    cat > "$policy_json" <<JSON
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["ecs:RunTask"],
-      "Resource": [${task_resources}],
-      "Condition": {
-        "ArnLike": {
-          "ecs:cluster": "${CLUSTER_ARN}"
-        }
-      }
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["iam:PassRole"],
-      "Resource": [${role_resources}]
-    }
-  ]
+    python3 - "$policy_file" "$AWS_REGION" "$AWS_ACCOUNT_ID" "$SERVICE_PREFIX" "$CLUSTER_ARN" <<'PY'
+import json, sys
+_, output, region, account, prefix, cluster_arn = sys.argv
+payload = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "ecs:RunTask",
+            "Resource": [
+                f"arn:aws:ecs:{region}:{account}:task-definition/{prefix}-collector:*",
+                f"arn:aws:ecs:{region}:{account}:task-definition/{prefix}-analysis:*",
+            ],
+            "Condition": {"ArnEquals": {"ecs:cluster": cluster_arn}},
+        },
+        {
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                f"arn:aws:iam::{account}:role/{prefix}-collector-task-role",
+                f"arn:aws:iam::{account}:role/{prefix}-collector-execution-role",
+                f"arn:aws:iam::{account}:role/{prefix}-analysis-task-role",
+                f"arn:aws:iam::{account}:role/{prefix}-analysis-execution-role",
+            ],
+        },
+    ],
 }
-JSON
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle)
+PY
 
-    if ! aws iam get-role --role-name "$EVENTBRIDGE_ROLE_NAME" >/dev/null 2>&1; then
-        info "Creating EventBridge role: $EVENTBRIDGE_ROLE_NAME"
-        aws iam create-role \
-            --role-name "$EVENTBRIDGE_ROLE_NAME" \
-            --assume-role-policy-document "file://$trust_json" >/dev/null
+    if aws iam get-role --role-name "$SCHEDULER_ROLE_NAME" >/dev/null 2>&1; then
+        info "Updating Scheduler role: $SCHEDULER_ROLE_NAME"
+        aws iam update-assume-role-policy \
+            --role-name "$SCHEDULER_ROLE_NAME" \
+            --policy-document "file://$trust_file" >/dev/null
     else
-        info "EventBridge role exists: $EVENTBRIDGE_ROLE_NAME"
+        info "Creating Scheduler role: $SCHEDULER_ROLE_NAME"
+        aws iam create-role \
+            --role-name "$SCHEDULER_ROLE_NAME" \
+            --assume-role-policy-document "file://$trust_file" >/dev/null
     fi
 
     aws iam put-role-policy \
-        --role-name "$EVENTBRIDGE_ROLE_NAME" \
-        --policy-name ViewerAtlasEventBridgeECS \
-        --policy-document "file://$policy_json" >/dev/null
-
-    rm -f "$trust_json" "$policy_json"
+        --role-name "$SCHEDULER_ROLE_NAME" \
+        --policy-name ViewerAtlasSchedulerECS \
+        --policy-document "file://$policy_file" >/dev/null
+    rm -f "$trust_file" "$policy_file"
 }
 
-put_target() {
-    local rule_name=$1
-    local task_arn=$2
-    local target_id=$3
-
+upsert_schedule() {
+    local name=$1 expression=$2 task_arn=$3 state=$4 description=$5
     local target_file
     target_file=$(mktemp)
 
-    python3 - "$target_file" "$target_id" "$CLUSTER_ARN" "$ROLE_ARN" "$task_arn" "$SUBNET_IDS" "$SECURITY_GROUP_ID" "$ASSIGN_PUBLIC_IP" <<'PY'
-import json
-import sys
-
-out = sys.argv[1]
-target_id = sys.argv[2]
-cluster_arn = sys.argv[3]
-role_arn = sys.argv[4]
-task_arn = sys.argv[5]
-subnets_csv = sys.argv[6]
-security_group = sys.argv[7]
-assign_public_ip = sys.argv[8]
-
-subnets = [s.strip() for s in subnets_csv.split(',') if s.strip()]
-
-payload = [
-    {
-        "Id": target_id,
-        "Arn": cluster_arn,
-        "RoleArn": role_arn,
-        "EcsParameters": {
-            "TaskDefinitionArn": task_arn,
-            "TaskCount": 1,
-            "LaunchType": "FARGATE",
-            "PlatformVersion": "LATEST",
-            "NetworkConfiguration": {
-                "awsvpcConfiguration": {
-                    "Subnets": subnets,
-                    "SecurityGroups": [security_group],
-                    "AssignPublicIp": assign_public_ip,
-                }
-            },
+    python3 - "$target_file" "$CLUSTER_ARN" "$ROLE_ARN" "$task_arn" "$SUBNET_IDS" "$SECURITY_GROUP_ID" "$ASSIGN_PUBLIC_IP" <<'PY'
+import json, sys
+_, output, cluster, role, task, subnets_csv, security_group, public_ip = sys.argv
+target = {
+    "Arn": cluster,
+    "RoleArn": role,
+    "EcsParameters": {
+        "TaskDefinitionArn": task,
+        "TaskCount": 1,
+        "LaunchType": "FARGATE",
+        "PlatformVersion": "LATEST",
+        "EnableECSManagedTags": True,
+        "NetworkConfiguration": {
+            "awsvpcConfiguration": {
+                "Subnets": [value.strip() for value in subnets_csv.split(",") if value.strip()],
+                "SecurityGroups": [security_group],
+                "AssignPublicIp": public_ip,
+            }
         },
-    }
-]
-
-with open(out, "w", encoding="utf-8") as f:
-    json.dump(payload, f)
+    },
+    # This bounds delivery retries. The application separately enforces the
+    # two-hour survey runtime and releases its DynamoDB lease on exit.
+    "RetryPolicy": {"MaximumEventAgeInSeconds": 7200, "MaximumRetryAttempts": 0},
+}
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(target, handle)
 PY
 
-    aws events put-targets \
-        --region "$AWS_REGION" \
-        --rule "$rule_name" \
-        --targets "file://$target_file" >/dev/null
+    if aws scheduler get-schedule --region "$AWS_REGION" --name "$name" >/dev/null 2>&1; then
+        info "Updating Scheduler schedule: $name ($expression, $SCHEDULE_TIMEZONE, $state)"
+        aws scheduler update-schedule \
+            --region "$AWS_REGION" \
+            --name "$name" \
+            --description "$description" \
+            --schedule-expression "$expression" \
+            --schedule-expression-timezone "$SCHEDULE_TIMEZONE" \
+            --flexible-time-window '{"Mode":"OFF"}' \
+            --state "$state" \
+            --target "file://$target_file" >/dev/null
+    else
+        info "Creating Scheduler schedule: $name ($expression, $SCHEDULE_TIMEZONE, $state)"
+        aws scheduler create-schedule \
+            --region "$AWS_REGION" \
+            --name "$name" \
+            --description "$description" \
+            --schedule-expression "$expression" \
+            --schedule-expression-timezone "$SCHEDULE_TIMEZONE" \
+            --flexible-time-window '{"Mode":"OFF"}' \
+            --state "$state" \
+            --target "file://$target_file" >/dev/null
+    fi
     rm -f "$target_file"
 }
 
-ensure_eventbridge_role
+ensure_scheduler_role
+upsert_schedule \
+    "$SURVEY_SCHEDULE_NAME" "$SURVEY_SCHEDULE" "$SURVEY_TASK_ARN" "$SURVEY_SCHEDULE_STATE" \
+    "Survey up to 1,200 Twitch channels at 6 AM, 2 PM, and 10 PM Eastern"
+upsert_schedule \
+    "$ANALYSIS_SCHEDULE_NAME" "$ANALYSIS_SCHEDULE" "$ANALYSIS_TASK_ARN" "$ANALYSIS_SCHEDULE_STATE" \
+    "Run ViewerAtlas analysis daily at 1 AM Eastern"
 
-info "Upserting EventBridge rule: $ANALYSIS_RULE_NAME ($ANALYSIS_SCHEDULE)"
-aws events put-rule \
-    --region "$AWS_REGION" \
-    --name "$ANALYSIS_RULE_NAME" \
-    --schedule-expression "$ANALYSIS_SCHEDULE" \
-    --description "Run ViewerAtlas analysis task" \
-    --state ENABLED >/dev/null
-put_target "$ANALYSIS_RULE_NAME" "$ANALYSIS_TASK_ARN" "vieweratlas-analysis-target"
-
-if [ "$ENABLE_VOD_SCHEDULE" = "true" ]; then
-    info "Upserting EventBridge rule: $VOD_RULE_NAME ($VOD_SCHEDULE)"
-    aws events put-rule \
-        --region "$AWS_REGION" \
-        --name "$VOD_RULE_NAME" \
-        --schedule-expression "$VOD_SCHEDULE" \
-        --description "Run ViewerAtlas VOD collector task" \
-        --state ENABLED >/dev/null
-    put_target "$VOD_RULE_NAME" "$VOD_TASK_ARN" "vieweratlas-vod-target"
+# The previous deployment used an EventBridge Rule at 03:00 UTC. Scheduler and
+# Rules are separate services, so explicitly disable that legacy trigger.
+if aws events describe-rule --region "$AWS_REGION" --name "$LEGACY_ANALYSIS_RULE_NAME" >/dev/null 2>&1; then
+    aws events disable-rule --region "$AWS_REGION" --name "$LEGACY_ANALYSIS_RULE_NAME" >/dev/null
+    info "Disabled legacy EventBridge Rule: $LEGACY_ANALYSIS_RULE_NAME"
 else
-    if aws events describe-rule --region "$AWS_REGION" --name "$VOD_RULE_NAME" >/dev/null 2>&1; then
-        aws events disable-rule --region "$AWS_REGION" --name "$VOD_RULE_NAME" >/dev/null
-        info "Disabled existing optional VOD schedule: $VOD_RULE_NAME"
-    else
-        info "VOD schedule is disabled (set ENABLE_VOD_SCHEDULE=true to enable it)"
-    fi
+    info "No legacy 03:00 UTC EventBridge Rule found"
+fi
+
+if aws events describe-rule --region "$AWS_REGION" --name "$LEGACY_VOD_RULE_NAME" >/dev/null 2>&1; then
+    aws events disable-rule --region "$AWS_REGION" --name "$LEGACY_VOD_RULE_NAME" >/dev/null
+    info "Disabled retired VOD EventBridge Rule: $LEGACY_VOD_RULE_NAME"
 fi
 
 info "Schedules configured successfully"
-warn "Review schedules with: aws events list-rules --name-prefix vieweratlas- --region $AWS_REGION"
+info "Survey:  $SURVEY_SCHEDULE_NAME ($SURVEY_SCHEDULE, $SCHEDULE_TIMEZONE, $SURVEY_SCHEDULE_STATE)"
+info "Analysis: $ANALYSIS_SCHEDULE_NAME ($ANALYSIS_SCHEDULE, $SCHEDULE_TIMEZONE, $ANALYSIS_SCHEDULE_STATE)"
+info "Review them with: aws scheduler list-schedules --region $AWS_REGION --name-prefix ${SERVICE_PREFIX}-"

@@ -1,33 +1,27 @@
 {
-  "comment": "Reference template only. create-schedules.sh is the source of truth for ViewerAtlas EventBridge schedules.",
+  "comment": "Reference only. create-schedules.sh is the idempotent source of truth for EventBridge Scheduler.",
+  "schedule_timezone": "America/New_York",
+  "flexible_time_window": {"Mode": "OFF"},
   "schedules": [
     {
-      "name": "vieweratlas-analysis-daily",
-      "description": "Run analysis pipeline daily at 03:00 UTC",
-      "schedule_expression": "cron(0 3 * * ? *)",
-      "target": {
-        "cluster_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}",
-        "role_arn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-eventbridge-ecs-role",
-        "task_definition_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-analysis"
-      }
+      "name": "vieweratlas-survey-three-daily",
+      "description": "Run one ViewerAtlas EventSub survey at 6 AM, 2 PM, and 10 PM Eastern",
+      "schedule_expression": "cron(0 6,14,22 * * ? *)",
+      "target_task_family": "vieweratlas-collector",
+      "task_count": 1,
+      "launch_type": "FARGATE"
     },
     {
-      "name": "vieweratlas-vod-6h",
-      "description": "Run VOD collector every 6 hours",
-      "schedule_expression": "rate(6 hours)",
-      "target": {
-        "cluster_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:cluster/${ECS_CLUSTER}",
-        "role_arn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/vieweratlas-eventbridge-ecs-role",
-        "task_definition_arn": "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/vieweratlas-vod-collector"
-      }
+      "name": "vieweratlas-analysis-daily",
+      "description": "Run analysis daily at 1 AM Eastern after the evening survey",
+      "schedule_expression": "cron(0 1 * * ? *)",
+      "target_task_family": "vieweratlas-analysis",
+      "task_count": 1,
+      "launch_type": "FARGATE"
     }
   ],
-  "required_inputs": [
-    "AWS_REGION",
-    "AWS_ACCOUNT_ID",
-    "ECS_CLUSTER",
-    "SUBNET_IDS",
-    "SECURITY_GROUP_ID",
-    "ASSIGN_PUBLIC_IP"
-  ]
+  "retired": {
+    "legacy_eventbridge_rule": "vieweratlas-analysis-daily at cron(0 3 * * ? *)",
+    "action": "create-schedules.sh disables this rule when present"
+  }
 }

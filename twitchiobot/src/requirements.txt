@@ -1,4 +1,4 @@
-twitchio==2.8.0
+twitchio==3.2.2
 networkx==3.2
 python-louvain==0.16
 pyvis==0.3.2

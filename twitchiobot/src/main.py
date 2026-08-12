@@ -1,23 +1,14 @@
-"""
-Main Orchestrator Module (Refactored)
+"""ViewerAtlas one-shot EventSub survey and analysis entry point.
 
-Unified entry point for the complete streaming community detection pipeline.
-Uses PipelineRunner class for clean orchestration and config-driven execution.
-
-Pipeline flow:
-1. Collect data (existing chat logger)
-2. Aggregate viewer data
-3. Build overlap graph
-4. Detect communities
-5. Tag communities
-6. Visualize results
+Production collection is launched by EventBridge Scheduler with the ``survey``
+command. The former Twitch IRC ``collect`` and ``continuous`` commands are
+deliberately retired.
 """
 
 import asyncio
 import os
 import signal
 import sys
-import time
 import logging
 import json
 from datetime import datetime
@@ -27,8 +18,7 @@ from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
 
-from get_viewers import ChatLogger, load_channels
-from update_channels import update_channel_list
+from get_viewers import load_channels
 from data_aggregator import DataAggregator
 from graph_builder import GraphBuilder
 from community_detector import CommunityDetector
@@ -45,6 +35,14 @@ from config import (
 from storage import get_storage
 from vod_collector import VODCollector
 from frontend_exporter import FrontendExportConfig, export_frontend_data
+from eventsub_survey import (
+    EventSubSurveyRunner,
+    TwitchEventSubClient,
+    make_survey_session_id,
+)
+from survey_lease import get_survey_lease
+from twitch_credentials import get_credential_store
+from update_channels import TopStreamsProvider
 
 load_dotenv()
 
@@ -137,30 +135,15 @@ class PipelineRunner:
         Validate that all prerequisites are met.
         
         Args:
-            mode: 'collect', 'analyze', or 'continuous'
+            mode: Pipeline mode. Only analysis requires dataset validation.
         
         Returns:
             True if valid, False otherwise
         """
         self.logger.info("Validating prerequisites...")
         
-        if mode in ['collect', 'continuous']:
-            oauth_token = os.getenv("TWITCH_OAUTH_TOKEN")
-            client_id = os.getenv("TWITCH_CLIENT_ID")
-            if not oauth_token:
-                self.logger.error("❌ TWITCH_OAUTH_TOKEN not set in environment")
-                return False
-            if not client_id:
-                self.logger.error("❌ TWITCH_CLIENT_ID not set in environment")
-                return False
-            self.logger.info("✓ Twitch OAuth token and client ID found")
-        
         if mode == 'analyze':
             if not self._validate_analysis_inputs():
-                return False
-        elif mode == 'continuous':
-            # Continuous mode can bootstrap from empty datasets and collect first.
-            if not self._validate_analysis_inputs(require_data=False):
                 return False
         
         # Check for required libraries
@@ -183,7 +166,7 @@ class PipelineRunner:
                          If False, log warnings and continue.
         """
         # Count every input format DataAggregator.load_all() actually reads.
-        # Live collection (ChatLogger and worker) writes Parquet under
+        # EventSub surveys and legacy collectors write Parquet under
         # raw/snapshots/, so a JSON-only check would reject a healthy dataset.
         snapshot_parquet = self.storage.list_files(prefix="raw/snapshots", suffix=".parquet")
         snapshot_json = self.storage.list_files(prefix="raw/snapshots", suffix=".json")
@@ -222,41 +205,12 @@ class PipelineRunner:
             if require_data:
                 self.logger.error(f"❌ {msg}")
                 return False
-            self.logger.warning(f"⚠ {msg}. Continuous mode will collect before analysis.")
+            self.logger.warning(f"⚠ {msg}. Continuing because data was not required.")
             return True
 
         summary = ", ".join(f"{count} {name}" for name, count in counts.items() if count)
         self.logger.info(f"✓ Found analysis inputs: {summary}")
         return True
-    
-    async def run_collection_cycle(self):
-        """Execute a single data collection cycle."""
-        oauth_token = os.getenv("TWITCH_OAUTH_TOKEN")
-        
-        self.logger.info("Starting data collection cycle...")
-        self.logger.info(f"Fetching top {self.config.collection.top_channels_limit} channels...")
-        
-        update_channel_list(limit=self.config.collection.top_channels_limit)
-        all_channels = load_channels()
-        
-        if not all_channels:
-            raise RuntimeError("Channel discovery returned zero channels; aborting collection cycle")
-        
-        self.logger.info(f"Found {len(all_channels)} channels to monitor")
-        
-        # Process in batches
-        for i, batch in enumerate(self._split_batches(all_channels, self.config.collection.batch_size), 1):
-            self.logger.info(f"Processing batch {i}/{-(-len(all_channels)//self.config.collection.batch_size)}...")
-            bot = ChatLogger(token=oauth_token, channels=batch, storage=self.storage)
-            await bot.start()
-            self.logger.info(f"  📡 Logging chatters in {len(batch)} channels")
-            await asyncio.sleep(self.config.collection.duration_per_batch)
-            await bot.log_results()
-            await bot.close()
-        
-        self.logger.info("✓ Collection cycle complete\n")
-        # Write heartbeat for container health check
-        Path(os.getenv("LOGS_DIR", "logs"), ".heartbeat").touch()
     
     def run_analysis_pipeline(self) -> dict:
         """
@@ -515,8 +469,8 @@ class PipelineRunner:
                 self.logger.warning(f"Interactive visualization failed: {e}")
     
     def _step_save_results(self, partition, labels, graph, aggregator,
-                          detection_stats, tagging_stats, communities=None):
-        """Save results to files."""
+                          detection_stats, tagging_stats, communities=None) -> None:
+        """Persist both required analysis artifacts or fail the scheduled run."""
         graph_stats = {
             "num_nodes": graph.number_of_nodes(),
             "num_edges": graph.number_of_edges(),
@@ -542,144 +496,99 @@ class PipelineRunner:
         
         if self.config.analysis.save_analysis_json:
             results_key = "processed/analysis_results.json"
-            self.storage.upload_json(results_key, results)
+            if not self.storage.upload_json(results_key, results):
+                raise IOError("Could not persist private analysis results")
             self.logger.info(f"✓ Results saved to {self.storage.get_uri(results_key)}")
 
         # Export frontend-ready JSON for S3/CloudFront serving
         if communities is not None:
-            try:
-                export_frontend_data(
-                    graph=graph,
-                    partition=partition,
-                    communities=communities,
-                    labels=labels,
-                    detection_stats=detection_stats,
-                    aggregator_stats=aggregator.get_statistics(),
-                    storage=self.storage,
-                    config=FrontendExportConfig(
-                        max_channels=self.config.analysis.frontend_max_channels,
-                        max_edges=self.config.analysis.frontend_max_edges,
-                        top_edges_per_channel=self.config.analysis.frontend_top_edges_per_channel,
-                    ),
-                )
-                self.logger.info("✓ Frontend data exported")
-            except Exception as e:
-                self.logger.warning(f"Frontend export failed (non-fatal): {e}")
+            exported = export_frontend_data(
+                graph=graph,
+                partition=partition,
+                communities=communities,
+                labels=labels,
+                detection_stats=detection_stats,
+                aggregator_stats=aggregator.get_statistics(),
+                storage=self.storage,
+                config=FrontendExportConfig(
+                    max_channels=self.config.analysis.frontend_max_channels,
+                    max_edges=self.config.analysis.frontend_max_edges,
+                    top_edges_per_channel=self.config.analysis.frontend_top_edges_per_channel,
+                ),
+            )
+            if not exported:
+                raise IOError("Could not persist public frontend data")
+            self.logger.info("✓ Frontend data exported")
     
-    def wait_until_next_hour(self):
-        """Wait until top of hour (or configured interval)."""
-        now = datetime.now()
-        next_trigger = now.replace(minute=0, second=0, microsecond=0)
-        if now.minute != 0 or now.second != 0:
-            next_trigger = next_trigger.replace(hour=(now.hour + 1) % 24)
-        
-        wait_seconds = (next_trigger - now).total_seconds()
-        self.logger.info(f"⏰ Waiting {int(wait_seconds)}s until next cycle...")
-        time.sleep(wait_seconds)
-    
-    @staticmethod
-    def _split_batches(lst, batch_size):
-        """Split list into batches."""
-        for i in range(0, len(lst), batch_size):
-            yield lst[i:i + batch_size]
-
-
 # Entry point modes
 
-async def mode_collect(config: PipelineConfig):
-    """Data collection only mode."""
-    runner = PipelineRunner(config)
-    if not runner._validate_prerequisites('collect'):
-        return
-    
-    start_time = time.time()
-    cycle_count = 0
-    
-    while True:
-        # Graceful shutdown: exit after completing the current cycle
-        if _shutdown_requested:
-            runner.logger.info("Shutdown requested, exiting after cycle completion.")
-            break
 
-        # Cost protection: check runtime limit
-        if config.collection.max_runtime_hours:
-            elapsed_hours = (time.time() - start_time) / 3600
-            if elapsed_hours >= config.collection.max_runtime_hours:
-                runner.logger.warning(
-                    f"⏱️ Max runtime reached: {elapsed_hours:.1f}h / {config.collection.max_runtime_hours}h. Stopping collection."
-                )
-                break
+async def mode_survey(config: PipelineConfig):
+    """Run exactly one EventSub survey and exit for EventBridge Scheduler."""
+    session_id = os.getenv("SURVEY_SESSION_ID") or make_survey_session_id()
+    lease = get_survey_lease()
+    if not lease.acquire(session_id):
+        logging.getLogger(__name__).warning(
+            "A survey is already running; this scheduled invocation will exit without collecting"
+        )
+        return {"status": "skipped", "reason": "lease_held"}
 
-        # Cost protection: check cycle limit
-        if config.collection.max_collection_cycles:
-            if cycle_count >= config.collection.max_collection_cycles:
-                runner.logger.warning(
-                    f"🔄 Max cycles reached: {cycle_count} / {config.collection.max_collection_cycles}. Stopping collection."
-                )
-                break
+    try:
+        credential_store = get_credential_store()
+        credentials = credential_store.load()
+        runner = PipelineRunner(config)
+        provider = TopStreamsProvider(
+            client_id=credentials.client_id,
+            access_token=credentials.access_token,
+        )
+        client = TwitchEventSubClient(credentials, credential_store)
+        survey = EventSubSurveyRunner(
+            storage=runner.storage,
+            target_provider=provider,
+            client=client,
+            top_channels_limit=config.collection.top_channels_limit,
+            batch_size=config.collection.batch_size,
+            window_seconds=config.collection.duration_per_batch,
+            timeout_seconds=config.collection.survey_timeout_seconds,
+            subscription_retries=config.collection.subscription_retries,
+            batch_retries=config.collection.batch_retries,
+            should_stop=lambda: _shutdown_requested,
+            on_batch_complete=lambda: lease.renew(session_id),
+            secrets=(
+                credentials.client_secret,
+                credentials.access_token,
+                credentials.refresh_token,
+            ),
+        )
+        result = await survey.run(session_id=session_id)
+        Path(os.getenv("LOGS_DIR", "logs"), ".heartbeat").touch()
+        return result
+    finally:
+        try:
+            lease.release(session_id)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to release the survey lease")
 
-        await runner.run_collection_cycle()
-        cycle_count += 1
-        runner.logger.info(f"Completed cycle {cycle_count}, runtime: {(time.time() - start_time)/3600:.2f}h")
 
-        if config.collection.wait_for_hour_alignment:
-            runner.wait_until_next_hour()
-
-
-async def mode_analyze(config: PipelineConfig):
-    """Analysis only mode."""
+async def mode_analyze(config: PipelineConfig) -> bool:
+    """Run one analysis task and report a scheduler-safe success value."""
+    logger = logging.getLogger(__name__)
     runner = PipelineRunner(config)
     if not runner._validate_prerequisites('analyze'):
-        return
+        logger.error("ANALYSIS_FAILED reason=prerequisites")
+        return False
     
     result = runner.run_analysis_pipeline()
-    print(f"\nResult: {result}")
-
-
-async def mode_continuous(config: PipelineConfig):
-    """Continuous collection + periodic analysis."""
-    runner = PipelineRunner(config)
-    if not runner._validate_prerequisites('continuous'):
-        return
-    
-    collection_cycles = 0
-    analysis_interval = config.analysis.analysis_interval_cycles
-    start_time = time.time()
-    
-    while True:
-        # Graceful shutdown: exit after completing the current cycle
-        if _shutdown_requested:
-            runner.logger.info("Shutdown requested, exiting after cycle completion.")
-            break
-
-        # Cost protection: check runtime limit
-        if config.collection.max_runtime_hours:
-            elapsed_hours = (time.time() - start_time) / 3600
-            if elapsed_hours >= config.collection.max_runtime_hours:
-                runner.logger.warning(
-                    f"⏱️ Max runtime reached: {elapsed_hours:.1f}h / {config.collection.max_runtime_hours}h. Stopping."
-                )
-                break
-
-        # Cost protection: check cycle limit
-        if config.collection.max_collection_cycles:
-            if collection_cycles >= config.collection.max_collection_cycles:
-                runner.logger.warning(
-                    f"🔄 Max cycles reached: {collection_cycles} / {config.collection.max_collection_cycles}. Stopping."
-                )
-                break
-
-        await runner.run_collection_cycle()
-        collection_cycles += 1
-
-        if collection_cycles % analysis_interval == 0:
-            runner.logger.info(f"Running periodic analysis (cycle {collection_cycles})...")
-            runner.run_analysis_pipeline()
-
-        runner.logger.info(f"Completed cycle {collection_cycles}, runtime: {(time.time() - start_time)/3600:.2f}h")
-
-        if config.collection.wait_for_hour_alignment:
-            runner.wait_until_next_hour()
+    if result.get("status") != "success":
+        logger.error("ANALYSIS_FAILED reason=pipeline")
+        return False
+    logger.info(
+        "ANALYSIS_COMPLETED channels=%s communities=%s edges=%s",
+        result.get("num_channels", 0),
+        result.get("num_communities", 0),
+        result.get("num_edges", 0),
+    )
+    return True
 
 
 async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] = None):
@@ -725,7 +634,7 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
     collector.process_all_pending(max_vods=effective_max)
 
 
-def main():
+def main() -> int:
     """Main entry point. Supports preset configs or YAML file."""
     # Parse arguments
     if len(sys.argv) < 2:
@@ -748,13 +657,13 @@ def main():
             logger_msg = f"Loaded config from {config_arg}"
         except FileNotFoundError:
             print(f"✗ Config file not found: {config_arg}")
-            return
+            return 1
         except ImportError as e:
             print(f"✗ {e}")
-            return
+            return 1
         except Exception as e:
             print(f"✗ Error loading config: {e}")
-            return
+            return 1
     else:
         # Use preset config
         config_map = {
@@ -767,7 +676,7 @@ def main():
         if config_arg not in config_map:
             print(f"Unknown config: {config_arg}")
             print(f"Available: {', '.join(config_map.keys())}")
-            return
+            return 1
         
         config = config_map[config_arg]()
         logger_msg = f"Using '{config_arg}' config"
@@ -781,24 +690,39 @@ def main():
     logger.info(f"Output directory: {config.analysis.output_dir}\n")
     
     # Run mode
-    if mode == "collect":
-        asyncio.run(mode_collect(config))
+    if mode == "survey":
+        try:
+            asyncio.run(mode_survey(config))
+        except KeyboardInterrupt:
+            logger.error("SURVEY_TASK_FAILED reason=operator_interrupt")
+            return 130
+        except Exception:
+            # OAuth libraries may embed the rejected token in an exception's
+            # text. Never interpolate or attach the traceback at this outer
+            # boundary; the redacted survey manifest carries safe diagnostics.
+            logger.error(
+                "SURVEY_TASK_FAILED reason=collection_error; review the redacted survey manifest"
+            )
+            return 1
     elif mode == "analyze":
-        asyncio.run(mode_analyze(config))
-    elif mode == "continuous":
-        asyncio.run(mode_continuous(config))
+        if not asyncio.run(mode_analyze(config)):
+            return 1
     elif mode == "preprocess_vods":
         asyncio.run(mode_preprocess_vods(config, max_vods=max_vods))
     else:
-        print(f"Usage: python main.py [collect|analyze|continuous] [config_name_or_yaml_file]")
-        print(f"\nModes: collect, analyze, continuous, preprocess_vods")
+        print(f"Usage: python main.py [survey|analyze|preprocess_vods] [config_name_or_yaml_file]")
+        print(f"\nModes: survey, analyze, preprocess_vods")
         print(f"\nPreset Configs: default, rigorous, explorer, debug")
         print(f"\nExamples:")
         print(f"  python main.py analyze                    # Default config")
+        print(f"  python main.py survey config.yaml         # One EventSub survey")
         print(f"  python main.py analyze rigorous           # TwitchAtlas-style")
         print(f"  python main.py analyze config.yaml        # Custom YAML config")
         print(f"  python main.py preprocess_vods config.yaml 5  # Process up to 5 queued VODs")
+        return 2
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

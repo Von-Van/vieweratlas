@@ -31,9 +31,12 @@ class CollectionConfig:
     client_id: Optional[str] = None
     
     # Channel discovery
-    top_channels_limit: int = 5000  # Fetch top N channels from Twitch
-    batch_size: int = 100  # Channels per batch
-    duration_per_batch: int = 60  # Seconds to collect per batch
+    top_channels_limit: int = 1200  # Freeze the approximate top N streams per survey
+    batch_size: int = 100  # Twitch chat rooms concurrently joined by the bot
+    duration_per_batch: int = 300  # Equal active-listening window per batch
+    survey_timeout_seconds: int = 7200  # Hard safety limit for a one-shot survey
+    subscription_retries: int = 2  # Retries after an individual subscription failure
+    batch_retries: int = 2  # Full restarts after an unrecoverable websocket loss
     
     # Scheduling
     wait_for_hour_alignment: bool = True  # Sync to top of hour
@@ -47,11 +50,35 @@ class CollectionConfig:
     logs_dir: str = "logs"
     
     def __post_init__(self):
-        """Validate configuration."""
+        """Apply survey canary overrides and validate configuration."""
+        integer_overrides = {
+            "SURVEY_TOP_CHANNELS_LIMIT": "top_channels_limit",
+            "SURVEY_BATCH_SIZE": "batch_size",
+            "SURVEY_WINDOW_SECONDS": "duration_per_batch",
+            "SURVEY_TIMEOUT_SECONDS": "survey_timeout_seconds",
+        }
+        for env_name, field_name in integer_overrides.items():
+            raw = os.getenv(env_name)
+            if raw is None or not raw.strip():
+                continue
+            try:
+                value = int(raw)
+            except ValueError:
+                raise ValueError(f"{env_name} must be an integer") from None
+            setattr(self, field_name, value)
+
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.batch_size > 100:
+            raise ValueError("batch_size cannot exceed Twitch's 100-room chat limit")
         if self.duration_per_batch <= 0:
             raise ValueError("duration_per_batch must be positive")
+        if self.survey_timeout_seconds <= 0:
+            raise ValueError("survey_timeout_seconds must be positive")
+        if self.subscription_retries < 0:
+            raise ValueError("subscription_retries cannot be negative")
+        if self.batch_retries < 0:
+            raise ValueError("batch_retries cannot be negative")
         if self.top_channels_limit <= 0:
             raise ValueError("top_channels_limit must be positive")
         if self.max_runtime_hours is not None and self.max_runtime_hours <= 0:
@@ -286,7 +313,7 @@ def get_rigorous_config() -> PipelineConfig:
     """
     return PipelineConfig(
         collection=CollectionConfig(
-            top_channels_limit=5000,
+            top_channels_limit=1200,
             batch_size=100
         ),
         analysis=AnalysisConfig(

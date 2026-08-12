@@ -1,4 +1,3 @@
-import asyncio
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,23 +9,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from daily_collection_state import DailyCollectionState
-from get_viewers import ChatLogger
 from storage import FileStorage
 from vod_collector import VODCollector, VODQueue, get_recent_vods
-
-
-@pytest.fixture(autouse=True)
-def fresh_event_loop():
-    """Give each test its own loop.
-
-    twitchio's Client.__init__ calls asyncio.get_event_loop(), which raises once
-    a previous asyncio.run() has closed and cleared the loop for this thread.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    yield
-    loop.close()
-    asyncio.set_event_loop(None)
 
 
 def test_daily_collection_state_roundtrip(tmp_path):
@@ -40,94 +24,6 @@ def test_daily_collection_state_roundtrip(tmp_path):
     # Ensure marker survives reload from storage.
     state_reloaded = DailyCollectionState(storage=storage)
     assert state_reloaded.has_collected("live", "example_channel")
-
-
-def test_chatlogger_skips_second_live_collection_same_day(tmp_path):
-    storage = FileStorage(base_dir=str(tmp_path / "logs"))
-    bot = ChatLogger(token="oauth:test-token", channels=["samplechannel"], storage=storage)
-    bot.chatters["samplechannel"] = {"alice"}
-
-    stream_info = {
-        "viewer_count": 1234,
-        "game_name": "Test Game",
-        "title": "Test Title",
-        "started_at": "2026-01-01T00:00:00Z"
-    }
-
-    with patch.object(ChatLogger, "fetch_stream_info", return_value=stream_info):
-        asyncio.run(bot.log_results())
-
-    # Try collecting same channel again on same UTC day.
-    bot.chatters["samplechannel"] = {"alice", "bob"}
-    with patch.object(ChatLogger, "fetch_stream_info", return_value=stream_info):
-        asyncio.run(bot.log_results())
-
-    snapshot_files = storage.list_files(prefix="raw/snapshots", suffix=".parquet")
-    assert len(snapshot_files) == 1
-    assert bot.collection_stats["skipped"] == 1
-
-
-def test_collected_snapshots_are_readable_by_analysis(tmp_path):
-    """Closed loop: what collection writes must be what analysis accepts and reads.
-
-    Guards the seam between ChatLogger's Parquet output and the analyze stage —
-    a mismatch here silently produces an empty graph.
-    """
-    from data_aggregator import DataAggregator
-
-    storage = FileStorage(base_dir=str(tmp_path / "logs"))
-    bot = ChatLogger(
-        token="oauth:test-token",
-        channels=["channel_one", "channel_two"],
-        storage=storage,
-    )
-    bot.chatters["channel_one"] = {"alice", "bob", "carol"}
-    bot.chatters["channel_two"] = {"bob", "carol", "dave"}
-
-    stream_info = {
-        "viewer_count": 4242,
-        "game_name": "Test Game",
-        "title": "Test Title",
-        "started_at": "2026-01-01T00:00:00Z",
-        "language": "en",
-    }
-
-    with patch.object(ChatLogger, "fetch_stream_info", return_value=stream_info):
-        asyncio.run(bot.log_results())
-
-    # The analyze prerequisite check must see this dataset.
-    from main import PipelineRunner
-    from config import AnalysisConfig, PipelineConfig
-
-    config = PipelineConfig(
-        analysis=AnalysisConfig(
-            logs_dir=str(tmp_path / "logs"),
-            output_dir=str(tmp_path / "out"),
-        ),
-        storage_type="file",
-    )
-    with patch("main.get_storage", return_value=storage):
-        runner = PipelineRunner(config)
-    assert runner._validate_analysis_inputs() is True
-
-    # And the aggregator must recover the exact viewer sets that were collected.
-    aggregator = DataAggregator(str(tmp_path / "logs"), storage=storage)
-    _json, _csv, _vod, parquet_count = aggregator.load_all()
-    assert parquet_count == 2
-
-    viewers = aggregator.get_channel_viewers()
-    assert viewers["channel_one"] == {"alice", "bob", "carol"}
-    assert viewers["channel_two"] == {"bob", "carol", "dave"}
-
-    metadata = aggregator.get_channel_metadata()
-    assert metadata["channel_one"]["game_name"] == "Test Game"
-    assert metadata["channel_one"]["viewer_count"] == 4242
-
-    # Overlap must survive into the graph: bob and carol are shared.
-    from graph_builder import GraphBuilder
-
-    graph = GraphBuilder(overlap_threshold=1).build_graph(viewers, metadata)
-    assert graph["channel_one"]["channel_two"]["weight"] == 2
 
 
 @pytest.mark.parametrize("key", ["../outside.json", "/tmp/outside.json", "nested/../../outside.json"])

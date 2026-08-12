@@ -1,243 +1,50 @@
 {
-  "comment": "IAM roles for ViewerAtlas ECS tasks",
+  "comment": "Reference policy shapes. deploy.sh and create-schedules.sh are the idempotent sources of truth.",
   "roles": {
     "collector_task_role": {
       "name": "vieweratlas-collector-task-role",
-      "description": "Runtime role for collector ECS tasks",
-      "assume_role_policy": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "ecs-tasks.amazonaws.com"
-            },
-            "Action": "sts:AssumeRole"
-          }
-        ]
-      },
-      "inline_policies": {
-        "S3Access": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:PutObject",
-                "s3:GetObject"
-              ],
-              "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
-              ]
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:ListBucket"
-              ],
-              "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}"
-              ],
-              "Condition": {
-                "StringLike": {
-                  "s3:prefix": [
-                    "${S3_PREFIX}*"
-                  ]
-                }
-              }
-            }
-          ]
+      "trusted_service": "ecs-tasks.amazonaws.com",
+      "permissions": {
+        "s3": {
+          "actions": ["s3:GetBucketLocation", "s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+          "object_scope": "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}raw/snapshots/v2/*",
+          "list_scope": "${S3_PREFIX}raw/snapshots/v2/*"
+        },
+        "twitch_credentials": {
+          "actions": ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"],
+          "resource": "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${TWITCH_CREDENTIALS_SECRET_ID}*"
+        },
+        "survey_lease": {
+          "actions": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+          "resource": "arn:aws:dynamodb:${AWS_REGION}:${AWS_ACCOUNT_ID}:table/${DYNAMODB_STATE_TABLE}"
         }
       }
     },
     "collector_execution_role": {
       "name": "vieweratlas-collector-execution-role",
-      "description": "Execution role for collector ECS tasks",
-      "assume_role_policy": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "ecs-tasks.amazonaws.com"
-            },
-            "Action": "sts:AssumeRole"
-          }
-        ]
-      },
-      "managed_policies": [
-        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-      ],
-      "inline_policies": {
-        "SecretsManagerAccess": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": [
-                "secretsmanager:GetSecretValue"
-              ],
-              "Resource": [
-                "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token*",
-                "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id*"
-              ]
-            }
-          ]
-        }
-      }
+      "trusted_service": "ecs-tasks.amazonaws.com",
+      "managed_policy": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
     },
     "analysis_task_role": {
       "name": "vieweratlas-analysis-task-role",
-      "description": "Runtime role for analysis ECS tasks",
-      "assume_role_policy": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "ecs-tasks.amazonaws.com"
-            },
-            "Action": "sts:AssumeRole"
-          }
-        ]
-      },
-      "inline_policies": {
-        "S3Access": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:PutObject",
-                "s3:GetObject"
-              ],
-              "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
-              ]
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:ListBucket"
-              ],
-              "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}"
-              ],
-              "Condition": {
-                "StringLike": {
-                  "s3:prefix": [
-                    "${S3_PREFIX}*"
-                  ]
-                }
-              }
-            }
-          ]
+      "trusted_service": "ecs-tasks.amazonaws.com",
+      "permissions": {
+        "s3": {
+          "actions": ["s3:GetBucketLocation", "s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+          "scope": "${S3_BUCKET}/${S3_PREFIX}"
         }
       }
     },
     "analysis_execution_role": {
       "name": "vieweratlas-analysis-execution-role",
-      "description": "Execution role for analysis ECS tasks",
-      "assume_role_policy": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "ecs-tasks.amazonaws.com"
-            },
-            "Action": "sts:AssumeRole"
-          }
-        ]
-      },
-      "managed_policies": [
-        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-      ]
+      "trusted_service": "ecs-tasks.amazonaws.com",
+      "managed_policy": "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
     },
-    "vod_collector_task_role": {
-      "name": "vieweratlas-vod-collector-task-role",
-      "description": "Runtime role for VOD collector ECS tasks",
-      "assume_role_policy": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "ecs-tasks.amazonaws.com"
-            },
-            "Action": "sts:AssumeRole"
-          }
-        ]
-      },
-      "inline_policies": {
-        "S3Access": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:PutObject",
-                "s3:GetObject"
-              ],
-              "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}/${S3_PREFIX}*"
-              ]
-            },
-            {
-              "Effect": "Allow",
-              "Action": [
-                "s3:ListBucket"
-              ],
-              "Resource": [
-                "arn:aws:s3:::${S3_BUCKET}"
-              ],
-              "Condition": {
-                "StringLike": {
-                  "s3:prefix": [
-                    "${S3_PREFIX}*"
-                  ]
-                }
-              }
-            }
-          ]
-        }
-      }
-    },
-    "vod_collector_execution_role": {
-      "name": "vieweratlas-vod-collector-execution-role",
-      "description": "Execution role for VOD collector ECS tasks",
-      "assume_role_policy": {
-        "Version": "2012-10-17",
-        "Statement": [
-          {
-            "Effect": "Allow",
-            "Principal": {
-              "Service": "ecs-tasks.amazonaws.com"
-            },
-            "Action": "sts:AssumeRole"
-          }
-        ]
-      },
-      "managed_policies": [
-        "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-      ],
-      "inline_policies": {
-        "SecretsManagerAccess": {
-          "Version": "2012-10-17",
-          "Statement": [
-            {
-              "Effect": "Allow",
-              "Action": [
-                "secretsmanager:GetSecretValue"
-              ],
-              "Resource": [
-                "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/oauth_token*",
-                "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:vieweratlas/twitch/client_id*"
-              ]
-            }
-          ]
-        }
-      }
+    "scheduler_role": {
+      "name": "vieweratlas-scheduler-ecs-role",
+      "trusted_service": "scheduler.amazonaws.com",
+      "permissions": ["ecs:RunTask", "iam:PassRole"]
     }
-  }
+  },
+  "disabled_paths": ["vod", "discovery", "worker"]
 }

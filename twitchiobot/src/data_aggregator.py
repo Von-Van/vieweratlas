@@ -12,6 +12,7 @@ import json
 import csv
 import os
 import logging
+import re
 from collections import defaultdict
 from io import BytesIO
 from typing import Dict, Set, List, Tuple, Optional
@@ -26,6 +27,11 @@ except ImportError:
     HAS_STORAGE = False
 
 logger = logging.getLogger(__name__)
+
+_V2_BATCH_KEY = re.compile(
+    r"^(?P<session_prefix>raw/snapshots/v2/date=[^/]+/session=[^/]+)/batch=\d+\.parquet$"
+)
+_ANALYZABLE_V2_SURVEY_STATES = {"complete", "complete_with_errors"}
 
 
 class DataAggregator:
@@ -85,6 +91,72 @@ class DataAggregator:
         source = snapshot.get("_source") or snapshot.get("source") or default_source
         self.snapshot_source_counts[source] += 1
         return True
+
+    @staticmethod
+    def _decode_parquet_snapshot(record: dict) -> Optional[dict]:
+        """Decode legacy or v2 Parquet rows into the existing analysis shape.
+
+        Version 2 files include planned channels that could not be observed.
+        Those rows are operational evidence, not presence observations, and
+        therefore must never create empty/partial graph inputs. A completed row
+        with zero authors remains valid and is retained.
+        """
+        snapshot = dict(record)
+        try:
+            schema_version = int(snapshot.get("schema_version", 1) or 1)
+        except (TypeError, ValueError):
+            schema_version = 1
+
+        if schema_version >= 2 and snapshot.get("collection_status") != "completed":
+            return None
+
+        chatters_value = snapshot.pop("chatters_json", "[]")
+        if isinstance(chatters_value, bytes):
+            chatters_value = chatters_value.decode("utf-8")
+        if isinstance(chatters_value, str):
+            chatters = json.loads(chatters_value)
+        elif isinstance(chatters_value, (list, tuple)):
+            chatters = list(chatters_value)
+        else:
+            chatters = []
+        if not isinstance(chatters, list):
+            raise ValueError("chatters_json must decode to a list")
+
+        # The public/legacy analysis interface remains username-based for this
+        # release. Stable IDs are retained in chatter_ids_json for the planned
+        # mathematics refactor, but are intentionally not exposed downstream.
+        snapshot["chatters"] = [
+            value.strip().lower()
+            for value in chatters
+            if isinstance(value, str) and value.strip()
+        ]
+        return snapshot
+
+    def _v2_session_is_analyzable(
+        self, key: str, manifest_cache: Dict[str, bool]
+    ) -> bool:
+        """Return whether a v2 batch belongs to a finished survey.
+
+        Batch objects are written before the terminal manifest update.  Reading
+        a batch merely because it exists would allow an interrupted survey to
+        leak into the graph, so the manifest is the commit record for the
+        session. Legacy Parquet keys have no manifest and remain readable.
+        """
+        match = _V2_BATCH_KEY.fullmatch(key)
+        if match is None:
+            return True
+
+        manifest_key = f"{match.group('session_prefix')}/manifest.json"
+        if manifest_key not in manifest_cache:
+            manifest = self.storage.download_json(manifest_key)
+            status = manifest.get("status") if isinstance(manifest, dict) else None
+            manifest_cache[manifest_key] = status in _ANALYZABLE_V2_SURVEY_STATES
+            if not manifest_cache[manifest_key]:
+                logger.warning(
+                    "Skipping v2 survey batches without a completed manifest: %s",
+                    manifest_key,
+                )
+        return manifest_cache[manifest_key]
         
     def load_json_snapshots(self) -> int:
         """
@@ -319,17 +391,19 @@ class DataAggregator:
             parquet_keys = self.storage.list_files(
                 prefix="raw/snapshots", suffix=".parquet"
             )
+            manifest_cache: Dict[str, bool] = {}
             for key in parquet_keys:
                 try:
+                    if not self._v2_session_is_analyzable(key, manifest_cache):
+                        continue
                     parquet_bytes = self.storage.download_parquet(key)
                     if parquet_bytes is None:
                         continue
                     df = pd.read_parquet(BytesIO(parquet_bytes))
                     for _, row in df.iterrows():
-                        snapshot = row.to_dict()
-                        # Decode chatters_json back to list
-                        chatters_json = snapshot.pop("chatters_json", "[]")
-                        snapshot["chatters"] = json.loads(chatters_json)
+                        snapshot = self._decode_parquet_snapshot(row.to_dict())
+                        if snapshot is None:
+                            continue
                         if self._ingest_snapshot(snapshot, default_source="live"):
                             count += 1
                 except Exception as e:
@@ -339,13 +413,38 @@ class DataAggregator:
             search_dir = self.logs_dir / "raw" / "snapshots"
             if search_dir.exists():
                 parquet_files = list(search_dir.rglob("*.parquet"))
+                manifest_cache: Dict[Path, bool] = {}
                 for parquet_file in parquet_files:
                     try:
+                        if "v2" in parquet_file.parts:
+                            session_dir = parquet_file.parent
+                            if session_dir not in manifest_cache:
+                                manifest_path = session_dir / "manifest.json"
+                                try:
+                                    with open(manifest_path, encoding="utf-8") as handle:
+                                        manifest = json.load(handle)
+                                except (OSError, json.JSONDecodeError):
+                                    manifest = None
+                                status = (
+                                    manifest.get("status")
+                                    if isinstance(manifest, dict)
+                                    else None
+                                )
+                                manifest_cache[session_dir] = (
+                                    status in _ANALYZABLE_V2_SURVEY_STATES
+                                )
+                                if not manifest_cache[session_dir]:
+                                    logger.warning(
+                                        "Skipping v2 survey batches without a completed manifest: %s",
+                                        manifest_path,
+                                    )
+                            if not manifest_cache[session_dir]:
+                                continue
                         df = pd.read_parquet(parquet_file)
                         for _, row in df.iterrows():
-                            snapshot = row.to_dict()
-                            chatters_json = snapshot.pop("chatters_json", "[]")
-                            snapshot["chatters"] = json.loads(chatters_json)
+                            snapshot = self._decode_parquet_snapshot(row.to_dict())
+                            if snapshot is None:
+                                continue
                             if self._ingest_snapshot(snapshot, default_source="live"):
                                 count += 1
                     except Exception as e:

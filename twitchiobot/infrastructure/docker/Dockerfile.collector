@@ -29,9 +29,6 @@ ENV LOGS_DIR=/app/logs
 
 USER app
 
-# Health check
-HEALTHCHECK --interval=60s --timeout=10s --start-period=300s --retries=3 \
-    CMD python -c "import os,time; f='/app/logs/.heartbeat'; exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f)<7200 else 1)"
-
-# Run collector
-CMD ["python", "-u", "main.py", "collect", "config.yaml"]
+# The collector is an EventBridge-launched, one-shot survey task. Its manifest is
+# the durable health signal, so a long-running container health check is not used.
+CMD ["python", "-u", "main.py", "survey", "config.yaml"]
