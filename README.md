@@ -110,8 +110,8 @@ cd twitchiobot/infrastructure/aws
 ./smoke-test.sh
 ```
 
-These commands create real cloud resources and costs. Review the scripts,
-environment template, and [RUNBOOK.md](twitchiobot/docs/RUNBOOK.md) before use.
+These commands create real cloud resources and costs. Review the scripts and the
+environment template before use.
 
 ## Repository Map
 
@@ -126,7 +126,6 @@ environment template, and [RUNBOOK.md](twitchiobot/docs/RUNBOOK.md) before use.
 - [Frontend guide](frontend/README.md)
 - [Developer guide](twitchiobot/docs/DEVELOPER.md)
 - [Data policy](twitchiobot/docs/DATA_POLICY.md)
-- [Production runbook](twitchiobot/docs/RUNBOOK.md)
 - [Security policy](SECURITY.md)
 
 ## License
