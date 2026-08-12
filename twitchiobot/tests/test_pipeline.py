@@ -41,9 +41,10 @@ from config import (
     load_config_from_yaml,
 )
 from daily_collection_state import DynamoDBCollectionState
+from frontend_exporter import FrontendExportConfig, export_frontend_data
 from sqs_task_queue import SQSTaskQueue, ChannelTask
 from discovery import run_discovery
-from worker import _collect_channel, _flush_parquet
+from worker import _collect_channel, _flush_parquet, run_worker_loop
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -397,6 +398,28 @@ class TestGraphBuilder:
         for node in g.nodes():
             assert not g.has_edge(node, node)
 
+    def test_high_degree_viewer_is_skipped(self):
+        channel_viewers = {
+            f"channel_{i}": {"shared_noise", f"user_{i}"}
+            for i in range(300)
+        }
+        builder = GraphBuilder(overlap_threshold=1, max_viewer_channel_degree=100)
+        g = builder.build_graph(channel_viewers)
+        assert g.number_of_nodes() == 300
+        assert g.number_of_edges() == 0
+        assert builder.get_statistics()["skipped_high_degree_viewers"] == 1
+
+    def test_inverted_index_handles_5000_channel_fixture(self):
+        channel_viewers = {
+            f"channel_{i}": {f"user_{i}", f"user_{i + 1}"}
+            for i in range(5000)
+        }
+        builder = GraphBuilder(overlap_threshold=1)
+        g = builder.build_graph(channel_viewers)
+        assert g.number_of_nodes() == 5000
+        assert g.number_of_edges() == 4999
+        assert g["channel_0"]["channel_1"]["weight"] == 1
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CommunityDetector Tests
@@ -444,6 +467,66 @@ class TestCommunityDetector:
         detector = CommunityDetector(resolution=1.0)
         detector.detect_communities(graph)
         assert detector.get_modularity() >= 0
+
+    def test_min_community_size_default_keeps_everything(self):
+        """Default of 1 must be a pure no-op."""
+        g = nx.Graph()
+        g.add_edge("a", "b", weight=5)
+        g.add_edge("b", "c", weight=5)
+        g.add_edge("lonely1", "lonely2", weight=1)
+
+        partition = CommunityDetector(resolution=1.0).detect_communities(g)
+        assert set(partition) == set(g.nodes())
+
+    def test_min_community_size_discards_small_communities(self):
+        # Two tight triangles joined weakly to an isolated pair.
+        g = nx.Graph()
+        for u, v in [("a1", "a2"), ("a2", "a3"), ("a1", "a3")]:
+            g.add_edge(u, v, weight=50)
+        for u, v in [("b1", "b2"), ("b2", "b3"), ("b1", "b3")]:
+            g.add_edge(u, v, weight=50)
+        g.add_edge("a1", "b1", weight=1)
+        g.add_edge("solo1", "solo2", weight=40)
+        g.add_edge("solo1", "a1", weight=1)
+
+        detector = CommunityDetector(resolution=1.0, min_community_size=3)
+        partition = detector.detect_communities(g)
+
+        # The 2-channel community is gone; every survivor is in a >=3 community.
+        assert "solo1" not in partition
+        assert "solo2" not in partition
+        assert detector.discarded_channels == {"solo1", "solo2"}
+        for members in detector.get_communities().values():
+            assert len(members) >= 3
+        # Partition and communities stay in agreement.
+        from_communities = set()
+        for members in detector.get_communities().values():
+            from_communities.update(members)
+        assert from_communities == set(partition)
+
+    def test_min_community_size_recomputes_modularity_on_survivors(self):
+        g = nx.Graph()
+        for u, v in [("a1", "a2"), ("a2", "a3"), ("a1", "a3")]:
+            g.add_edge(u, v, weight=50)
+        g.add_edge("solo1", "solo2", weight=40)
+
+        detector = CommunityDetector(resolution=1.0, min_community_size=3)
+        detector.detect_communities(g)
+        # Would raise inside python-louvain if scored against the full graph.
+        assert detector.get_modularity() >= 0
+
+    def test_min_community_size_can_empty_the_partition(self):
+        g = nx.Graph()
+        g.add_edge("a", "b", weight=5)
+
+        detector = CommunityDetector(resolution=1.0, min_community_size=10)
+        partition = detector.detect_communities(g)
+        assert partition == {}
+        assert detector.get_modularity() == 0.0
+
+    def test_min_community_size_below_one_rejected(self):
+        with pytest.raises(ValueError):
+            CommunityDetector(min_community_size=0)
 
     def test_statistics(self, graph):
         detector = CommunityDetector(resolution=1.0)
@@ -699,9 +782,100 @@ class TestConfig:
         config = get_default_config()
         assert config.analysis.weighting_mode == "shared_count"
 
+    def test_frontend_export_defaults(self):
+        config = get_default_config()
+        assert config.analysis.frontend_max_channels == 1000
+        assert config.analysis.frontend_max_edges == 25000
+        assert config.analysis.frontend_top_edges_per_channel == 25
+
+    def test_invalid_frontend_export_limits_raise(self):
+        with pytest.raises(ValueError):
+            AnalysisConfig(frontend_max_channels=0)
+        with pytest.raises(ValueError):
+            AnalysisConfig(frontend_max_edges=0)
+        with pytest.raises(ValueError):
+            AnalysisConfig(frontend_top_edges_per_channel=0)
+
     def test_invalid_weighting_mode_raises(self):
         with pytest.raises(ValueError):
             AnalysisConfig(weighting_mode="jaccard")
+
+    def test_yaml_loads_every_analysis_field(self, tmp_path):
+        """Fields the hand-enumerated loader used to drop silently."""
+        yaml_file = tmp_path / "full_config.yaml"
+        yaml_file.write_text(
+            "analysis:\n"
+            "  enable_static_viz: false\n"
+            "  enable_interactive_viz: false\n"
+            "  export_graph_csv: false\n"
+            "  save_analysis_json: false\n"
+            "  label_top_n_nodes: 30\n"
+            "  static_viz_dpi: 150\n"
+            "  include_isolated_nodes: false\n"
+            "  min_user_appearances: 2\n"
+            "  show_node_labels: false\n"
+        )
+        config = load_config_from_yaml(str(yaml_file))
+        assert config.analysis.enable_static_viz is False
+        assert config.analysis.enable_interactive_viz is False
+        assert config.analysis.export_graph_csv is False
+        assert config.analysis.save_analysis_json is False
+        assert config.analysis.label_top_n_nodes == 30
+        assert config.analysis.static_viz_dpi == 150
+        assert config.analysis.include_isolated_nodes is False
+        assert config.analysis.min_user_appearances == 2
+        assert config.analysis.show_node_labels is False
+
+    def test_yaml_loads_sqs_section(self, tmp_path):
+        yaml_file = tmp_path / "sqs_config.yaml"
+        yaml_file.write_text(
+            "sqs:\n"
+            "  enabled: true\n"
+            '  queue_url: "https://sqs.example.com/q.fifo"\n'
+            "  worker_concurrency: 4\n"
+        )
+        config = load_config_from_yaml(str(yaml_file))
+        assert config.sqs.enabled is True
+        assert config.sqs.queue_url == "https://sqs.example.com/q.fifo"
+        assert config.sqs.worker_concurrency == 4
+
+    def test_yaml_figsize_list_becomes_tuple(self, tmp_path):
+        yaml_file = tmp_path / "figsize_config.yaml"
+        yaml_file.write_text("analysis:\n  static_viz_figsize: [12, 9]\n")
+        config = load_config_from_yaml(str(yaml_file))
+        assert config.analysis.static_viz_figsize == (12, 9)
+
+    def test_yaml_unknown_section_key_raises(self, tmp_path):
+        yaml_file = tmp_path / "typo_config.yaml"
+        yaml_file.write_text("analysis:\n  min_comunity_size: 3\n")
+        with pytest.raises(ValueError, match="min_comunity_size"):
+            load_config_from_yaml(str(yaml_file))
+
+    def test_yaml_unknown_top_level_key_raises(self, tmp_path):
+        yaml_file = tmp_path / "typo_top_config.yaml"
+        yaml_file.write_text("stroage_type: s3\n")
+        with pytest.raises(ValueError, match="stroage_type"):
+            load_config_from_yaml(str(yaml_file))
+
+    def test_yaml_vod_max_age_days_fallback(self, tmp_path):
+        yaml_file = tmp_path / "vod_config.yaml"
+        yaml_file.write_text("vod:\n  max_age_days: 3\n")
+        config = load_config_from_yaml(str(yaml_file))
+        assert config.vod.max_age_days == 3
+        assert config.vod.max_age_hours == 72
+
+    def test_yaml_explicit_max_age_hours_wins(self, tmp_path):
+        yaml_file = tmp_path / "vod_hours_config.yaml"
+        yaml_file.write_text("vod:\n  max_age_days: 3\n  max_age_hours: 6\n")
+        config = load_config_from_yaml(str(yaml_file))
+        assert config.vod.max_age_hours == 6
+
+    def test_shipped_config_yaml_loads(self):
+        """The config.yaml shipped in the repo must satisfy the strict loader."""
+        shipped = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
+        config = load_config_from_yaml(str(shipped))
+        assert config.analysis.overlap_threshold == 10
+        assert config.analysis.min_community_size == 3
 
     def test_yaml_loading_weighting_mode(self, tmp_path):
         yaml_file = tmp_path / "wm_config.yaml"
@@ -709,9 +883,15 @@ class TestConfig:
             "analysis:\n"
             "  overlap_threshold: 1\n"
             '  weighting_mode: "shared_count"\n'
+            "  frontend_max_channels: 500\n"
+            "  frontend_max_edges: 10000\n"
+            "  frontend_top_edges_per_channel: 10\n"
         )
         config = load_config_from_yaml(str(yaml_file))
         assert config.analysis.weighting_mode == "shared_count"
+        assert config.analysis.frontend_max_channels == 500
+        assert config.analysis.frontend_max_edges == 10000
+        assert config.analysis.frontend_top_edges_per_channel == 10
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -799,6 +979,93 @@ class TestIntegration:
         assert len(filtered) <= len(all_channels)
         # streamer_e has only 2 viewers, should be filtered out at min=5
         assert "streamer_e" not in filtered
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Frontend Export Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFrontendExporter:
+    """Tests for public frontend artifact shaping."""
+
+    def test_export_caps_graph_and_adds_layout_without_private_fields(self):
+        graph = nx.Graph()
+        for idx, viewers in enumerate([5000, 4000, 3000, 2000, 1000]):
+            node = f"ch_{idx}"
+            graph.add_node(
+                node,
+                viewer_count=viewers,
+                viewers=idx + 10,
+                game_name="Valorant" if idx < 3 else "Minecraft",
+                language="en",
+                title="Test",
+            )
+
+        graph.add_edge("ch_0", "ch_1", weight=50)
+        graph.add_edge("ch_0", "ch_2", weight=40)
+        graph.add_edge("ch_1", "ch_2", weight=30)
+        graph.add_edge("ch_2", "ch_3", weight=20)
+        graph.add_edge("ch_3", "ch_4", weight=10)
+
+        partition = {"ch_0": 0, "ch_1": 0, "ch_2": 0, "ch_3": 1, "ch_4": 1}
+        communities = {0: {"ch_0", "ch_1", "ch_2"}, 1: {"ch_3", "ch_4"}}
+        labels = {0: "FPS English", 1: "Cozy English"}
+        storage = MockS3Storage()
+
+        ok = export_frontend_data(
+            graph=graph,
+            partition=partition,
+            communities=communities,
+            labels=labels,
+            detection_stats={"modularity": 0.42},
+            aggregator_stats={
+                "total_unique_viewers_across_all": 123,
+                "total_snapshots": 5,
+            },
+            storage=storage,
+            config=FrontendExportConfig(
+                max_channels=3,
+                max_edges=2,
+                top_edges_per_channel=2,
+            ),
+        )
+
+        assert ok is True
+        payload = storage._json_uploads["data/frontend-data.json"]
+        assert len(payload["channels"]) == 3
+        assert len(payload["edges"]) <= 2
+        assert payload["overallStats"]["totalChannels"] == 5
+        assert payload["overallStats"]["renderedChannels"] == 3
+        assert all("layout" in channel for channel in payload["channels"])
+        assert "chatters" not in json.dumps(payload)
+        assert "chatters_json" not in json.dumps(payload)
+
+        channel_ids = {channel["id"] for channel in payload["channels"]}
+        for edge in payload["edges"]:
+            assert edge["source"] in channel_ids
+            assert edge["target"] in channel_ids
+
+    def test_export_makes_duplicate_community_labels_unique(self):
+        graph = nx.Graph()
+        graph.add_node("a", viewer_count=100, viewers=10, game_name="Game", language="en")
+        graph.add_node("b", viewer_count=90, viewers=9, game_name="Game", language="en")
+        graph.add_edge("a", "b", weight=5)
+
+        storage = MockS3Storage()
+        ok = export_frontend_data(
+            graph=graph,
+            partition={"a": 0, "b": 1},
+            communities={0: {"a"}, 1: {"b"}},
+            labels={0: "Mixed", 1: "Mixed"},
+            detection_stats={"modularity": 0.1},
+            aggregator_stats={"total_unique_viewers_across_all": 2, "total_snapshots": 1},
+            storage=storage,
+        )
+
+        assert ok is True
+        ids = [community["id"] for community in storage._json_uploads["data/frontend-data.json"]["communities"]]
+        assert len(ids) == len(set(ids))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -921,6 +1188,7 @@ class MockS3Storage:
         self._live = live_snapshots or []
         self._vod_json = vod_snapshots or []
         self._parquet = parquet_data or {}  # key -> bytes
+        self._json_uploads = {}
 
     def list_files(self, prefix="", suffix=""):
         if prefix.startswith("raw/snapshots") and suffix == ".json":
@@ -934,6 +1202,8 @@ class MockS3Storage:
         return []
 
     def download_json(self, key):
+        if key in self._json_uploads:
+            return self._json_uploads[key]
         if key.startswith("raw/snapshots/snap_"):
             idx = int(key.split("_")[-1].replace(".json", ""))
             return self._live[idx]
@@ -941,6 +1211,10 @@ class MockS3Storage:
             idx = int(key.split("_")[-1].replace(".json", ""))
             return self._vod_json[idx]
         return None
+
+    def upload_json(self, key, data, **kwargs):
+        self._json_uploads[key] = data
+        return True
 
     def upload_parquet(self, key, data, **kwargs):
         self._parquet[key] = data
@@ -1386,6 +1660,7 @@ class MockSQSClient:
     def __init__(self):
         self._messages = []  # list of {"Body": str, "MessageId": str, "ReceiptHandle": str}
         self._next_id = 0
+        self.deleted_receipts = []
 
     def send_message_batch(self, QueueUrl, Entries):
         successful = []
@@ -1406,6 +1681,7 @@ class MockSQSClient:
         return {"Messages": batch} if batch else {}
 
     def delete_message(self, QueueUrl, ReceiptHandle):
+        self.deleted_receipts.append(ReceiptHandle)
         return {}
 
 
@@ -1534,12 +1810,30 @@ class TestWorkerHelpers:
             mock_resp.json.return_value = {"data": [mock_info]}
             mock_resp.raise_for_status = MagicMock()
             mock_requests.get.return_value = mock_resp
-            row = _collect_channel("xqc", "client123", "oauth123")
+            row = _collect_channel("xqc", "client123", "oauth123", {"alice", "bob"})
 
         assert row is not None
         assert row["channel"] == "xqc"
         assert row["viewer_count"] == 1500
         assert row["game_name"] == "Valorant"
+        assert json.loads(row["chatters_json"]) == ["alice", "bob"]
+
+    def test_collect_channel_requires_non_empty_chatters(self):
+        mock_info = {
+            "viewer_count": 1500,
+            "game_name": "Valorant",
+            "title": "Ranked",
+            "started_at": "2026-03-11T12:00:00Z",
+            "language": "en",
+        }
+        with patch("worker.requests") as mock_requests:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"data": [mock_info]}
+            mock_resp.raise_for_status = MagicMock()
+            mock_requests.get.return_value = mock_resp
+            row = _collect_channel("xqc", "client123", "oauth123", set())
+
+        assert row is None
 
     def test_collect_channel_returns_none_when_offline(self):
         with patch("worker.requests") as mock_requests:
@@ -1561,12 +1855,189 @@ class TestWorkerHelpers:
                 "title": "Test stream",
                 "started_at": "2026-03-11T12:00:00Z",
                 "language": "en",
-                "chatters_json": "[]",
+                "chatters_json": '["alice"]',
             }
         ]
         storage = MockS3Storage()
-        _flush_parquet(rows, storage, "20260311_140000")
+        assert _flush_parquet(rows, storage, "20260311_140000") is True
         assert len(storage._parquet) == 1
         key = list(storage._parquet.keys())[0]
         assert key.startswith("raw/snapshots/")
         assert key.endswith(".parquet")
+
+    def test_worker_loop_writes_then_marks_and_deletes(self, monkeypatch):
+        monkeypatch.setenv("TWITCH_CLIENT_ID", "client123")
+        monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "oauth123")
+
+        sqs_client = MockSQSClient()
+        queue = SQSTaskQueue("https://sqs.example.com/q.fifo", sqs_client=sqs_client)
+        queue.publish_tasks([ChannelTask(channel="xqc", cycle_id="c1", utc_day="2026-03-11")])
+
+        dynamo_resource = MockDynamoDBResource()
+        storage = MockS3Storage()
+        mock_info = {
+            "viewer_count": 1500,
+            "game_name": "Valorant",
+            "title": "Ranked",
+            "started_at": "2026-03-11T12:00:00Z",
+            "language": "en",
+        }
+
+        async def fake_collect_chatters(channels, oauth_token, sample_seconds):
+            return {"xqc": {"alice", "bob"}}
+
+        with patch("worker._collect_chatters_for_channels", new=fake_collect_chatters), \
+             patch("worker._fetch_stream_info", return_value=mock_info):
+            run_worker_loop(
+                queue_url="https://sqs.example.com/q.fifo",
+                dynamodb_table="test-state",
+                storage=storage,
+                sqs_client=sqs_client,
+                dynamodb_resource=dynamo_resource,
+                max_empty_polls=1,
+                sample_seconds=0,
+            )
+
+        assert len(storage._parquet) == 1
+        assert sqs_client.deleted_receipts == ["rh-msg-1"]
+        state = DynamoDBCollectionState("test-state", dynamodb_resource=dynamo_resource)
+        assert state.has_collected("live", "xqc", "2026-03-11") is True
+
+        agg = DataAggregator("unused", storage=storage)
+        assert agg.load_parquet_snapshots() == 1
+        assert agg.get_channel_viewers()["xqc"] == {"alice", "bob"}
+
+    def test_worker_loop_does_not_mark_or_delete_failed_collection(self, monkeypatch):
+        monkeypatch.setenv("TWITCH_CLIENT_ID", "client123")
+        monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "oauth123")
+
+        sqs_client = MockSQSClient()
+        queue = SQSTaskQueue("https://sqs.example.com/q.fifo", sqs_client=sqs_client)
+        queue.publish_tasks([ChannelTask(channel="quiet_ch", cycle_id="c1", utc_day="2026-03-11")])
+
+        dynamo_resource = MockDynamoDBResource()
+        storage = MockS3Storage()
+        mock_info = {
+            "viewer_count": 10,
+            "game_name": "Just Chatting",
+            "title": "Quiet",
+            "started_at": "2026-03-11T12:00:00Z",
+            "language": "en",
+        }
+
+        async def fake_collect_chatters(channels, oauth_token, sample_seconds):
+            return {"quiet_ch": set()}
+
+        with patch("worker._collect_chatters_for_channels", new=fake_collect_chatters), \
+             patch("worker._fetch_stream_info", return_value=mock_info):
+            run_worker_loop(
+                queue_url="https://sqs.example.com/q.fifo",
+                dynamodb_table="test-state",
+                storage=storage,
+                sqs_client=sqs_client,
+                dynamodb_resource=dynamo_resource,
+                max_empty_polls=1,
+                sample_seconds=0,
+            )
+
+        assert storage._parquet == {}
+        assert sqs_client.deleted_receipts == []
+        state = DynamoDBCollectionState("test-state", dynamodb_resource=dynamo_resource)
+        assert state.has_collected("live", "quiet_ch", "2026-03-11") is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Analysis Prerequisite Validation Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestAnalysisInputValidation:
+    """The analyze gate must accept exactly what collection writes.
+
+    Live collection (ChatLogger and worker) only ever writes Parquet under
+    raw/snapshots/, so a JSON-only check rejects a perfectly healthy dataset.
+    """
+
+    def _runner(self, storage, storage_type="file", logs_dir="logs"):
+        from main import PipelineRunner
+
+        config = PipelineConfig(
+            analysis=AnalysisConfig(logs_dir=logs_dir, output_dir=logs_dir),
+            storage_type=storage_type,
+            s3_bucket="test-bucket" if storage_type == "s3" else None,
+        )
+        with patch("main.get_storage", return_value=storage):
+            return PipelineRunner(config)
+
+    def test_s3_parquet_only_dataset_is_accepted(self):
+        storage = MockS3Storage(parquet_data={"raw/snapshots/2026/03/11/cycle_1.parquet": b"x"})
+        runner = self._runner(storage, storage_type="s3")
+        assert runner._validate_analysis_inputs() is True
+
+    def test_s3_empty_dataset_is_rejected(self):
+        runner = self._runner(MockS3Storage(), storage_type="s3")
+        assert runner._validate_analysis_inputs() is False
+
+    def test_s3_empty_dataset_allowed_when_data_not_required(self):
+        runner = self._runner(MockS3Storage(), storage_type="s3")
+        assert runner._validate_analysis_inputs(require_data=False) is True
+
+    def test_s3_vod_only_dataset_is_accepted(self):
+        storage = MockS3Storage(vod_snapshots=[{"channel": "a", "chatters": ["u1"]}])
+        runner = self._runner(storage, storage_type="s3")
+        assert runner._validate_analysis_inputs() is True
+
+    def test_local_nested_parquet_dataset_is_accepted(self, tmp_path):
+        from storage import FileStorage
+
+        snapshot_dir = tmp_path / "raw" / "snapshots" / "2026" / "03" / "11"
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / "cycle_20260311_120000.parquet").write_bytes(b"placeholder")
+
+        runner = self._runner(
+            FileStorage(base_dir=str(tmp_path)),
+            storage_type="file",
+            logs_dir=str(tmp_path),
+        )
+        assert runner._validate_analysis_inputs() is True
+
+    def test_local_legacy_flat_json_dataset_is_accepted(self, tmp_path):
+        from storage import FileStorage
+
+        (tmp_path / "snapshot.json").write_text('{"channel": "a", "chatters": ["u1"]}')
+
+        runner = self._runner(
+            FileStorage(base_dir=str(tmp_path)),
+            storage_type="file",
+            logs_dir=str(tmp_path),
+        )
+        assert runner._validate_analysis_inputs() is True
+
+    def test_local_empty_dataset_is_rejected(self, tmp_path):
+        from storage import FileStorage
+
+        runner = self._runner(
+            FileStorage(base_dir=str(tmp_path)),
+            storage_type="file",
+            logs_dir=str(tmp_path),
+        )
+        assert runner._validate_analysis_inputs() is False
+
+
+class TestGraphCsvUpload:
+    """Graph CSV exports must reach storage with (key, file_path) in that order."""
+
+    def test_export_uploads_csvs_to_storage(self, tmp_path):
+        from storage import FileStorage
+
+        source_dir = tmp_path / "out"
+        source_dir.mkdir()
+        nodes_csv = source_dir / "graph_nodes.csv"
+        nodes_csv.write_text("channel,viewers\na,1\n")
+
+        storage = FileStorage(base_dir=str(tmp_path / "store"))
+        assert storage.upload_file("curated/analysis/2026-03-11/graph_nodes.csv", str(nodes_csv)) is True
+
+        landed = tmp_path / "store" / "curated" / "analysis" / "2026-03-11" / "graph_nodes.csv"
+        assert landed.exists()
+        assert landed.read_text() == "channel,viewers\na,1\n"

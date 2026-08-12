@@ -44,7 +44,7 @@ from config import (
 )
 from storage import get_storage
 from vod_collector import VODCollector
-from frontend_exporter import export_frontend_data
+from frontend_exporter import FrontendExportConfig, export_frontend_data
 
 load_dotenv()
 
@@ -182,59 +182,51 @@ class PipelineRunner:
             require_data: If True, fail when no input data is found.
                          If False, log warnings and continue.
         """
-        if self.config.storage_type == "s3":
-            snapshot_keys = self.storage.list_files(prefix="raw/snapshots", suffix=".json")
-            vod_json_keys = self.storage.list_files(
-                prefix="curated/presence_snapshots/source=vod",
-                suffix=".json"
-            )
-            vod_parquet_keys = self.storage.list_files(
-                prefix="curated/presence_snapshots/source=vod",
-                suffix=".parquet"
-            )
-            total_inputs = len(snapshot_keys) + len(vod_json_keys) + len(vod_parquet_keys)
+        # Count every input format DataAggregator.load_all() actually reads.
+        # Live collection (ChatLogger and worker) writes Parquet under
+        # raw/snapshots/, so a JSON-only check would reject a healthy dataset.
+        snapshot_parquet = self.storage.list_files(prefix="raw/snapshots", suffix=".parquet")
+        snapshot_json = self.storage.list_files(prefix="raw/snapshots", suffix=".json")
+        vod_json = self.storage.list_files(
+            prefix="curated/presence_snapshots/source=vod",
+            suffix=".json"
+        )
+        vod_parquet = self.storage.list_files(
+            prefix="curated/presence_snapshots/source=vod",
+            suffix=".parquet"
+        )
+        counts = {
+            "live parquet": len(snapshot_parquet),
+            "live JSON": len(snapshot_json),
+            "VOD parquet": len(vod_parquet),
+            "VOD JSON": len(vod_json),
+        }
 
-            if total_inputs == 0:
-                msg = (
-                    "No analysis input data found in S3 prefixes "
-                    "'raw/snapshots' or 'curated/presence_snapshots/source=vod'"
-                )
-                if require_data:
-                    self.logger.error(f"❌ {msg}")
-                    return False
-                self.logger.warning(f"⚠ {msg}. Continuous mode will collect before analysis.")
-                return True
+        if self.config.storage_type != "s3":
+            # Legacy local layout: flat JSON/CSV snapshots directly in logs_dir.
+            logs_path = Path(self.config.analysis.logs_dir)
+            if logs_path.exists():
+                counts["legacy JSON"] = len(list(logs_path.glob("*.json")))
+                counts["legacy CSV"] = len(list(logs_path.glob("*.csv")))
 
-            self.logger.info(
-                "✓ Found S3 analysis inputs: %d live snapshots, %d VOD JSON, %d VOD parquet",
-                len(snapshot_keys), len(vod_json_keys), len(vod_parquet_keys)
+        if sum(counts.values()) == 0:
+            location = (
+                f"s3://{self.config.s3_bucket}/{self.config.s3_prefix}"
+                if self.config.storage_type == "s3"
+                else self.config.analysis.logs_dir
             )
-            return True
-
-        logs_path = Path(self.config.analysis.logs_dir)
-        if not logs_path.exists():
+            msg = (
+                f"No analysis input data found under {location} "
+                "('raw/snapshots' or 'curated/presence_snapshots/source=vod')"
+            )
             if require_data:
-                self.logger.error(f"❌ Logs directory {logs_path} does not exist")
+                self.logger.error(f"❌ {msg}")
                 return False
-            self.logger.warning(
-                "⚠ Logs directory %s does not exist yet. Continuous mode will collect first.",
-                logs_path
-            )
+            self.logger.warning(f"⚠ {msg}. Continuous mode will collect before analysis.")
             return True
 
-        json_files = list(logs_path.glob("*.json"))
-        csv_files = list(logs_path.glob("*.csv"))
-        if not json_files and not csv_files:
-            if require_data:
-                self.logger.error(f"❌ No data found in {logs_path}")
-                return False
-            self.logger.warning(
-                "⚠ No existing local data found in %s. Continuous mode will collect first.",
-                logs_path
-            )
-            return True
-
-        self.logger.info(f"✓ Found {len(json_files)} JSON and {len(csv_files)} CSV files")
+        summary = ", ".join(f"{count} {name}" for name, count in counts.items() if count)
+        self.logger.info(f"✓ Found analysis inputs: {summary}")
         return True
     
     async def run_collection_cycle(self):
@@ -295,10 +287,18 @@ class PipelineRunner:
             # Step 3: Detect communities
             self.logger.info("\n[3/6] DETECTING COMMUNITIES")
             self.logger.info("-" * 70)
-            partition, communities, detection_stats = self._step_detect_communities(graph)
+            partition, communities, detection_stats, graph = self._step_detect_communities(graph)
             if partition is None:
                 return {"status": "error", "message": "Community detection failed"}
-            
+            if not partition:
+                return {
+                    "status": "error",
+                    "message": (
+                        f"No community met min_community_size="
+                        f"{self.config.analysis.min_community_size}"
+                    ),
+                }
+
             # Step 4: Tag communities
             self.logger.info("\n[4/6] TAGGING COMMUNITIES")
             self.logger.info("-" * 70)
@@ -375,16 +375,33 @@ class PipelineRunner:
         channel_viewers = aggregator.get_channel_viewers()
         channel_metadata = aggregator.get_channel_metadata()
         
+        # Drop one-off viewers before sizing channels, so the size filter sees the
+        # same viewer sets the graph will be built from.
+        if self.config.analysis.min_user_appearances > 1:
+            original_viewers = sum(len(v) for v in channel_viewers.values())
+            channel_viewers = aggregator.filter_by_repeat_viewers(
+                self.config.analysis.min_user_appearances
+            )
+            remaining_viewers = sum(len(v) for v in channel_viewers.values())
+            self.logger.info(
+                f"Filtered viewers: {original_viewers} → {remaining_viewers} "
+                f"(seen in min {self.config.analysis.min_user_appearances} channels)"
+            )
+
         # Apply filtering if configured
         if self.config.analysis.min_channel_viewers > 1:
             original_count = len(channel_viewers)
-            channel_viewers = aggregator.filter_channels_by_size(
-                self.config.analysis.min_channel_viewers
-            )
+            channel_viewers = {
+                ch: viewers for ch, viewers in channel_viewers.items()
+                if len(viewers) >= self.config.analysis.min_channel_viewers
+            }
             self.logger.info(f"Filtered channels: {original_count} → {len(channel_viewers)} "
                            f"(min {self.config.analysis.min_channel_viewers} viewers)")
-        
-        builder = GraphBuilder(overlap_threshold=self.config.analysis.overlap_threshold)
+
+        builder = GraphBuilder(
+            overlap_threshold=self.config.analysis.overlap_threshold,
+            include_isolated_nodes=self.config.analysis.include_isolated_nodes,
+        )
         graph = builder.build_graph(channel_viewers, channel_metadata)
         
         stats = builder.get_statistics()
@@ -408,32 +425,47 @@ class PipelineRunner:
             # Upload to S3 so outputs survive container exit
             if self.storage:
                 date_str = datetime.now().strftime("%Y-%m-%d")
-                self.storage.upload_file(nodes_path, f"curated/analysis/{date_str}/graph_nodes.csv")
-                self.storage.upload_file(edges_path, f"curated/analysis/{date_str}/graph_edges.csv")
+                self.storage.upload_file(f"curated/analysis/{date_str}/graph_nodes.csv", nodes_path)
+                self.storage.upload_file(f"curated/analysis/{date_str}/graph_edges.csv", edges_path)
                 self.logger.info(f"Uploaded graph CSVs to S3 curated/analysis/{date_str}/")
         
         return graph
     
     def _step_detect_communities(self, graph) -> tuple:
-        """Community detection step."""
-        detector = CommunityDetector(resolution=self.config.analysis.resolution)
-        
+        """Community detection step.
+
+        Returns (partition, communities, stats, graph). The graph is narrowed to
+        the retained channels when min_community_size discards any, so every
+        downstream stage sees the same node set as the partition.
+        """
+        detector = CommunityDetector(
+            resolution=self.config.analysis.resolution,
+            min_community_size=self.config.analysis.min_community_size,
+        )
+
         try:
             partition = detector.detect_communities(graph)
         except ImportError as e:
             self.logger.error(f"Community detection failed: {e}")
-            return None, None, None
-        
+            return None, None, None, graph
+
+        if detector.discarded_channels:
+            self.logger.info(
+                f"Dropped {len(detector.discarded_channels)} channels in communities "
+                f"smaller than {self.config.analysis.min_community_size}"
+            )
+            graph = graph.subgraph(partition.keys()).copy()
+
         communities = detector.get_communities()
         stats = detector.get_statistics()
-        
+
         self.logger.info(f"Communities detected:")
         self.logger.info(f"  Count: {stats['num_communities']}")
         self.logger.info(f"  Modularity: {stats['modularity']:.4f}")
         self.logger.info(f"  Largest: {stats['largest_community_size']} channels")
         self.logger.info(f"  Smallest: {stats['smallest_community_size']} channels")
-        
-        return partition, communities, stats
+
+        return partition, communities, stats, graph
     
     def _step_tag_communities(self, communities, channel_metadata) -> tuple:
         """Tagging step."""
@@ -464,7 +496,9 @@ class PipelineRunner:
                 labels,
                 output_file=f"{self.config.analysis.output_dir}/community_graph.png",
                 show_labels=self.config.analysis.show_node_labels,
-                edge_threshold=None
+                edge_threshold=None,
+                label_top_n=self.config.analysis.label_top_n_nodes,
+                dpi=self.config.analysis.static_viz_dpi,
             )
             self.logger.info("✓ Static visualization saved")
         
@@ -522,6 +556,11 @@ class PipelineRunner:
                     detection_stats=detection_stats,
                     aggregator_stats=aggregator.get_statistics(),
                     storage=self.storage,
+                    config=FrontendExportConfig(
+                        max_channels=self.config.analysis.frontend_max_channels,
+                        max_edges=self.config.analysis.frontend_max_edges,
+                        top_edges_per_channel=self.config.analysis.frontend_top_edges_per_channel,
+                    ),
                 )
                 self.logger.info("✓ Frontend data exported")
             except Exception as e:

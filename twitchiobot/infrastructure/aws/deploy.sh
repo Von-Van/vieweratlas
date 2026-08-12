@@ -63,6 +63,8 @@ SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
 DYNAMODB_STATE_TABLE=${DYNAMODB_STATE_TABLE:-vieweratlas-collection-state}
 SQS_CHANNEL_QUEUE_URL=${SQS_CHANNEL_QUEUE_URL:-}  # populated by ensure_sqs_queue
+LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+BUDGET_LIMIT=${BUDGET_LIMIT:-50}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
@@ -89,6 +91,109 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+validate_required_deployment_inputs() {
+    if [ -z "$S3_BUCKET" ]; then
+        log_error "S3_BUCKET is not set. Set it in .env or export S3_BUCKET=your-bucket"
+        exit 1
+    fi
+
+    if [ -z "$SUBNET_IDS" ] || [ -z "$SECURITY_GROUP_ID" ]; then
+        log_error "SUBNET_IDS and SECURITY_GROUP_ID are required for a production deployment"
+        exit 1
+    fi
+
+    if [ -z "$ALERT_EMAIL" ]; then
+        log_error "ALERT_EMAIL is required so deployment and budget alerts have an owner"
+        exit 1
+    fi
+
+    if ! [[ "$ASSIGN_PUBLIC_IP" =~ ^(ENABLED|DISABLED)$ ]]; then
+        log_error "ASSIGN_PUBLIC_IP must be ENABLED or DISABLED"
+        exit 1
+    fi
+
+    if [[ "$S3_PREFIX" = /* ]]; then
+        log_error "S3_PREFIX must be relative and must not start with /"
+        exit 1
+    fi
+
+    if ! [[ "$BUDGET_LIMIT" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+        ! awk -v amount="$BUDGET_LIMIT" 'BEGIN { exit !(amount + 0 > 0) }'; then
+        log_error "BUDGET_LIMIT must be a positive dollar amount"
+        exit 1
+    fi
+}
+
+validate_network_configuration() {
+    local subnet_id subnet_vpc_id security_group_vpc_id expected_vpc_id
+    local -a subnet_ids
+
+    IFS=',' read -r -a subnet_ids <<< "$SUBNET_IDS"
+    if [ "${#subnet_ids[@]}" -lt 2 ]; then
+        log_error "At least two comma-separated SUBNET_IDS are required for a production deployment"
+        exit 1
+    fi
+
+    for subnet_id in "${subnet_ids[@]}"; do
+        if ! [[ "$subnet_id" =~ ^subnet-[0-9a-f]+$ ]]; then
+            log_error "Invalid subnet ID: $subnet_id"
+            exit 1
+        fi
+
+        subnet_vpc_id=$(aws ec2 describe-subnets \
+            --subnet-ids "$subnet_id" \
+            --region "$AWS_REGION" \
+            --query 'Subnets[0].VpcId' \
+            --output text 2>/dev/null || true)
+        if [ -z "$subnet_vpc_id" ] || [ "$subnet_vpc_id" = "None" ]; then
+            log_error "Subnet $subnet_id was not found in $AWS_REGION"
+            exit 1
+        fi
+
+        if [ -z "${expected_vpc_id:-}" ]; then
+            expected_vpc_id="$subnet_vpc_id"
+        elif [ "$subnet_vpc_id" != "$expected_vpc_id" ]; then
+            log_error "All SUBNET_IDS must belong to the same VPC"
+            exit 1
+        fi
+    done
+
+    if ! [[ "$SECURITY_GROUP_ID" =~ ^sg-[0-9a-f]+$ ]]; then
+        log_error "Invalid security group ID: $SECURITY_GROUP_ID"
+        exit 1
+    fi
+
+    security_group_vpc_id=$(aws ec2 describe-security-groups \
+        --group-ids "$SECURITY_GROUP_ID" \
+        --region "$AWS_REGION" \
+        --query 'SecurityGroups[0].VpcId' \
+        --output text 2>/dev/null || true)
+    if [ -z "$security_group_vpc_id" ] || [ "$security_group_vpc_id" = "None" ]; then
+        log_error "Security group $SECURITY_GROUP_ID was not found in $AWS_REGION"
+        exit 1
+    fi
+    if [ "$security_group_vpc_id" != "$expected_vpc_id" ]; then
+        log_error "SECURITY_GROUP_ID must belong to the same VPC as SUBNET_IDS"
+        exit 1
+    fi
+}
+
+verify_required_secrets() {
+    local secret_name secret_arn
+
+    for secret_name in vieweratlas/twitch/oauth_token vieweratlas/twitch/client_id; do
+        secret_arn=$(aws secretsmanager describe-secret \
+            --secret-id "$secret_name" \
+            --region "$AWS_REGION" \
+            --query 'ARN' \
+            --output text 2>/dev/null || true)
+        if [ -z "$secret_arn" ] || [ "$secret_arn" = "None" ]; then
+            log_error "Required AWS Secrets Manager secret is missing: $secret_name"
+            exit 1
+        fi
+    done
+}
+
 # Check prerequisites
 check_prerequisites() {
     log_info "Checking prerequisites..."
@@ -100,6 +205,10 @@ check_prerequisites() {
 
     if ! command -v docker >/dev/null 2>&1; then
         log_error "Docker not found. Please install: https://www.docker.com/"
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        log_error "Docker is installed but its daemon is not running. Start Docker Desktop and try again."
         exit 1
     fi
 
@@ -115,11 +224,9 @@ check_prerequisites() {
         exit 1
     fi
 
-    # Validate required variables
-    if [ -z "$S3_BUCKET" ]; then
-        log_error "S3_BUCKET is not set. Set it in .env or export S3_BUCKET=your-bucket"
-        exit 1
-    fi
+    validate_required_deployment_inputs
+    validate_network_configuration
+    verify_required_secrets
 
     log_info "Prerequisites check passed"
     log_info "  AWS Account: $AWS_ACCOUNT_ID"
@@ -329,27 +436,39 @@ JSON
 }
 JSON
 
-    ensure_task_role "vieweratlas-collector-task-role"
-    ensure_task_role "vieweratlas-analysis-task-role"
-    ensure_task_role "vieweratlas-vod-collector-task-role"
-    ensure_task_role "vieweratlas-discovery-task-role"
-    ensure_task_role "vieweratlas-worker-task-role"
+    ensure_task_role "${SERVICE_PREFIX}-collector-task-role"
+    ensure_task_role "${SERVICE_PREFIX}-analysis-task-role"
+    ensure_task_role "${SERVICE_PREFIX}-vod-collector-task-role"
+    ensure_task_role "${SERVICE_PREFIX}-discovery-task-role"
+    ensure_task_role "${SERVICE_PREFIX}-worker-task-role"
 
     # Attach SQS+DynamoDB policy to discovery and worker task roles
-    for role in vieweratlas-discovery-task-role vieweratlas-worker-task-role; do
+    for role in "${SERVICE_PREFIX}-discovery-task-role" "${SERVICE_PREFIX}-worker-task-role"; do
         aws iam put-role-policy \
             --role-name "$role" \
             --policy-name ViewerAtlasSQSDynamoAccess \
             --policy-document "file://$sqs_dynamo_policy_file" >/dev/null
     done
 
-    ensure_execution_role "vieweratlas-collector-execution-role" "yes"
-    ensure_execution_role "vieweratlas-analysis-execution-role" "no"
-    ensure_execution_role "vieweratlas-vod-collector-execution-role" "yes"
-    ensure_execution_role "vieweratlas-discovery-execution-role" "yes"
-    ensure_execution_role "vieweratlas-worker-execution-role" "yes"
+    ensure_execution_role "${SERVICE_PREFIX}-collector-execution-role" "yes"
+    ensure_execution_role "${SERVICE_PREFIX}-analysis-execution-role" "no"
+    ensure_execution_role "${SERVICE_PREFIX}-vod-collector-execution-role" "yes"
+    ensure_execution_role "${SERVICE_PREFIX}-discovery-execution-role" "yes"
+    ensure_execution_role "${SERVICE_PREFIX}-worker-execution-role" "yes"
 
     rm -f "$trust_file" "$s3_policy_file" "$secrets_policy_file" "$sqs_dynamo_policy_file"
+}
+
+ensure_log_groups() {
+    log_info "Ensuring CloudWatch log groups..."
+    for service in collector analysis vod-collector discovery worker; do
+        local log_group="/ecs/${SERVICE_PREFIX}-${service}"
+        aws logs create-log-group --log-group-name "$log_group" --region "$AWS_REGION" >/dev/null 2>&1 || true
+        aws logs put-retention-policy \
+            --log-group-name "$log_group" \
+            --retention-in-days "$LOG_RETENTION_DAYS" \
+            --region "$AWS_REGION" >/dev/null
+    done
 }
 
 # Ensure SQS FIFO queue exists
@@ -429,6 +548,7 @@ register_task_definitions() {
             -e "s/\${DYNAMODB_STATE_TABLE}/$DYNAMODB_STATE_TABLE/g" \
             -e "s/\"family\": \"vieweratlas-$task\"/\"family\": \"${SERVICE_PREFIX}-$task\"/" \
             -e "s|/ecs/vieweratlas-$task|/ecs/${SERVICE_PREFIX}-$task|" \
+            -e "s#role/vieweratlas-#role/${SERVICE_PREFIX}-#g" \
             "$task_def_file" > "$temp_file"
 
         # Handle optional EFS_ID: replace if set, otherwise strip volumes/mountPoints
@@ -448,7 +568,7 @@ with open('$temp_file', 'w') as f:
 " >/dev/null
         fi
 
-        log_info "Registering task definition: vieweratlas-$task"
+        log_info "Registering task definition: ${SERVICE_PREFIX}-$task"
         aws ecs register-task-definition \
             --cli-input-json "file://$temp_file" \
             --region "$AWS_REGION" >/dev/null
@@ -463,6 +583,28 @@ ensure_cluster() {
     else
         log_info "Creating ECS cluster: $ECS_CLUSTER"
         aws ecs create-cluster --cluster-name "$ECS_CLUSTER" --region "$AWS_REGION" >/dev/null
+    fi
+}
+
+# ECS uses this AWS-managed role to create and manage resources for ECS services.
+# It is normally created automatically the first time an ECS service is created,
+# but explicit creation makes the first deployment reliable for new AWS accounts.
+ensure_ecs_service_linked_role() {
+    local role_name="AWSServiceRoleForECS"
+
+    if aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+        log_info "ECS service-linked role exists: $role_name"
+        return
+    fi
+
+    log_info "Creating ECS service-linked role: $role_name"
+    if ! aws iam create-service-linked-role \
+        --aws-service-name ecs.amazonaws.com >/dev/null 2>&1; then
+        # Another deployment may have created it between the check and this call.
+        if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+            log_error "Could not create the ECS service-linked role. Ensure the deploy user can run iam:CreateServiceLinkedRole for ecs.amazonaws.com."
+            exit 1
+        fi
     fi
 }
 
@@ -520,6 +662,7 @@ upsert_services() {
                 --cluster "$ECS_CLUSTER" \
                 --service "$full_service_name" \
                 --task-definition "$task_def_arn" \
+                --network-configuration "$(network_config_arg "$SUBNET_IDS" "$SECURITY_GROUP_ID" "$ASSIGN_PUBLIC_IP")" \
                 --force-new-deployment \
                 --region "$AWS_REGION" >/dev/null
             continue
@@ -548,6 +691,20 @@ main() {
 
     check_prerequisites
 
+    if [ "${1:-}" = "--preflight" ]; then
+        log_info "Deployment preflight passed; no AWS resources were changed"
+        return
+    fi
+    if [ "$#" -ne 0 ]; then
+        log_error "Usage: ./deploy.sh [--preflight]"
+        exit 1
+    fi
+
+    # Create this at the start of the real deployment. IAM role changes can take
+    # a short time to propagate, and image builds provide that time before ECS
+    # needs the role during service creation.
+    ensure_ecs_service_linked_role
+
     create_ecr_repos
     ensure_s3_bucket_security_controls
     ecr_login
@@ -561,6 +718,7 @@ main() {
     ensure_sqs_queue
     ensure_dynamodb_table
     ensure_iam_roles
+    ensure_log_groups
     register_task_definitions
     upsert_services
 

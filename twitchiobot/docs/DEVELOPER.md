@@ -251,33 +251,49 @@ json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
 
 ### Configuration Classes
 
+See `src/config.py` for the authoritative field list. Key defaults:
+
 ```python
 @dataclass
 class CollectionConfig:
-    logs_dir: str = "logs"
-    collection_interval: int = 3600  # seconds
-    top_channels_limit: int = 1000
+    top_channels_limit: int = 5000
     batch_size: int = 100
+    duration_per_batch: int = 60          # seconds sampled per batch
+    collection_interval_minutes: int = 60
+    max_runtime_hours: Optional[int] = 24     # cost protection
+    max_collection_cycles: Optional[int] = 100
+    logs_dir: str = "logs"
 
 @dataclass
 class AnalysisConfig:
-    overlap_threshold: int = 1
-    weighting_mode: str = "shared_count"  # Edge weight formula
-    min_channel_viewers: int = 10
-    min_community_size: int = 2
-    resolution: float = 1.0
+    overlap_threshold: int = 1            # min shared viewers for an edge
+    weighting_mode: str = "shared_count"
+    min_channel_viewers: int = 1          # drop channels below this audience size
+    min_user_appearances: int = 1         # drop viewers seen in fewer channels
+    include_isolated_nodes: bool = True   # keep channels with no overlaps
+    resolution: float = 1.0               # Louvain resolution
+    min_community_size: int = 1           # discard communities below this size
+    static_viz_dpi: int = 300
+    label_top_n_nodes: int = 15
+    frontend_max_channels: int = 1000     # public browser graph caps
     output_dir: str = "community_analysis"
 
 @dataclass
 class PipelineConfig:
     collection: CollectionConfig
     analysis: AnalysisConfig
+    vod: VODConfig
+    sqs: SQSConfig
     storage_type: str = "file"  # "file" or "s3"
     s3_bucket: Optional[str] = None
     s3_prefix: str = "vieweratlas/"
     s3_region: str = "us-east-1"
     log_level: str = "INFO"
 ```
+
+The analysis defaults are deliberately permissive: `min_channel_viewers`,
+`min_user_appearances` and `min_community_size` all default to `1`, so nothing is
+filtered until you opt in. Raise them to cut noise from a real dataset.
 
 ### Configuration Presets
 
@@ -288,21 +304,32 @@ class PipelineConfig:
 
 ### YAML Configuration
 
+Every field of `CollectionConfig`, `AnalysisConfig`, `VODConfig` and `SQSConfig`
+is settable from YAML under its matching section. Storage and logging settings
+are top-level keys, not a nested section. Unknown keys raise a `ValueError`
+rather than being silently ignored, so a typo fails immediately.
+
 ```yaml
 collection:
   logs_dir: "logs"
-  collection_interval: 3600
+  collection_interval_minutes: 60
+  top_channels_limit: 5000
 
 analysis:
   overlap_threshold: 300
   resolution: 1.0
   min_community_size: 5
+  min_user_appearances: 2
+  include_isolated_nodes: false
 
-storage:
-  storage_type: "s3"
-  s3_bucket: "vieweratlas-data-lake"
-  s3_prefix: "vieweratlas/"
-  s3_region: "us-east-1"
+sqs:
+  enabled: false
+  queue_url: ""
+
+storage_type: "s3"
+s3_bucket: "vieweratlas-data-lake"
+s3_prefix: "vieweratlas/"
+s3_region: "us-east-1"
 
 log_level: "INFO"
 ```
@@ -312,6 +339,9 @@ Load from YAML:
 from config import load_config_from_yaml
 config = load_config_from_yaml("config.yaml")
 ```
+
+`OVERLAP_THRESHOLD`, `MIN_COMMUNITY_SIZE`, `RESOLUTION` and `LOG_LEVEL`
+environment variables override the corresponding YAML values.
 
 ---
 
@@ -414,7 +444,7 @@ docker-compose logs -f
 
 ### IAM Roles
 
-VOD collector requires two IAM roles (see [iam-roles.json](iam-roles.json)):
+VOD collector requires two IAM roles (see [iam-roles.json](../infrastructure/aws/iam-roles.json)):
 
 **Task Role** (`vieweratlas-vod-collector-task-role`):
 - S3 read/write access to vieweratlas/* prefix
@@ -436,7 +466,7 @@ aws iam create-role --role-name vieweratlas-vod-collector-execution-role \
 
 ### EventBridge Scheduling
 
-Schedule VOD processing runs (see [eventbridge-schedules.json](eventbridge-schedules.json)):
+Schedule VOD processing runs (see [eventbridge-schedules.json](../infrastructure/aws/eventbridge-schedules.json)):
 
 **Daily at 2 AM UTC:**
 ```bash
@@ -453,7 +483,7 @@ aws events put-rule --name vieweratlas-vod-hourly \
 
 ### Athena/Glue Queries
 
-Query curated VOD snapshots using Athena (see [athena-schema.sql](athena-schema.sql)):
+Query curated VOD snapshots using Athena (see [athena-schema.sql](../infrastructure/aws/athena-schema.sql)):
 
 ```sql
 -- Create external table
@@ -470,7 +500,7 @@ GROUP BY channel;
 
 ### Monitoring
 
-CloudWatch dashboard configuration in [monitoring-dashboard.yaml](monitoring-dashboard.yaml):
+CloudWatch dashboard configuration in [monitoring-dashboard.yaml](../infrastructure/aws/monitoring-dashboard.yaml):
 
 **Key Metrics:**
 - VOD queue status (pending/processing/completed/failed)
@@ -691,7 +721,6 @@ class GraphBuilder:
 ## 📖 Additional Resources
 
 - **Main README**: [../../README.md](../../README.md) - Complete user guide
-- **Original Spec**: [../vieweratlas scheme.txt](../vieweratlas%20scheme.txt) - Project specification
 - **NetworkX**: https://networkx.org/
 - **Louvain Algorithm**: https://python-louvain.readthedocs.io/
 - **TwitchIO**: https://twitchio.dev/

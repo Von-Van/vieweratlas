@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import type { Channel, Edge, Community } from "../data/mockData";
 
 interface NodeState {
@@ -31,20 +31,19 @@ function seededRandom(seed: number) {
   };
 }
 
-const communityColorMap: Record<string, string> = {
-  "fps-en": "#9147FF",
-  "moba-en": "#00E5CC",
-  "variety-jp": "#FF7B00",
-  "irl-es": "#1DB954",
-  "strategy": "#FF4D6D",
-  "speedrun": "#FFD700",
-};
-
 function hexToRgb(hex: string) {
   const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
   return result
     ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) }
     : { r: 145, g: 71, b: 255 };
+}
+
+function hashString(value: string) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i++) {
+    hash = Math.imul(31, hash) + value.charCodeAt(i);
+  }
+  return Math.abs(hash);
 }
 
 export function NetworkGraph({
@@ -64,33 +63,50 @@ export function NetworkGraph({
   const lastMouseRef = useRef({ x: 0, y: 0 });
   const hoveredNodeRef = useRef<string | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; node: NodeState } | null>(null);
-  const simulationDoneRef = useRef(false);
   const tickRef = useRef(0);
+  const shouldSimulateRef = useRef(true);
+  const communityColorMap = useMemo(
+    () => new Map(communities.map((community) => [community.id, community.color])),
+    [communities],
+  );
+  const communityOrder = useMemo(
+    () => communities.map((community) => community.id),
+    [communities],
+  );
 
   // Build nodes from channels
   useEffect(() => {
+    if (channels.length === 0) {
+      nodesRef.current = [];
+      tickRef.current = 0;
+      shouldSimulateRef.current = false;
+      return;
+    }
+
     const rng = seededRandom(42);
-    const maxViewers = Math.max(...channels.map((c) => c.viewers));
+    const maxViewers = Math.max(1, ...channels.map((c) => c.viewers));
     const minR = 6;
     const maxR = 26;
-
-    // Group channels by community for initial positioning
-    const commOrder = ["fps-en", "moba-en", "variety-jp", "irl-es", "strategy", "speedrun"];
+    const orderLength = Math.max(communityOrder.length, 1);
+    const hasPrecomputedLayout = channels.every((ch) => ch.layout);
 
     nodesRef.current = channels.map((ch) => {
-      const commIdx = commOrder.indexOf(ch.communityId);
-      const commAngle = (commIdx / commOrder.length) * Math.PI * 2;
+      const knownCommunityIndex = communityOrder.indexOf(ch.communityId);
+      const commIdx = knownCommunityIndex >= 0
+        ? knownCommunityIndex
+        : hashString(ch.communityId) % orderLength;
+      const commAngle = (commIdx / orderLength) * Math.PI * 2;
       const radius = 180 + rng() * 60;
       const spread = 0.4 + rng() * 0.4;
       const angle = commAngle + (rng() - 0.5) * spread * 2;
 
       const r = minR + ((ch.viewers / maxViewers) ** 0.5) * (maxR - minR);
-      const color = communityColorMap[ch.communityId] || "#9147FF";
+      const color = communityColorMap.get(ch.communityId) || "#9147FF";
 
       return {
         id: ch.id,
-        x: Math.cos(angle) * radius,
-        y: Math.sin(angle) * radius,
+        x: ch.layout?.x ?? Math.cos(angle) * radius,
+        y: ch.layout?.y ?? Math.sin(angle) * radius,
         vx: 0,
         vy: 0,
         r,
@@ -100,9 +116,9 @@ export function NetworkGraph({
       };
     });
 
-    simulationDoneRef.current = false;
     tickRef.current = 0;
-  }, [channels]);
+    shouldSimulateRef.current = !hasPrecomputedLayout && channels.length <= 350;
+  }, [channels, communityColorMap, communityOrder]);
 
   const runSimulationStep = useCallback((alpha: number) => {
     const nodes = nodesRef.current;
@@ -181,7 +197,7 @@ export function NetworkGraph({
     ctx.translate(width / 2 + tx, height / 2 + ty);
     ctx.scale(scale, scale);
 
-    const maxWeight = Math.max(...edges.map((e) => e.weight));
+    const maxWeight = Math.max(1, ...edges.map((e) => e.weight));
 
     // Draw edges
     for (const edge of edges) {
@@ -262,12 +278,10 @@ export function NetworkGraph({
     const loop = () => {
       if (!running) return;
 
-      if (tickRef.current < 300) {
+      if (shouldSimulateRef.current && tickRef.current < 300) {
         const alpha = Math.max(0.01, 1 - tickRef.current / 250);
         for (let i = 0; i < 3; i++) runSimulationStep(alpha);
         tickRef.current += 3;
-      } else {
-        simulationDoneRef.current = true;
       }
 
       drawGraph();

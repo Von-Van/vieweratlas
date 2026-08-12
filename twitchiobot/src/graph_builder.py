@@ -7,6 +7,7 @@ Applies threshold filtering to focus on meaningful connections.
 """
 
 import networkx as nx
+from collections import defaultdict
 from typing import Dict, Set, Tuple, List
 from itertools import combinations
 import logging
@@ -22,16 +23,25 @@ class GraphBuilder:
     - Edge Weight: Number of shared viewers
     """
     
-    def __init__(self, overlap_threshold: int = 1):
+    def __init__(self, overlap_threshold: int = 1, max_viewer_channel_degree: int = 200,
+                 include_isolated_nodes: bool = True):
         """
         Initialize graph builder.
-        
+
         Args:
             overlap_threshold: Minimum shared viewers required for an edge to exist
+            max_viewer_channel_degree: Ignore viewers seen in more than this many
+                channels. Very high-degree viewer IDs are usually noisy and create
+                a combinatorial number of weak edges.
+            include_isolated_nodes: Keep channels that share no viewers with any
+                other channel. Set False to drop them from the graph entirely.
         """
         self.overlap_threshold = overlap_threshold
+        self.max_viewer_channel_degree = max_viewer_channel_degree
+        self.include_isolated_nodes = include_isolated_nodes
         self.graph = nx.Graph()
         self.overlap_data: Dict[Tuple[str, str], int] = {}
+        self.skipped_high_degree_viewers = 0
         
     def build_graph(self, 
                    channel_viewers: Dict[str, Set[str]], 
@@ -48,6 +58,7 @@ class GraphBuilder:
         """
         self.graph = nx.Graph()
         self.overlap_data = {}
+        self.skipped_high_degree_viewers = 0
         
         channels = list(channel_viewers.keys())
         logger.info(f"Building graph with {len(channels)} channels")
@@ -67,23 +78,42 @@ class GraphBuilder:
             
             self.graph.add_node(channel, **attributes)
         
-        # Compute overlaps and add edges
-        edge_count = 0
-        for channel1, channel2 in combinations(channels, 2):
-            viewers1 = channel_viewers[channel1]
-            viewers2 = channel_viewers[channel2]
-            
-            # Compute intersection (shared viewers)
-            overlap = len(viewers1 & viewers2)
-            
+        viewer_channels: Dict[str, List[str]] = defaultdict(list)
+        for channel, viewers in channel_viewers.items():
+            for viewer in viewers:
+                viewer_channels[viewer].append(channel)
+
+        overlap_counts: Dict[Tuple[str, str], int] = defaultdict(int)
+        for viewer, viewer_channel_list in viewer_channels.items():
+            if len(viewer_channel_list) < 2:
+                continue
+            if len(viewer_channel_list) > self.max_viewer_channel_degree:
+                self.skipped_high_degree_viewers += 1
+                continue
+
+            for channel1, channel2 in combinations(sorted(viewer_channel_list), 2):
+                overlap_counts[(channel1, channel2)] += 1
+
+        for (channel1, channel2), overlap in overlap_counts.items():
             if overlap >= self.overlap_threshold:
                 self.graph.add_edge(channel1, channel2, weight=overlap)
                 self.overlap_data[(channel1, channel2)] = overlap
-                edge_count += 1
         
+        if not self.include_isolated_nodes:
+            isolated = list(nx.isolates(self.graph))
+            if isolated:
+                self.graph.remove_nodes_from(isolated)
+                logger.info("Dropped %d isolated channels (no shared viewers)", len(isolated))
+
         logger.info(f"Created graph with {self.graph.number_of_nodes()} nodes "
                    f"and {self.graph.number_of_edges()} edges "
                    f"(threshold: {self.overlap_threshold})")
+        if self.skipped_high_degree_viewers:
+            logger.info(
+                "Skipped %d high-degree viewer IDs (>%d channels)",
+                self.skipped_high_degree_viewers,
+                self.max_viewer_channel_degree,
+            )
         
         return self.graph
     
@@ -152,7 +182,9 @@ class GraphBuilder:
             "max_edge_weight": max_weight,
             "num_isolated_nodes": len(isolated),
             "density": nx.density(self.graph),
-            "top_connected_channels": top_connected
+            "top_connected_channels": top_connected,
+            "skipped_high_degree_viewers": self.skipped_high_degree_viewers,
+            "max_viewer_channel_degree": self.max_viewer_channel_degree
         }
     
     def get_largest_component(self) -> nx.Graph:

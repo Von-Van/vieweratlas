@@ -66,10 +66,21 @@ err() { echo -e "${RED}[ERROR]${NC} $1"; }
 fail() { err "$1"; exit 1; }
 
 command -v aws >/dev/null 2>&1 || fail "AWS CLI is required"
-command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-python3 - <<'PY' >/dev/null 2>&1 || fail "python3 module 'yaml' is required (pip install pyyaml)"
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+PYTHON_BIN=${PYTHON_BIN:-python3}
+if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1; then
 import yaml
 PY
+    project_venv_python="$(cd "$SCRIPT_DIR/../../.." && pwd)/.venv/bin/python"
+    if [ -x "$project_venv_python" ] && "$project_venv_python" - <<'PY' >/dev/null 2>&1; then
+import yaml
+PY
+        PYTHON_BIN="$project_venv_python"
+        info "Using the project virtual environment for PyYAML"
+    else
+        fail "PyYAML is required. Activate the project virtual environment or run: python3 -m pip install pyyaml"
+    fi
+fi
 
 [ -n "$S3_BUCKET" ] || fail "S3_BUCKET is required"
 [ -f "$MONITORING_CONFIG" ] || fail "Monitoring config not found: $MONITORING_CONFIG"
@@ -89,7 +100,7 @@ fi
 info "Applying monitoring using $MONITORING_CONFIG"
 
 # Build dashboard JSON from monitoring-dashboard.yaml and push to CloudWatch.
-dashboard_payload=$(python3 - "$MONITORING_CONFIG" "$AWS_REGION" <<'PY'
+dashboard_payload=$("$PYTHON_BIN" - "$MONITORING_CONFIG" "$AWS_REGION" <<'PY'
 import json
 import sys
 
@@ -180,8 +191,8 @@ print(json.dumps(payload))
 PY
 )
 
-dashboard_name=$(echo "$dashboard_payload" | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['dashboard_name'])")
-dashboard_body=$(echo "$dashboard_payload" | python3 -c "import json,sys; print(json.loads(sys.stdin.read())['dashboard_body'])")
+dashboard_name=$(echo "$dashboard_payload" | "$PYTHON_BIN" -c "import json,sys; print(json.loads(sys.stdin.read())['dashboard_name'])")
+dashboard_body=$(echo "$dashboard_payload" | "$PYTHON_BIN" -c "import json,sys; print(json.loads(sys.stdin.read())['dashboard_body'])")
 
 aws cloudwatch put-dashboard \
     --region "$AWS_REGION" \
@@ -193,7 +204,9 @@ info "Dashboard applied: $dashboard_name"
 for log_group in \
     "/ecs/${SERVICE_PREFIX}-collector" \
     "/ecs/${SERVICE_PREFIX}-analysis" \
-    "/ecs/${SERVICE_PREFIX}-vod-collector"; do
+    "/ecs/${SERVICE_PREFIX}-vod-collector" \
+    "/ecs/${SERVICE_PREFIX}-discovery" \
+    "/ecs/${SERVICE_PREFIX}-worker"; do
     aws logs create-log-group --region "$AWS_REGION" --log-group-name "$log_group" >/dev/null 2>&1 || true
     aws logs put-retention-policy \
         --region "$AWS_REGION" \
@@ -337,7 +350,7 @@ fi
 
 export LIFECYCLE_JSON="$lifecycle_json"
 
-python3 - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import json
 import os
 import sys
@@ -347,7 +360,7 @@ if not payload:
     raise SystemExit("Missing lifecycle payload")
 
 config = json.loads(payload)
-rules = {rule.get("Id") for rule in config.get("Rules", [])}
+rules = {rule.get("ID") for rule in config.get("Rules", [])}
 expected = {"DeleteOldRawLogs", "DeleteOldVODRaw", "ArchiveProcessedData"}
 missing = sorted(expected - rules)
 if missing:

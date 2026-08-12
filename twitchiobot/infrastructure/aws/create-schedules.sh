@@ -47,9 +47,10 @@ SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID:-}
 ANALYSIS_SCHEDULE=${ANALYSIS_SCHEDULE:-cron(0 3 * * ? *)}
 VOD_SCHEDULE=${VOD_SCHEDULE:-rate(6 hours)}
+ENABLE_VOD_SCHEDULE=${ENABLE_VOD_SCHEDULE:-false}
 ANALYSIS_RULE_NAME=${ANALYSIS_RULE_NAME:-${SERVICE_PREFIX}-analysis-daily}
 VOD_RULE_NAME=${VOD_RULE_NAME:-${SERVICE_PREFIX}-vod-6h}
-EVENTBRIDGE_ROLE_NAME=${EVENTBRIDGE_ROLE_NAME:-vieweratlas-eventbridge-ecs-role}
+EVENTBRIDGE_ROLE_NAME=${EVENTBRIDGE_ROLE_NAME:-${SERVICE_PREFIX}-eventbridge-ecs-role}
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -75,6 +76,11 @@ if [ -z "$SUBNET_IDS" ] || [ -z "$SECURITY_GROUP_ID" ]; then
     exit 1
 fi
 
+if [ "$ENABLE_VOD_SCHEDULE" != "true" ] && [ "$ENABLE_VOD_SCHEDULE" != "false" ]; then
+    err "ENABLE_VOD_SCHEDULE must be true or false"
+    exit 1
+fi
+
 if [ -z "$AWS_ACCOUNT_ID" ]; then
     AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 fi
@@ -88,16 +94,26 @@ ANALYSIS_TASK_ARN=$(aws ecs describe-task-definition \
     --query 'taskDefinition.taskDefinitionArn' \
     --output text)
 
-VOD_TASK_ARN=$(aws ecs describe-task-definition \
-    --task-definition "${SERVICE_PREFIX}-vod-collector" \
-    --region "$AWS_REGION" \
-    --query 'taskDefinition.taskDefinitionArn' \
-    --output text)
+VOD_TASK_ARN=""
+if [ "$ENABLE_VOD_SCHEDULE" = "true" ]; then
+    VOD_TASK_ARN=$(aws ecs describe-task-definition \
+        --task-definition "${SERVICE_PREFIX}-vod-collector" \
+        --region "$AWS_REGION" \
+        --query 'taskDefinition.taskDefinitionArn' \
+        --output text)
+fi
 
 ensure_eventbridge_role() {
-    local trust_json policy_json
+    local trust_json policy_json task_resources role_resources
     trust_json=$(mktemp)
     policy_json=$(mktemp)
+
+    task_resources="\"arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-analysis:*\""
+    role_resources="\"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-task-role\", \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-execution-role\""
+    if [ "$ENABLE_VOD_SCHEDULE" = "true" ]; then
+        task_resources+=", \"arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-vod-collector:*\""
+        role_resources+=", \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-task-role\", \"arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-execution-role\""
+    fi
 
     cat > "$trust_json" <<JSON
 {
@@ -119,10 +135,7 @@ JSON
     {
       "Effect": "Allow",
       "Action": ["ecs:RunTask"],
-      "Resource": [
-        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-analysis:*",
-        "arn:aws:ecs:${AWS_REGION}:${AWS_ACCOUNT_ID}:task-definition/${SERVICE_PREFIX}-vod-collector:*"
-      ],
+      "Resource": [${task_resources}],
       "Condition": {
         "ArnLike": {
           "ecs:cluster": "${CLUSTER_ARN}"
@@ -132,12 +145,7 @@ JSON
     {
       "Effect": "Allow",
       "Action": ["iam:PassRole"],
-      "Resource": [
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-task-role",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-analysis-execution-role",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-task-role",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/${SERVICE_PREFIX}-vod-collector-execution-role"
-      ]
+      "Resource": [${role_resources}]
     }
   ]
 }
@@ -226,14 +234,23 @@ aws events put-rule \
     --state ENABLED >/dev/null
 put_target "$ANALYSIS_RULE_NAME" "$ANALYSIS_TASK_ARN" "vieweratlas-analysis-target"
 
-info "Upserting EventBridge rule: $VOD_RULE_NAME ($VOD_SCHEDULE)"
-aws events put-rule \
-    --region "$AWS_REGION" \
-    --name "$VOD_RULE_NAME" \
-    --schedule-expression "$VOD_SCHEDULE" \
-    --description "Run ViewerAtlas VOD collector task" \
-    --state ENABLED >/dev/null
-put_target "$VOD_RULE_NAME" "$VOD_TASK_ARN" "vieweratlas-vod-target"
+if [ "$ENABLE_VOD_SCHEDULE" = "true" ]; then
+    info "Upserting EventBridge rule: $VOD_RULE_NAME ($VOD_SCHEDULE)"
+    aws events put-rule \
+        --region "$AWS_REGION" \
+        --name "$VOD_RULE_NAME" \
+        --schedule-expression "$VOD_SCHEDULE" \
+        --description "Run ViewerAtlas VOD collector task" \
+        --state ENABLED >/dev/null
+    put_target "$VOD_RULE_NAME" "$VOD_TASK_ARN" "vieweratlas-vod-target"
+else
+    if aws events describe-rule --region "$AWS_REGION" --name "$VOD_RULE_NAME" >/dev/null 2>&1; then
+        aws events disable-rule --region "$AWS_REGION" --name "$VOD_RULE_NAME" >/dev/null
+        info "Disabled existing optional VOD schedule: $VOD_RULE_NAME"
+    else
+        info "VOD schedule is disabled (set ENABLE_VOD_SCHEDULE=true to enable it)"
+    fi
+fi
 
 info "Schedules configured successfully"
 warn "Review schedules with: aws events list-rules --name-prefix vieweratlas- --region $AWS_REGION"

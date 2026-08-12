@@ -21,11 +21,21 @@ set -euo pipefail
 
 FRONTEND_BUCKET="${FRONTEND_BUCKET:-vieweratlas-frontend}"
 DATA_BUCKET="${DATA_BUCKET:-vieweratlas-data-lake}"
+DATA_PREFIX="${DATA_PREFIX:-vieweratlas/}"
 REGION="${AWS_REGION:-us-east-1}"
+DATA_ORIGIN_PATH=""
+if [ -n "${DATA_PREFIX%/}" ]; then
+  DATA_ORIGIN_PATH="/${DATA_PREFIX%/}"
+fi
+DATA_POLICY_RESOURCE="arn:aws:s3:::${DATA_BUCKET}/data/*"
+if [ -n "${DATA_PREFIX%/}" ]; then
+  DATA_POLICY_RESOURCE="arn:aws:s3:::${DATA_BUCKET}/${DATA_PREFIX%/}/data/*"
+fi
 
 echo "=== ViewerAtlas CloudFront Setup ==="
 echo "Frontend bucket: ${FRONTEND_BUCKET}"
 echo "Data bucket:     ${DATA_BUCKET}"
+echo "Data origin path:${DATA_ORIGIN_PATH:-/}"
 echo "Region:          ${REGION}"
 echo ""
 
@@ -36,10 +46,17 @@ echo "[1/4] Creating frontend S3 bucket..."
 if aws s3api head-bucket --bucket "$FRONTEND_BUCKET" 2>/dev/null; then
   echo "  Bucket ${FRONTEND_BUCKET} already exists, skipping."
 else
-  aws s3api create-bucket \
-    --bucket "$FRONTEND_BUCKET" \
-    --region "$REGION" \
-    --create-bucket-configuration LocationConstraint="$REGION"
+  if [ "$REGION" = "us-east-1" ]; then
+    # S3 rejects LocationConstraint=us-east-1; omit it for this region.
+    aws s3api create-bucket \
+      --bucket "$FRONTEND_BUCKET" \
+      --region "$REGION"
+  else
+    aws s3api create-bucket \
+      --bucket "$FRONTEND_BUCKET" \
+      --region "$REGION" \
+      --create-bucket-configuration LocationConstraint="$REGION"
+  fi
   echo "  Created bucket ${FRONTEND_BUCKET}."
 fi
 
@@ -99,6 +116,7 @@ DIST_CONFIG=$(cat <<DISTEOF
       {
         "Id": "data-s3",
         "DomainName": "${DATA_BUCKET}.s3.${REGION}.amazonaws.com",
+        "OriginPath": "${DATA_ORIGIN_PATH}",
         "OriginAccessControlId": "${OAC_ID}",
         "S3OriginConfig": { "OriginAccessIdentity": "" }
       }
@@ -108,15 +126,13 @@ DIST_CONFIG=$(cat <<DISTEOF
     "TargetOriginId": "frontend-s3",
     "ViewerProtocolPolicy": "redirect-to-https",
     "AllowedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] },
-    "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] },
     "Compress": true,
-    "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
     "ForwardedValues": {
       "QueryString": false,
       "Cookies": { "Forward": "none" }
     },
     "MinTTL": 0,
-    "DefaultTTL": 86400,
+    "DefaultTTL": 300,
     "MaxTTL": 31536000
   },
   "CacheBehaviors": {
@@ -127,9 +143,7 @@ DIST_CONFIG=$(cat <<DISTEOF
         "TargetOriginId": "data-s3",
         "ViewerProtocolPolicy": "redirect-to-https",
         "AllowedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] },
-        "CachedMethods": { "Quantity": 2, "Items": ["GET", "HEAD"] },
         "Compress": true,
-        "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
         "ForwardedValues": {
           "QueryString": false,
           "Cookies": { "Forward": "none" }
@@ -185,6 +199,29 @@ cat <<POLICYEOF
       "Principal": { "Service": "cloudfront.amazonaws.com" },
       "Action": "s3:GetObject",
       "Resource": "arn:aws:s3:::${FRONTEND_BUCKET}/*",
+      "Condition": {
+        "StringEquals": {
+          "AWS:SourceArn": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DISTRIBUTION_ID>"
+        }
+      }
+    }
+  ]
+}
+POLICYEOF
+
+echo ""
+echo "Data bucket policy for the /data/* origin:"
+echo ""
+cat <<POLICYEOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowCloudFrontOACData",
+      "Effect": "Allow",
+      "Principal": { "Service": "cloudfront.amazonaws.com" },
+      "Action": "s3:GetObject",
+      "Resource": "${DATA_POLICY_RESOURCE}",
       "Condition": {
         "StringEquals": {
           "AWS:SourceArn": "arn:aws:cloudfront::<ACCOUNT_ID>:distribution/<DISTRIBUTION_ID>"

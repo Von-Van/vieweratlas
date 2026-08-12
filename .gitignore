@@ -44,10 +44,13 @@ twitchiobot/vod_queue.json
 twitchiobot/channels.txt
 twitchiobot/chatters_log.csv
 
-# Internal operational docs (deployment procedures, runbooks, checklists)
+# Internal operational docs (deployment procedures, runbooks, checklists).
+# DEVELOPER.md and DATA_POLICY.md are intentionally public and referenced by README.
 twitchiobot/docs/*.md
 !twitchiobot/docs/DEVELOPER.md
+!twitchiobot/docs/DATA_POLICY.md
 DEPLOYMENT_GUIDE.md
+STAKEHOLDER_DEPLOYMENT_GUIDE.md
 
 # Security review artifacts
 security_best_practices_report.md

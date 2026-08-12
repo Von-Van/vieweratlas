@@ -5,7 +5,7 @@
   "cpu": "1024",
   "memory": "2048",
   "ephemeralStorage": {
-    "sizeInGiB": 10
+    "sizeInGiB": 21
   },
   "containerDefinitions": [
     {

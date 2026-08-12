@@ -5,9 +5,6 @@ import { NetworkGraph } from "../components/NetworkGraph";
 import { useAtlasData } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 
-const LANG_OPTIONS = ["All", "English", "Japanese", "Spanish"];
-const GAME_OPTIONS = ["All", "FPS", "MOBA", "Variety", "IRL", "Strategy", "Speedrun"];
-
 export function CommunityMap() {
   const navigate = useNavigate();
   const { data, loading } = useAtlasData();
@@ -22,6 +19,16 @@ export function CommunityMap() {
   const channels = data?.channels ?? [];
   const edges = data?.edges ?? [];
   const communities = data?.communities ?? [];
+  const languageOptions = useMemo(() => {
+    const languages = Array.from(
+      new Set(channels.map((channel) => channel.language).filter(Boolean)),
+    ).sort((a, b) => a.localeCompare(b));
+    return ["All", ...languages];
+  }, [channels]);
+  const maxViewerFilter = useMemo(() => {
+    const maxViewers = Math.max(0, ...channels.map((channel) => channel.viewers));
+    return Math.max(500, Math.ceil(maxViewers / 500) * 500);
+  }, [channels]);
 
   const toggleCommunity = (id: string) => {
     setSelectedCommunities((prev) => {
@@ -40,12 +47,12 @@ export function CommunityMap() {
       if (searchQuery && !ch.displayName.toLowerCase().includes(searchQuery.toLowerCase()) && !ch.game.toLowerCase().includes(searchQuery.toLowerCase())) return false;
       return true;
     });
-  }, [selectedCommunities, minViewers, selectedLanguage, searchQuery]);
+  }, [channels, selectedCommunities, minViewers, selectedLanguage, searchQuery]);
 
   const filteredEdges = useMemo(() => {
     const ids = new Set(filteredChannels.map((c) => c.id));
     return edges.filter((e) => ids.has(e.source) && ids.has(e.target));
-  }, [filteredChannels]);
+  }, [edges, filteredChannels]);
 
   const selectedChannel = selectedNode ? channels.find((c) => c.id === selectedNode) : null;
   const selectedChannelCommunity = selectedChannel
@@ -163,7 +170,7 @@ export function CommunityMap() {
                     LANGUAGE
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    {LANG_OPTIONS.map((l) => (
+                    {languageOptions.map((l) => (
                       <button
                         key={l}
                         onClick={() => setSelectedLanguage(l)}
@@ -201,7 +208,7 @@ export function CommunityMap() {
                   <input
                     type="range"
                     min={0}
-                    max={20000}
+                    max={maxViewerFilter}
                     step={500}
                     value={minViewers}
                     onChange={(e) => setMinViewers(Number(e.target.value))}
@@ -467,6 +474,24 @@ export function CommunityMap() {
             {filteredChannels.length} nodes · {filteredEdges.length} edges
           </div>
         </div>
+
+        {filteredChannels.length === 0 && (
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center"
+            style={{ pointerEvents: "none" }}
+          >
+            <div
+              className="px-4 py-3 rounded-lg text-sm"
+              style={{
+                background: "rgba(24,24,27,0.9)",
+                border: "1px solid #2A2A2E",
+                color: "#848494",
+              }}
+            >
+              No channels match the current filters.
+            </div>
+          </div>
+        )}
 
         <NetworkGraph
           channels={filteredChannels}

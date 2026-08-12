@@ -555,9 +555,12 @@ class DataAggregator:
 if __name__ == "__main__":
     # Test the aggregator
     aggregator = DataAggregator("logs")
-    json_count, csv_count, vod_count = aggregator.load_all()
-    
-    print(f"Loaded {json_count} JSON snapshots, {csv_count} CSV rows, and {vod_count} VOD snapshots")
+    json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
+
+    print(
+        f"Loaded {json_count} JSON snapshots, {csv_count} CSV rows, "
+        f"{vod_count} VOD snapshots, and {parquet_count} Parquet snapshots"
+    )
     print("\nStatistics:")
     stats = aggregator.get_statistics()
     for key, value in stats.items():

@@ -19,6 +19,7 @@ export type Channel = {
   viewerHistory: { date: string; viewers: number }[];
   edgeCount: number;
   modularityScore: number;
+  layout?: { x: number; y: number };
 };
 
 export type Edge = {

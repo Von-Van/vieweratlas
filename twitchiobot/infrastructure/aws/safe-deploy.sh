@@ -82,6 +82,9 @@ PUSH_LATEST=${PUSH_LATEST:-false}
 COLLECTOR_DESIRED_COUNT=${COLLECTOR_DESIRED_COUNT:-1}
 ANALYSIS_DESIRED_COUNT=${ANALYSIS_DESIRED_COUNT:-0}
 VOD_COLLECTOR_DESIRED_COUNT=${VOD_COLLECTOR_DESIRED_COUNT:-0}
+DISCOVERY_DESIRED_COUNT=${DISCOVERY_DESIRED_COUNT:-0}
+WORKER_DESIRED_COUNT=${WORKER_DESIRED_COUNT:-0}
+BUDGET_LIMIT=${BUDGET_LIMIT:-50}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
@@ -131,11 +134,12 @@ info "S3 Prefix: $S3_PREFIX"
 info "ECS Cluster: $ECS_CLUSTER"
 info "Image Tag: $IMAGE_TAG"
 info "Push latest: $PUSH_LATEST"
-info "Desired counts: collector=$COLLECTOR_DESIRED_COUNT analysis=$ANALYSIS_DESIRED_COUNT vod=$VOD_COLLECTOR_DESIRED_COUNT"
+info "Desired counts: collector=$COLLECTOR_DESIRED_COUNT analysis=$ANALYSIS_DESIRED_COUNT vod=$VOD_COLLECTOR_DESIRED_COUNT discovery=$DISCOVERY_DESIRED_COUNT worker=$WORKER_DESIRED_COUNT"
 if [ -n "$SUBNET_IDS" ] && [ -n "$SECURITY_GROUP_ID" ]; then
     info "Network config supplied for service/schedule creation"
 else
-    warn "SUBNET_IDS and SECURITY_GROUP_ID are not fully set"
+    err "SUBNET_IDS and SECURITY_GROUP_ID are required for a production deployment"
+    exit 1
 fi
 
 echo ""
@@ -145,9 +149,16 @@ echo "  collection.max_collection_cycles: $MAX_COLLECTION_CYCLES"
 echo "  vod.max_vods_per_run: $MAX_VODS_PER_RUN"
 
 if [ -z "$ALERT_EMAIL" ]; then
-    warn "ALERT_EMAIL not set. Budget notifications will not be emailed."
+    err "ALERT_EMAIL is required so budget notifications have an owner"
+    exit 1
 else
     info "Budget alerts email: $ALERT_EMAIL"
+fi
+
+info "Running read-only deployment preflight..."
+if ! bash ./deploy.sh --preflight; then
+    err "Deployment preflight failed; no AWS resources were changed"
+    exit 1
 fi
 
 read -p "Continue with safe deployment? [y/N]: " -n 1 -r
@@ -158,7 +169,6 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 BUDGET_NAME="vieweratlas-monthly-limit"
-BUDGET_LIMIT=${BUDGET_LIMIT:-50}
 
 if [ -n "$ALERT_EMAIL" ]; then
     cat > /tmp/vieweratlas-budget.json <<JSON
@@ -232,7 +242,7 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
 {
   "Rules": [
     {
-      "Id": "DeleteOldRawLogs",
+      "ID": "DeleteOldRawLogs",
       "Status": "Enabled",
       "Filter": {"Prefix": "${S3_PREFIX}raw/snapshots/"},
       "Transitions": [
@@ -242,7 +252,7 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
       "Expiration": {"Days": 365}
     },
     {
-      "Id": "DeleteOldVODRaw",
+      "ID": "DeleteOldVODRaw",
       "Status": "Enabled",
       "Filter": {"Prefix": "${S3_PREFIX}raw/vod_chat/"},
       "Transitions": [
@@ -251,7 +261,7 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
       "Expiration": {"Days": 90}
     },
     {
-      "Id": "ArchiveProcessedData",
+      "ID": "ArchiveProcessedData",
       "Status": "Enabled",
       "Filter": {"Prefix": "${S3_PREFIX}curated/"},
       "Transitions": [
@@ -266,7 +276,12 @@ aws s3api put-bucket-lifecycle-configuration \
     --bucket "$S3_BUCKET" \
     --lifecycle-configuration file:///tmp/vieweratlas-lifecycle.json >/dev/null
 
-for log_group in "/ecs/${SERVICE_PREFIX}-collector" "/ecs/${SERVICE_PREFIX}-analysis" "/ecs/${SERVICE_PREFIX}-vod-collector"; do
+for log_group in \
+    "/ecs/${SERVICE_PREFIX}-collector" \
+    "/ecs/${SERVICE_PREFIX}-analysis" \
+    "/ecs/${SERVICE_PREFIX}-vod-collector" \
+    "/ecs/${SERVICE_PREFIX}-discovery" \
+    "/ecs/${SERVICE_PREFIX}-worker"; do
     aws logs create-log-group --log-group-name "$log_group" >/dev/null 2>&1 || true
     aws logs put-retention-policy --log-group-name "$log_group" --retention-in-days 7 >/dev/null
 done
@@ -286,6 +301,8 @@ PUSH_LATEST="$PUSH_LATEST" \
 COLLECTOR_DESIRED_COUNT="$COLLECTOR_DESIRED_COUNT" \
 ANALYSIS_DESIRED_COUNT="$ANALYSIS_DESIRED_COUNT" \
 VOD_COLLECTOR_DESIRED_COUNT="$VOD_COLLECTOR_DESIRED_COUNT" \
+DISCOVERY_DESIRED_COUNT="$DISCOVERY_DESIRED_COUNT" \
+WORKER_DESIRED_COUNT="$WORKER_DESIRED_COUNT" \
 bash ./deploy.sh
 
 info "Safe deployment completed"

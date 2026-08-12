@@ -43,7 +43,13 @@ AWS_REGION=${AWS_REGION:-}
 ECS_CLUSTER=${ECS_CLUSTER:-$_DEFAULT_CLUSTER}
 S3_BUCKET=${S3_BUCKET:-}
 S3_PREFIX=${S3_PREFIX:-vieweratlas/}
-S3_SNAPSHOT_PREFIX=${S3_SNAPSHOT_PREFIX:-${S3_PREFIX%/}/raw/snapshots/}
+S3_KEY_PREFIX="${S3_PREFIX%/}"
+if [ -n "$S3_KEY_PREFIX" ]; then
+    S3_KEY_PREFIX="${S3_KEY_PREFIX}/"
+fi
+S3_SNAPSHOT_PREFIX=${S3_SNAPSHOT_PREFIX:-${S3_KEY_PREFIX}raw/snapshots/}
+S3_FRONTEND_DATA_KEY=${S3_FRONTEND_DATA_KEY:-${S3_KEY_PREFIX}data/frontend-data.json}
+S3_ANALYSIS_RESULTS_KEY=${S3_ANALYSIS_RESULTS_KEY:-${S3_KEY_PREFIX}processed/analysis_results.json}
 S3_FRESHNESS_MAX_AGE_MINUTES=${S3_FRESHNESS_MAX_AGE_MINUTES:-180}
 LOG_LOOKBACK_MINUTES=${LOG_LOOKBACK_MINUTES:-30}
 
@@ -63,6 +69,9 @@ command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 [ -n "$AWS_REGION" ] || fail "AWS_REGION is required"
 [ -n "$ECS_CLUSTER" ] || fail "ECS_CLUSTER is required"
 [ -n "$S3_BUCKET" ] || fail "S3_BUCKET is required"
+
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
 
 info "Running smoke checks for cluster=$ECS_CLUSTER region=$AWS_REGION"
 
@@ -146,6 +155,13 @@ latest_snapshot_ts=$(aws s3api list-objects-v2 \
     --query 'sort_by(Contents,&LastModified)[-1].LastModified' \
     --output text 2>/dev/null || true)
 
+latest_snapshot_key=$(aws s3api list-objects-v2 \
+    --region "$AWS_REGION" \
+    --bucket "$S3_BUCKET" \
+    --prefix "$S3_SNAPSHOT_PREFIX" \
+    --query 'sort_by(Contents,&LastModified)[-1].Key' \
+    --output text 2>/dev/null || true)
+
 if [ -z "$latest_snapshot_ts" ] || [ "$latest_snapshot_ts" = "None" ]; then
     fail "No snapshot objects found at s3://${S3_BUCKET}/${S3_SNAPSHOT_PREFIX}"
 fi
@@ -166,5 +182,120 @@ if [ "$snapshot_age_seconds" -gt "$max_age_seconds" ]; then
     fail "Latest snapshot is too old (${snapshot_age_seconds}s > ${max_age_seconds}s)"
 fi
 info "Snapshot freshness OK (${snapshot_age_seconds}s old, threshold=${max_age_seconds}s)"
+
+snapshot_file="$tmp_dir/latest_snapshot.parquet"
+aws s3 cp "s3://${S3_BUCKET}/${latest_snapshot_key}" "$snapshot_file" --region "$AWS_REGION" >/dev/null
+
+python3 - "$snapshot_file" <<'PY'
+import json
+import sys
+
+try:
+    import pyarrow.parquet as pq
+except ImportError as exc:
+    raise SystemExit("pyarrow is required for smoke snapshot validation") from exc
+
+path = sys.argv[1]
+table = pq.read_table(path)
+if table.num_rows <= 0:
+    raise SystemExit("Latest snapshot parquet has no rows")
+
+columns = set(table.column_names)
+required = {"channel", "chatters_json"}
+missing = sorted(required - columns)
+if missing:
+    raise SystemExit(f"Latest snapshot missing columns: {', '.join(missing)}")
+
+chatters = table.column("chatters_json").to_pylist()
+non_empty_rows = 0
+for raw in chatters:
+    try:
+        parsed = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        raise SystemExit("Latest snapshot contains invalid chatters_json")
+    if isinstance(parsed, list) and parsed:
+        non_empty_rows += 1
+
+if non_empty_rows == 0:
+    raise SystemExit("Latest snapshot has no non-empty chatter rows")
+
+print(f"Snapshot parquet validated: {table.num_rows} rows, {non_empty_rows} with chatters")
+PY
+info "Snapshot content contains useful chatter data"
+
+analysis_file="$tmp_dir/analysis_results.json"
+frontend_file="$tmp_dir/frontend-data.json"
+aws s3 cp "s3://${S3_BUCKET}/${S3_ANALYSIS_RESULTS_KEY}" "$analysis_file" --region "$AWS_REGION" >/dev/null || \
+    fail "Analysis results missing at s3://${S3_BUCKET}/${S3_ANALYSIS_RESULTS_KEY}"
+aws s3 cp "s3://${S3_BUCKET}/${S3_FRONTEND_DATA_KEY}" "$frontend_file" --region "$AWS_REGION" >/dev/null || \
+    fail "Frontend data missing at s3://${S3_BUCKET}/${S3_FRONTEND_DATA_KEY}"
+
+python3 - "$analysis_file" "$frontend_file" <<'PY'
+import json
+import sys
+
+analysis_path, frontend_path = sys.argv[1], sys.argv[2]
+
+with open(analysis_path, "r", encoding="utf-8") as f:
+    analysis = json.load(f)
+if not isinstance(analysis, dict) or not analysis.get("statistics"):
+    raise SystemExit("Analysis results JSON is missing statistics")
+
+with open(frontend_path, "r", encoding="utf-8") as f:
+    payload = json.load(f)
+
+required_arrays = [
+    "communities",
+    "channels",
+    "edges",
+    "topCommunitiesBySize",
+    "mostConnectedChannels",
+]
+for key in required_arrays:
+    if not isinstance(payload.get(key), list):
+        raise SystemExit(f"Frontend payload missing array: {key}")
+
+if not isinstance(payload.get("overallStats"), dict):
+    raise SystemExit("Frontend payload missing overallStats")
+if not payload["channels"]:
+    raise SystemExit("Frontend payload has no channels")
+
+channel_ids = {channel.get("id") for channel in payload["channels"]}
+community_ids = {community.get("id") for community in payload["communities"]}
+if None in channel_ids or None in community_ids:
+    raise SystemExit("Frontend payload contains malformed channel/community IDs")
+
+for channel in payload["channels"]:
+    if channel.get("communityId") not in community_ids:
+        raise SystemExit(f"Channel references unknown community: {channel.get('id')}")
+    layout = channel.get("layout")
+    if layout is not None:
+        if not isinstance(layout, dict) or not all(isinstance(layout.get(axis), (int, float)) for axis in ("x", "y")):
+            raise SystemExit(f"Invalid layout for channel: {channel.get('id')}")
+
+for edge in payload["edges"]:
+    if edge.get("source") not in channel_ids or edge.get("target") not in channel_ids:
+        raise SystemExit("Frontend edge references an unknown channel")
+
+def contains_private_presence(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in {"chatters", "chatters_json"}:
+                return True
+            if contains_private_presence(child):
+                return True
+    elif isinstance(value, list):
+        return any(contains_private_presence(item) for item in value)
+    return False
+
+if contains_private_presence(payload):
+    raise SystemExit("Frontend payload leaks raw chatter fields")
+
+print(
+    "Frontend payload validated: "
+    f"{len(payload['channels'])} channels, {len(payload['edges'])} edges"
+)
+PY
+info "Analysis and frontend data validated"
 
 info "Smoke test passed"

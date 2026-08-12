@@ -80,10 +80,12 @@ class Visualizer:
                         labels: Dict[int, str] = None,
                         output_file: str = "community_graph.png",
                         show_labels: bool = True,
-                        edge_threshold: Optional[int] = None) -> None:
+                        edge_threshold: Optional[int] = None,
+                        label_top_n: int = 15,
+                        dpi: int = 300) -> None:
         """
         Create a static visualization using Matplotlib.
-        
+
         Args:
             graph: NetworkX graph
             partition: Dict mapping node -> community_id
@@ -91,6 +93,8 @@ class Visualizer:
             output_file: Path to save the image
             show_labels: Whether to label top nodes
             edge_threshold: Optional minimum edge weight to display
+            label_top_n: Number of largest nodes to label when show_labels is set
+            dpi: Output resolution for the saved PNG
         """
         logger.info(f"Creating static visualization: {output_file}")
         
@@ -168,10 +172,10 @@ class Visualizer:
         )
         
         # Add labels for largest nodes
-        if show_labels:
-            # Label top 15 largest nodes
+        if show_labels and label_top_n > 0:
+            # Label the N largest nodes
             node_size_map = {node: size for node, size in zip(display_graph.nodes(), node_sizes)}
-            top_nodes = sorted(node_size_map.items(), key=lambda x: x[1], reverse=True)[:15]
+            top_nodes = sorted(node_size_map.items(), key=lambda x: x[1], reverse=True)[:label_top_n]
             top_node_names = {node: node for node, _ in top_nodes}
             
             nx.draw_networkx_labels(
@@ -202,7 +206,7 @@ class Visualizer:
         ax.axis('off')
         plt.tight_layout()
         
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        plt.savefig(output_file, dpi=dpi, bbox_inches='tight')
         logger.info(f"Saved visualization to {output_file}")
         plt.close()
     
@@ -265,7 +269,9 @@ class Visualizer:
         
         # Configure physics
         net.toggle_physics(True)
-        net.show(output_file)
+        # write_html, not show(): show() defaults to notebook=True, which needs a
+        # notebook template this Network was not constructed with.
+        net.write_html(output_file, notebook=False)
         logger.info(f"Saved interactive visualization to {output_file}")
     
     def export_layout_csv(self,

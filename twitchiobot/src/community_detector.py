@@ -25,20 +25,28 @@ class CommunityDetector:
     Detects communities in the overlap graph using modularity optimization.
     """
     
-    def __init__(self, resolution: float = 1.0):
+    def __init__(self, resolution: float = 1.0, min_community_size: int = 1):
         """
         Initialize community detector.
-        
+
         Args:
             resolution: Resolution parameter for modularity optimization.
                        Higher values produce more fine-grained communities.
                        Default 1.0 is standard; try 0.5 for coarser, 2.0 for finer.
+            min_community_size: Discard communities with fewer than this many
+                       channels. Louvain routinely emits singletons and pairs that
+                       are noise rather than real audience structure. Default 1
+                       keeps everything.
         """
+        if min_community_size < 1:
+            raise ValueError("min_community_size must be at least 1")
         self.resolution = resolution
+        self.min_community_size = min_community_size
         self.partition: Dict[str, int] = {}
         self.communities: Dict[int, Set[str]] = {}
         self.modularity = 0.0
-        
+        self.discarded_channels: Set[str] = set()
+
     def detect_communities(self, graph: nx.Graph) -> Dict[str, int]:
         """
         Detect communities in the graph using Louvain algorithm.
@@ -72,13 +80,42 @@ class CommunityDetector:
             if comm_id not in self.communities:
                 self.communities[comm_id] = set()
             self.communities[comm_id].add(node)
-        
+
+        self.discarded_channels = set()
+        scored_graph = graph
+
+        if self.min_community_size > 1:
+            undersized = [
+                cid for cid, members in self.communities.items()
+                if len(members) < self.min_community_size
+            ]
+            for cid in undersized:
+                self.discarded_channels.update(self.communities.pop(cid))
+
+            if self.discarded_channels:
+                for node in self.discarded_channels:
+                    self.partition.pop(node, None)
+                # Modularity must be scored against the partition's own nodes.
+                scored_graph = graph.subgraph(self.partition.keys())
+                logger.info(
+                    "Discarded %d communities below min size %d (%d channels dropped)",
+                    len(undersized), self.min_community_size, len(self.discarded_channels)
+                )
+
+        if not self.partition:
+            logger.warning(
+                "No communities met the minimum size of %d. Returning empty partition.",
+                self.min_community_size
+            )
+            self.modularity = 0.0
+            return self.partition
+
         # Calculate modularity
-        self.modularity = community.modularity(self.partition, graph, weight='weight')
-        
+        self.modularity = community.modularity(self.partition, scored_graph, weight='weight')
+
         logger.info(f"Detected {len(self.communities)} communities. "
                    f"Modularity: {self.modularity:.4f}")
-        
+
         return self.partition
     
     def get_partition(self) -> Dict[str, int]:

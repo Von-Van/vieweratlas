@@ -11,7 +11,7 @@ Supports:
 """
 
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import Optional
 
@@ -98,6 +98,9 @@ class AnalysisConfig:
     # Export
     export_graph_csv: bool = True  # Export nodes/edges CSV
     save_analysis_json: bool = True  # Save full results JSON
+    frontend_max_channels: int = 1000  # Public frontend node cap
+    frontend_max_edges: int = 25000  # Public frontend edge cap
+    frontend_top_edges_per_channel: int = 25  # Public per-node edge cap
     
     def __post_init__(self):
         """Validate configuration."""
@@ -112,6 +115,12 @@ class AnalysisConfig:
             raise ValueError("min_community_size must be at least 1")
         if self.min_channel_viewers < 0:
             raise ValueError("min_channel_viewers cannot be negative")
+        if self.frontend_max_channels < 1:
+            raise ValueError("frontend_max_channels must be at least 1")
+        if self.frontend_max_edges < 1:
+            raise ValueError("frontend_max_edges must be at least 1")
+        if self.frontend_top_edges_per_channel < 1:
+            raise ValueError("frontend_top_edges_per_channel must be at least 1")
         
         # Create output directory if it doesn't exist
         Path(self.output_dir).mkdir(exist_ok=True)
@@ -331,20 +340,58 @@ def get_debug_config() -> PipelineConfig:
     )
 
 
+_SECTION_CLASSES = {
+    "collection": CollectionConfig,
+    "analysis": AnalysisConfig,
+    "vod": VODConfig,
+    "sqs": SQSConfig,
+}
+
+# Fields declared as tuples but naturally expressed as YAML lists.
+_TUPLE_FIELDS = {"static_viz_figsize"}
+
+
+def _build_section(section_name: str, config_class, values: dict):
+    """Instantiate a config dataclass from YAML values, rejecting unknown keys.
+
+    Silently ignoring an unrecognised key means a typo like `min_comunity_size`
+    reads as "configured" while doing nothing, so we fail loudly instead.
+    """
+    if not isinstance(values, dict):
+        raise ValueError(f"Config section '{section_name}' must be a mapping, got {type(values).__name__}")
+
+    known = {f.name for f in fields(config_class)}
+    unknown = set(values) - known
+    if unknown:
+        raise ValueError(
+            f"Unknown key(s) in '{section_name}' config section: {', '.join(sorted(unknown))}. "
+            f"Valid keys: {', '.join(sorted(known))}"
+        )
+
+    coerced = {
+        key: tuple(value) if key in _TUPLE_FIELDS and isinstance(value, list) else value
+        for key, value in values.items()
+    }
+    return config_class(**coerced)
+
+
 def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     """
     Load configuration from YAML file with environment variable overrides.
-    
+
+    Every field of CollectionConfig, AnalysisConfig, VODConfig and SQSConfig is
+    settable from YAML; unrecognised keys raise rather than being dropped.
+
     Args:
         yaml_path: Path to YAML config file
-        
+
     Returns:
         PipelineConfig with loaded settings
-        
+
     Raises:
         ImportError: If PyYAML not installed
         FileNotFoundError: If YAML file doesn't exist
-        ValueError: If YAML config invalid
+        ValueError: If YAML config invalid or contains unknown keys
     """
     if not HAS_YAML:
         raise ImportError(
@@ -379,65 +426,33 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     if os.getenv("LOG_LEVEL"):
         config_dict["log_level"] = os.getenv("LOG_LEVEL")
     
-    # Create configs from dict
-    collection_dict = config_dict.get("collection", {})
-    analysis_dict = config_dict.get("analysis", {})
-    vod_dict = config_dict.get("vod", {})
-    max_age_hours = vod_dict.get("max_age_hours")
-    if max_age_hours is None:
-        max_age_hours = vod_dict.get("max_age_days", 14) * 24
-    
-    collection_config = CollectionConfig(
-        logs_dir=collection_dict.get("logs_dir", "logs"),
-        collection_interval_minutes=collection_dict.get("collection_interval_minutes", 60),
-        batch_size=collection_dict.get("batch_size", 100),
-        duration_per_batch=collection_dict.get("duration_per_batch", 60),
-        top_channels_limit=collection_dict.get("top_channels_limit", 5000),
-        wait_for_hour_alignment=collection_dict.get("wait_for_hour_alignment", True),
-        max_runtime_hours=collection_dict.get("max_runtime_hours", 24),
-        max_collection_cycles=collection_dict.get("max_collection_cycles", 100)
-    )
-    
-    analysis_config = AnalysisConfig(
-        logs_dir=analysis_dict.get("logs_dir", "logs"),
-        output_dir=analysis_dict.get("output_dir", "community_analysis"),
-        min_channel_viewers=analysis_dict.get("min_channel_viewers", 1),
-        overlap_threshold=analysis_dict.get("overlap_threshold", 1),
-        weighting_mode=analysis_dict.get("weighting_mode", "shared_count"),
-        resolution=analysis_dict.get("resolution", 1.0),
-        min_community_size=analysis_dict.get("min_community_size", 2),
-        analysis_interval_cycles=analysis_dict.get("analysis_interval_cycles", 24)
-    )
-    
-    vod_config = VODConfig(
-        enabled=vod_dict.get("enabled", False),
-        bucket_len_s=vod_dict.get("bucket_len_s", 60),
-        raw_dir=vod_dict.get("raw_dir", "vod_raw"),
-        queue_file=vod_dict.get("queue_file", "vod_queue.json"),
-        persist_raw_chat=vod_dict.get("persist_raw_chat", False),
-        cli_path=vod_dict.get("cli_path", "TwitchDownloaderCLI"),
-        auto_discover=vod_dict.get("auto_discover", False),
-        vod_limit_per_channel=vod_dict.get("vod_limit_per_channel", 5),
-        max_age_hours=max_age_hours,
-        max_age_days=vod_dict.get("max_age_days", 14),
-        min_views=vod_dict.get("min_views", 0),
-        max_vods_per_run=vod_dict.get("max_vods_per_run", 50),
-        max_processing_hours=vod_dict.get("max_processing_hours", 4),
-        rate_limit_delay_s=vod_dict.get("rate_limit_delay_s", 2)
-    )
-    
-    return PipelineConfig(
-        collection=collection_config,
-        analysis=analysis_config,
-        vod=vod_config,
-        storage_type=config_dict.get("storage_type", "file"),
-        s3_bucket=config_dict.get("s3_bucket"),
-        s3_prefix=config_dict.get("s3_prefix", "vieweratlas/"),
-        s3_region=config_dict.get("s3_region", "us-east-1"),
-        log_level=config_dict.get("log_level", "INFO"),
-        log_format=config_dict.get("log_format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"),
-        verbose=config_dict.get("verbose", False)
-    )
+    if not isinstance(config_dict, dict):
+        raise ValueError(f"Config file {yaml_path} must contain a top-level mapping")
+
+    # Legacy fallback: derive max_age_hours from max_age_days when only the
+    # latter is given, before the section is validated against VODConfig.
+    vod_dict = dict(config_dict.get("vod") or {})
+    if "max_age_hours" not in vod_dict and "max_age_days" in vod_dict:
+        vod_dict["max_age_hours"] = vod_dict["max_age_days"] * 24
+    if vod_dict:
+        config_dict["vod"] = vod_dict
+
+    sections = {
+        name: _build_section(name, config_class, config_dict.get(name) or {})
+        for name, config_class in _SECTION_CLASSES.items()
+    }
+
+    # Whatever is not a section is a top-level PipelineConfig field.
+    top_level = {k: v for k, v in config_dict.items() if k not in _SECTION_CLASSES}
+    pipeline_fields = {f.name for f in fields(PipelineConfig)} - set(_SECTION_CLASSES)
+    unknown = set(top_level) - pipeline_fields
+    if unknown:
+        raise ValueError(
+            f"Unknown top-level key(s) in config: {', '.join(sorted(unknown))}. "
+            f"Valid keys: {', '.join(sorted(pipeline_fields | set(_SECTION_CLASSES)))}"
+        )
+
+    return PipelineConfig(**sections, **top_level)
 
 
 if __name__ == "__main__":

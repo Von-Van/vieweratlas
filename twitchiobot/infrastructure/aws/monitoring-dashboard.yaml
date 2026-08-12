@@ -2,7 +2,7 @@
 # Import into CloudWatch or Grafana
 
 dashboard_config:
-  name: "ViewerAtlas VOD Collection"
+  name: "ViewerAtlas-VOD-Collection"
   widgets:
     - type: "metric"
       title: "VOD Queue Status"
@@ -192,77 +192,3 @@ dashboard_config:
       alarm_actions:
         - "arn:aws:sns:${AWS_REGION}:${AWS_ACCOUNT_ID}:vieweratlas-alerts"
       treat_missing_data: "notBreaching"
-
-# Python code to emit CloudWatch metrics from VOD collector
-"""
-import boto3
-from datetime import datetime
-
-cloudwatch = boto3.client('cloudwatch', region_name='us-east-1')
-
-def emit_vod_metrics(queue_stats, processing_duration=None, success=True):
-    metrics = [
-        {
-            'MetricName': 'VODQueuePending',
-            'Value': queue_stats['pending'],
-            'Unit': 'Count',
-            'Timestamp': datetime.utcnow(),
-            'Dimensions': [
-                {'Name': 'Component', 'Value': 'VODCollector'}
-            ]
-        },
-        {
-            'MetricName': 'VODQueueProcessing',
-            'Value': queue_stats['processing'],
-            'Unit': 'Count',
-            'Timestamp': datetime.utcnow(),
-            'Dimensions': [
-                {'Name': 'Component', 'Value': 'VODCollector'}
-            ]
-        },
-        {
-            'MetricName': 'VODQueueCompleted',
-            'Value': queue_stats['completed'],
-            'Unit': 'Count',
-            'Timestamp': datetime.utcnow(),
-            'Dimensions': [
-                {'Name': 'Component', 'Value': 'VODCollector'}
-            ]
-        },
-        {
-            'MetricName': 'VODQueueFailed',
-            'Value': queue_stats['failed'],
-            'Unit': 'Count',
-            'Timestamp': datetime.utcnow(),
-            'Dimensions': [
-                {'Name': 'Component', 'Value': 'VODCollector'}
-            ]
-        }
-    ]
-    
-    if processing_duration is not None:
-        metrics.append({
-            'MetricName': 'VODProcessingDurationSeconds',
-            'Value': processing_duration,
-            'Unit': 'Seconds',
-            'Timestamp': datetime.utcnow(),
-            'Dimensions': [
-                {'Name': 'Component', 'Value': 'VODCollector'}
-            ]
-        })
-        
-        metrics.append({
-            'MetricName': 'VODsProcessedSuccess' if success else 'VODsProcessedFailure',
-            'Value': 1,
-            'Unit': 'Count',
-            'Timestamp': datetime.utcnow(),
-            'Dimensions': [
-                {'Name': 'Component', 'Value': 'VODCollector'}
-            ]
-        })
-    
-    cloudwatch.put_metric_data(
-        Namespace='ViewerAtlas',
-        MetricData=metrics
-    )
-"""

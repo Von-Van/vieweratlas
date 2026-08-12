@@ -25,6 +25,14 @@ function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function isLayout(value: unknown): boolean {
+  return (
+    isObject(value) &&
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.y)
+  );
+}
+
 function isCommunity(value: unknown): boolean {
   return (
     isObject(value) &&
@@ -69,6 +77,10 @@ function isChannel(value: unknown): boolean {
         isCount(overlap.shared),
     )
   ) {
+    return false;
+  }
+
+  if ("layout" in value && value.layout !== undefined && !isLayout(value.layout)) {
     return false;
   }
 

@@ -34,9 +34,12 @@ analysis:
   output_dir: "community_analysis"
   overlap_threshold: 10         # Drop very weak overlaps
   weighting_mode: "shared_count"  # Edge weight formula: 'shared_count' (shared viewer count, default)
-  min_community_size: 3
+  min_community_size: 3         # Discard communities smaller than 3 channels
   resolution: 1.2
   analysis_interval_cycles: 24  # Run analysis daily if continuous mode
+  frontend_max_channels: 1000   # Public browser graph cap; full analysis stays private
+  frontend_max_edges: 25000
+  frontend_top_edges_per_channel: 25
 
 # ============================================
 # VOD Collection - Disabled by default, guarded
