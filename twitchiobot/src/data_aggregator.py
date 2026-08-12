@@ -17,7 +17,7 @@ from collections import defaultdict
 from io import BytesIO
 from typing import Dict, Set, List, Tuple, Optional
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 # Import storage abstraction
 try:
@@ -33,6 +33,40 @@ _V2_BATCH_KEY = re.compile(
 )
 _ANALYZABLE_V2_SURVEY_STATES = {"complete", "complete_with_errors"}
 
+# Both layouts carry their collection day in the key, so the analysis window can
+# skip whole objects without downloading them.
+_V2_DATE_IN_KEY = re.compile(r"raw/snapshots/v2/date=(?P<date>\d{4}-\d{2}-\d{2})/")
+_LEGACY_DATE_IN_KEY = re.compile(
+    r"raw/snapshots/(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/"
+)
+
+
+def _snapshot_key_date(key: str) -> Optional[date]:
+    """Extract the collection day from a snapshot key, or None if absent.
+
+    Returning None means "cannot be dated", and undated keys are always kept —
+    a window must never silently drop data it failed to parse.
+    """
+    normalized = str(key).replace("\\", "/")
+
+    match = _V2_DATE_IN_KEY.search(normalized)
+    if match:
+        try:
+            return date.fromisoformat(match.group("date"))
+        except ValueError:
+            return None
+
+    match = _LEGACY_DATE_IN_KEY.search(normalized)
+    if match:
+        try:
+            return date(
+                int(match.group("year")), int(match.group("month")), int(match.group("day"))
+            )
+        except ValueError:
+            return None
+
+    return None
+
 
 class DataAggregator:
     """
@@ -44,20 +78,35 @@ class DataAggregator:
     - snapshots: List of raw snapshot data with timestamps
     """
     
-    def __init__(self, logs_dir: str = "logs", storage: Optional[BaseStorage] = None):
+    def __init__(
+        self,
+        logs_dir: str = "logs",
+        storage: Optional[BaseStorage] = None,
+        window_days: Optional[int] = None,
+    ):
         """
         Initialize aggregator with logs directory path or storage backend.
-        
+
         Args:
             logs_dir: Path to directory containing log files (used for FileStorage)
             storage: Optional storage backend (auto-detects if None)
+            window_days: Keep only snapshots from the most recent N collection
+                days. None unions everything retained, which lets graph density
+                climb as surveys accumulate.
         """
+        if window_days is not None and window_days < 1:
+            raise ValueError("window_days must be at least 1 or None")
+
         self.logs_dir = Path(logs_dir)
+        self.window_days = window_days
+        self.window_start: Optional[date] = None
+        self.window_end: Optional[date] = None
         self.channel_viewers: Dict[str, Set[str]] = defaultdict(set)
         self.channel_metadata: Dict[str, dict] = {}
         self.snapshots: List[dict] = []
         self.snapshot_source_counts: Dict[str, int] = defaultdict(int)
-        
+        self.skipped_outside_window = 0
+
         # Initialize storage backend
         if storage is not None:
             self.storage = storage
@@ -131,6 +180,45 @@ class DataAggregator:
             if isinstance(value, str) and value.strip()
         ]
         return snapshot
+
+    def _select_keys_in_window(self, keys: List[str]) -> List[str]:
+        """Narrow snapshot keys to the configured rolling window.
+
+        The window is anchored to the newest dated snapshot rather than to the
+        wall clock, so replays and backfills produce the same graph as the run
+        that first analysed that data. Undated keys are always retained.
+        """
+        if self.window_days is None or not keys:
+            return list(keys)
+
+        dated = [(key, _snapshot_key_date(key)) for key in keys]
+        observed = [day for _, day in dated if day is not None]
+        if not observed:
+            logger.warning(
+                "analysis_window_days=%d set, but no snapshot key carried a date; "
+                "analysing all %d objects",
+                self.window_days, len(keys)
+            )
+            return list(keys)
+
+        anchor = max(observed)
+        start = anchor - timedelta(days=self.window_days - 1)
+        self.window_start, self.window_end = start, anchor
+
+        selected = [key for key, day in dated if day is None or day >= start]
+        self.skipped_outside_window = len(keys) - len(selected)
+
+        logger.info(
+            "Analysis window: %s..%s (%d days) — %d of %d snapshot objects retained",
+            start.isoformat(), anchor.isoformat(), self.window_days,
+            len(selected), len(keys)
+        )
+        if self.skipped_outside_window:
+            logger.info(
+                "Excluded %d snapshot objects older than %s",
+                self.skipped_outside_window, start.isoformat()
+            )
+        return selected
 
     def _v2_session_is_analyzable(
         self, key: str, manifest_cache: Dict[str, bool]
@@ -388,8 +476,8 @@ class DataAggregator:
         count = 0
 
         if self.storage:
-            parquet_keys = self.storage.list_files(
-                prefix="raw/snapshots", suffix=".parquet"
+            parquet_keys = self._select_keys_in_window(
+                self.storage.list_files(prefix="raw/snapshots", suffix=".parquet")
             )
             manifest_cache: Dict[str, bool] = {}
             for key in parquet_keys:
@@ -412,7 +500,17 @@ class DataAggregator:
             # Local filesystem fallback
             search_dir = self.logs_dir / "raw" / "snapshots"
             if search_dir.exists():
-                parquet_files = list(search_dir.rglob("*.parquet"))
+                # Window on the storage-relative key so local and S3 layouts
+                # resolve the same collection day.
+                parquet_files = [
+                    Path(candidate) for candidate in self._select_keys_in_window(
+                        [
+                            str(path.relative_to(self.logs_dir)).replace("\\", "/")
+                            for path in sorted(search_dir.rglob("*.parquet"))
+                        ]
+                    )
+                ]
+                parquet_files = [self.logs_dir / rel for rel in parquet_files]
                 manifest_cache: Dict[Path, bool] = {}
                 for parquet_file in parquet_files:
                     try:
@@ -516,7 +614,16 @@ class DataAggregator:
             "total_unique_viewers_per_channel": total_unique_viewers,
             "total_unique_viewers_across_all": len(all_viewers),
             "top_channels_by_viewers": channel_sizes[:10],
-            "snapshot_sources": dict(self.snapshot_source_counts)
+            "snapshot_sources": dict(self.snapshot_source_counts),
+            "analysis_window_days": self.window_days,
+            "window_start": self.window_start.isoformat() if self.window_start else None,
+            "window_end": self.window_end.isoformat() if self.window_end else None,
+            # Fills the frontend's existing collectionPeriod field; no schema change.
+            "collection_period": (
+                f"{self.window_start:%b %d} – {self.window_end:%b %d, %Y}"
+                if self.window_start and self.window_end
+                else f"as of {datetime.now():%b %d, %Y}"
+            ),
         }
     
     def filter_channels_by_size(self, min_viewers: int = 1) -> Dict[str, Set[str]]:

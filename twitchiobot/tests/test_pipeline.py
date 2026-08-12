@@ -15,6 +15,7 @@ import sys
 import tempfile
 import shutil
 import asyncio
+from datetime import date
 from pathlib import Path
 from collections import defaultdict
 
@@ -1522,6 +1523,128 @@ class TestParquetSnapshots:
         agg = DataAggregator(str(tmp_path), storage=storage)
         assert agg.load_parquet_snapshots() == 0
         assert "must_not_be_loaded" not in agg.get_channel_viewers()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Analysis Window Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _v2_batch_bytes(channel, chatters):
+    import pandas as pd
+    from io import BytesIO
+
+    output = BytesIO()
+    pd.DataFrame(
+        [
+            {
+                "schema_version": 2,
+                "channel": channel,
+                "collection_status": "completed",
+                "chatters_json": json.dumps(chatters),
+                "chatter_ids_json": json.dumps([str(i) for i in range(len(chatters))]),
+            }
+        ]
+    ).to_parquet(output, index=False, engine="pyarrow")
+    return output.getvalue()
+
+
+def _survey_storage(days):
+    """Build storage holding one completed v2 survey per given date string."""
+    parquet, manifests = {}, {}
+    for day in days:
+        prefix = f"raw/snapshots/v2/date={day}/session=s{day}"
+        parquet[f"{prefix}/batch=01.parquet"] = _v2_batch_bytes(f"ch_{day}", ["alice"])
+        manifests[f"{prefix}/manifest.json"] = {"status": "complete"}
+    storage = MockS3Storage(parquet_data=parquet)
+    storage._json_uploads.update(manifests)
+    return storage
+
+
+class TestAnalysisWindow:
+    """Without a window, viewer sets only grow and graph density climbs over time."""
+
+    ALL_DAYS = ["2026-05-01", "2026-06-15", "2026-08-10", "2026-08-11", "2026-08-12"]
+
+    def test_no_window_loads_every_retained_survey(self, tmp_path):
+        agg = DataAggregator(str(tmp_path), storage=_survey_storage(self.ALL_DAYS))
+        assert agg.load_parquet_snapshots() == 5
+        assert agg.window_start is None and agg.window_end is None
+
+    def test_window_anchors_to_newest_snapshot_not_wall_clock(self, tmp_path):
+        """Replays and backfills must reproduce the original graph."""
+        agg = DataAggregator(
+            str(tmp_path), storage=_survey_storage(self.ALL_DAYS), window_days=3
+        )
+        assert agg.load_parquet_snapshots() == 3
+        assert agg.window_end == date(2026, 8, 12)
+        assert agg.window_start == date(2026, 8, 10)
+        channels = agg.get_channel_viewers()
+        assert set(channels) == {"ch_2026-08-10", "ch_2026-08-11", "ch_2026-08-12"}
+
+    def test_window_boundary_is_inclusive(self, tmp_path):
+        """window_days=N spans N distinct days, anchor included."""
+        agg = DataAggregator(
+            str(tmp_path), storage=_survey_storage(self.ALL_DAYS), window_days=1
+        )
+        assert agg.load_parquet_snapshots() == 1
+        assert agg.window_start == agg.window_end == date(2026, 8, 12)
+
+    def test_window_larger_than_data_keeps_everything(self, tmp_path):
+        agg = DataAggregator(
+            str(tmp_path), storage=_survey_storage(self.ALL_DAYS), window_days=3650
+        )
+        assert agg.load_parquet_snapshots() == 5
+
+    def test_window_applies_to_legacy_date_partitioned_keys(self, tmp_path):
+        import pandas as pd
+        from io import BytesIO
+
+        parquet = {}
+        for day in ["2026/08/01", "2026/08/12"]:
+            output = BytesIO()
+            pd.DataFrame(
+                [{"channel": f"legacy_{day.replace('/', '')}", "chatters_json": '["bob"]'}]
+            ).to_parquet(output, index=False, engine="pyarrow")
+            parquet[f"raw/snapshots/{day}/cycle_1.parquet"] = output.getvalue()
+
+        agg = DataAggregator(
+            str(tmp_path), storage=MockS3Storage(parquet_data=parquet), window_days=2
+        )
+        assert agg.load_parquet_snapshots() == 1
+        assert "legacy_20260812" in agg.get_channel_viewers()
+
+    def test_undated_keys_are_never_dropped_by_the_window(self, tmp_path):
+        """A window must not silently discard data whose date it cannot parse."""
+        storage = _survey_storage(["2026-08-12"])
+        storage._parquet["raw/snapshots/oddball.parquet"] = _v2_batch_bytes(
+            "undated_channel", ["carol"]
+        )
+        agg = DataAggregator(str(tmp_path), storage=storage, window_days=1)
+        agg.load_parquet_snapshots()
+        assert "undated_channel" in agg.get_channel_viewers()
+
+    def test_window_reported_in_statistics_and_collection_period(self, tmp_path):
+        agg = DataAggregator(
+            str(tmp_path), storage=_survey_storage(self.ALL_DAYS), window_days=3
+        )
+        agg.load_parquet_snapshots()
+        stats = agg.get_statistics()
+        assert stats["analysis_window_days"] == 3
+        assert stats["window_start"] == "2026-08-10"
+        assert stats["window_end"] == "2026-08-12"
+        assert stats["collection_period"] == "Aug 10 – Aug 12, 2026"
+
+    def test_invalid_window_rejected(self, tmp_path):
+        with pytest.raises(ValueError):
+            DataAggregator(str(tmp_path), window_days=0)
+        with pytest.raises(ValueError):
+            AnalysisConfig(analysis_window_days=0)
+
+    def test_window_is_configurable_from_yaml(self, tmp_path):
+        yaml_file = tmp_path / "window.yaml"
+        yaml_file.write_text("analysis:\n  analysis_window_days: 30\n")
+        assert load_config_from_yaml(str(yaml_file)).analysis.analysis_window_days == 30
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

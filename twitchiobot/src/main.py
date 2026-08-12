@@ -295,7 +295,11 @@ class PipelineRunner:
     
     def _step_aggregate(self) -> Optional[DataAggregator]:
         """Aggregation step."""
-        aggregator = DataAggregator(self.config.analysis.logs_dir, storage=self.storage)
+        aggregator = DataAggregator(
+            self.config.analysis.logs_dir,
+            storage=self.storage,
+            window_days=self.config.analysis.analysis_window_days,
+        )
         json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
         self.logger.info(
             f"Loaded {json_count} JSON + {csv_count} CSV + {vod_count} VOD + {parquet_count} Parquet snapshots"

@@ -101,6 +101,10 @@ class AnalysisConfig:
     # Data filtering
     min_channel_viewers: int = 1  # Minimum unique viewers for a channel to be included
     min_user_appearances: int = 1  # Minimum channels a user must appear in
+    # Rolling window of survey days to analyse (30/60/90 are the intended values).
+    # None unions every retained snapshot, which makes overlap_threshold drift as
+    # data accumulates: viewer sets only grow, so graph density climbs over time.
+    analysis_window_days: Optional[int] = None
     
     # Graph building
     overlap_threshold: int = 1  # Minimum shared viewers for an edge (TwitchAtlas used 300)
@@ -142,6 +146,8 @@ class AnalysisConfig:
             raise ValueError("min_community_size must be at least 1")
         if self.min_channel_viewers < 0:
             raise ValueError("min_channel_viewers cannot be negative")
+        if self.analysis_window_days is not None and self.analysis_window_days < 1:
+            raise ValueError("analysis_window_days must be at least 1 or None")
         if self.frontend_max_channels < 1:
             raise ValueError("frontend_max_channels must be at least 1")
         if self.frontend_max_edges < 1:
