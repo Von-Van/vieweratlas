@@ -1,8 +1,7 @@
 # Third-Party Notices
 
-ViewerAtlas includes adapted component source from
-[shadcn/ui](https://ui.shadcn.com/), distributed under the
-[MIT License](https://github.com/shadcn-ui/ui/blob/main/LICENSE.md).
+ViewerAtlas builds its interface directly on React, React Router, Recharts,
+Tailwind CSS and Lucide icons. No vendored third-party component source is
+included in this repository.
 
-Other third-party dependencies and their licenses are listed in
-`package-lock.json`.
+Third-party dependencies and their licenses are listed in `package-lock.json`.
