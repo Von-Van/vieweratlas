@@ -20,6 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy all application code
 COPY src/*.py ./
+# Present so the task command can be switched to `analyze config.yaml` without
+# rebuilding the image contract. The default command uses the rigorous preset.
+COPY config/config.yaml ./config.yaml
 
 # Create output directory
 RUN mkdir -p /app/community_analysis /app/logs && chown -R app:app /app

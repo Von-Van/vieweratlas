@@ -323,8 +323,11 @@ def get_rigorous_config() -> PipelineConfig:
             batch_size=100
         ),
         analysis=AnalysisConfig(
+            # This preset is what the scheduled analysis task runs
+            # (`main.py analyze rigorous`), so production tuning lives here.
+            analysis_window_days=30,  # Bound the union; without it density climbs daily
             min_channel_viewers=10,  # Only include channels with 10+ viewers
-            overlap_threshold=300,  # TwitchAtlas threshold for meaningful connections
+            overlap_threshold=300,  # TwitchAtlas threshold; re-tune against real surveys
             resolution=1.0,
             min_community_size=10,  # Communities of 10+ channels
             label_top_n_nodes=20
