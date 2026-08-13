@@ -62,6 +62,9 @@ ASSIGN_PUBLIC_IP=${ASSIGN_PUBLIC_IP:-ENABLED}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
+# Must match the task definitions' architecture. They set no runtimePlatform,
+# so ECS Fargate expects linux/amd64 regardless of the build machine.
+BUILD_PLATFORM=${BUILD_PLATFORM:-linux/amd64}
 DYNAMODB_STATE_TABLE=${DYNAMODB_STATE_TABLE:-vieweratlas-collection-state}
 LOG_RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
 BUDGET_LIMIT=${BUDGET_LIMIT:-50}
@@ -340,8 +343,12 @@ build_and_push() {
     local image_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/vieweratlas-$service:$IMAGE_TAG"
     local latest_uri="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/vieweratlas-$service:latest"
 
-    log_info "Building $service image..."
-    docker build -t "vieweratlas-$service:$IMAGE_TAG" -f "../docker/$dockerfile" ../..
+    log_info "Building $service image for $BUILD_PLATFORM..."
+    # Fargate task definitions here have no runtimePlatform, so ECS expects
+    # linux/amd64. Building on an Apple Silicon Mac would otherwise produce an
+    # arm64-only manifest and fail the pull with CannotPullContainerError.
+    docker build --platform "$BUILD_PLATFORM" \
+        -t "vieweratlas-$service:$IMAGE_TAG" -f "../docker/$dockerfile" ../..
 
     log_info "Tagging $service image..."
     docker tag "vieweratlas-$service:$IMAGE_TAG" "$image_uri"

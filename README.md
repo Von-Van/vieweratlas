@@ -27,15 +27,72 @@ with the Louvain algorithm, and exports an explorable React frontend.
 
 ## Architecture
 
+Collection, analysis, and delivery are three independent stages joined only by
+S3. Nothing runs continuously: EventBridge Scheduler starts a one-shot Fargate
+task, it exits, and the private data it writes is never served to the browser.
+
 ```mermaid
-flowchart LR
-    Twitch["Twitch EventSub + Helix API"] --> Collect["Scheduled survey task"]
-    Collect --> Private["Private Parquet presence snapshots"]
-    Private --> Graph["NetworkX overlap graph"]
-    Graph --> Louvain["Louvain community detection"]
-    Louvain --> Export["Aggregate frontend-data.json"]
-    Export --> UI["React community explorer"]
+flowchart TB
+    subgraph twitch["Twitch"]
+        helix["Helix API<br/><i>top live channels</i>"]
+        eventsub["EventSub WebSocket<br/><i>channel.chat.message</i>"]
+    end
+
+    subgraph collect["Collection · 6 AM / 2 PM / 10 PM ET"]
+        sched["EventBridge Scheduler<br/><i>cron(0 6,14,22 * * ? *)</i>"]
+        survey["Fargate survey task<br/><i>0.5 vCPU · 2h timeout</i>"]
+        lease[("DynamoDB lease<br/><i>overlap guard</i>")]
+        secret[["Secrets Manager<br/><i>rotating bot token</i>"]]
+    end
+
+    subgraph store["S3 data lake · private"]
+        raw[("raw/snapshots/v2/<br/><i>Parquet · 90-day expiry</i>")]
+        manifest[("survey manifest<br/><i>commit record</i>")]
+    end
+
+    subgraph analyse["Analysis · 1 AM ET"]
+        asched["EventBridge Scheduler<br/><i>cron(0 1 * * ? *)</i>"]
+        agg["Aggregate<br/><i>rolling N-day window</i>"]
+        graph["NetworkX overlap graph"]
+        louvain["Louvain communities"]
+    end
+
+    subgraph serve["Delivery · public"]
+        json[("data/frontend-data.json<br/><i>channel-level aggregates</i>")]
+        cdn{{"CloudFront<br/><i>OAC · security headers</i>"}}
+        ui["React explorer"]
+    end
+
+    helix -->|"freeze top 1,200"| survey
+    eventsub -->|"12 x 100 channels<br/>5-min windows"| survey
+    sched --> survey
+    secret -.->|"user:read:chat"| survey
+    survey <-.-> lease
+    survey -->|"1 file per batch"| raw
+    survey --> manifest
+
+    asched --> agg
+    raw --> agg
+    manifest -.->|"skips incomplete surveys"| agg
+    agg --> graph --> louvain --> json
+    json --> cdn --> ui
+
+    classDef private fill:#2d1b4e,stroke:#9147FF,color:#fff
+    classDef public fill:#0f3d3e,stroke:#00E5CC,color:#fff
+    class raw,manifest,lease,secret private
+    class json,cdn,ui public
 ```
+
+Purple nodes hold private data — observed chatter IDs never leave them. Teal
+nodes are public: only channel-level aggregates cross that boundary. See
+[Public Data Boundary](#public-data-boundary).
+
+| Stage | AWS | Cadence |
+| --- | --- | --- |
+| Collect | EventBridge Scheduler → Fargate, DynamoDB lease, Secrets Manager | 3x daily, ~80 min |
+| Store | S3 (versioned, private, 90-day expiry) | per batch |
+| Analyse | EventBridge Scheduler → Fargate | daily, 1 AM ET |
+| Serve | S3 + CloudFront (Origin Access Control) | on deploy |
 
 ## What It Does
 
