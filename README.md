@@ -53,7 +53,7 @@ flowchart TB
     subgraph analyse["Analysis · 1 AM ET"]
         asched["EventBridge Scheduler<br/><i>cron(0 1 * * ? *)</i>"]
         agg["Aggregate<br/><i>rolling N-day window</i>"]
-        graph["NetworkX overlap graph"]
+        overlap["NetworkX overlap graph"]
         louvain["Louvain communities"]
     end
 
@@ -74,7 +74,7 @@ flowchart TB
     asched --> agg
     raw --> agg
     manifest -.->|"skips incomplete surveys"| agg
-    agg --> graph --> louvain --> json
+    agg --> overlap --> louvain --> json
     json --> cdn --> ui
 
     classDef private fill:#2d1b4e,stroke:#9147FF,color:#fff
