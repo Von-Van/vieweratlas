@@ -99,7 +99,9 @@ privacy boundary before activation.
 2. Confirm the 90-day/seven-day lifecycle rules and seven-day log retention.
 3. Use the guided authorization helper instead of copying tokens into files.
 4. Pause schedules during incidents or untested updates.
-5. Investigate `SURVEY_PARTIAL` alarms and verify recovery with a controlled
+5. Investigate `SURVEY_PARTIAL` alarms (a survey that stopped early; routine
+   per-channel attrition reports `SURVEY_COMPLETED_WITH_ERRORS` instead) and
+   verify recovery with a controlled
    survey, then run `smoke-test.sh` after the following 1:00 AM analysis.
 6. Honor applicable deletion requirements and review Twitch terms and privacy
    obligations before expanding collection.

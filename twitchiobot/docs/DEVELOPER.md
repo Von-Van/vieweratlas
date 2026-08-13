@@ -142,7 +142,8 @@ runs as a 0.5-vCPU, 1-GB Fargate task and stays stopped between scheduled
 surveys. The application-level DynamoDB lease rejects accidental overlap.
 
 Identity-free milestones are `SURVEY_STARTED`, `BATCH_COMPLETED`,
-`SURVEY_COMPLETED`, `SURVEY_PARTIAL`, `ANALYSIS_COMPLETED`, and
+`SURVEY_COMPLETED`, `SURVEY_COMPLETED_WITH_ERRORS`, `SURVEY_PARTIAL`,
+`ANALYSIS_COMPLETED`, and
 `ANALYSIS_FAILED`. Monitoring uses these milestones instead of a long-running
 service heartbeat. The strict smoke test additionally requires both analysis
 objects to be newer than the latest completed survey manifest.

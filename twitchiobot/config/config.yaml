@@ -33,6 +33,10 @@ collection:
 analysis:
   logs_dir: "logs"
   output_dir: "community_analysis"
+  # Rolling window of survey days to analyse. Without this the graph unions
+  # every retained survey, so viewer sets only grow and density climbs until a
+  # fixed overlap_threshold stops being selective.
+  analysis_window_days: 30
   overlap_threshold: 10         # Drop very weak overlaps
   weighting_mode: "shared_count"  # Edge weight formula: 'shared_count' (shared viewer count, default)
   min_community_size: 3         # Discard communities smaller than 3 channels

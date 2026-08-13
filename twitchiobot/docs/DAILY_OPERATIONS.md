@@ -55,7 +55,9 @@ aws logs tail /ecs/vieweratlas-collector \
 ```
 
 Healthy logs contain `SURVEY_STARTED`, twelve `BATCH_COMPLETED` lines for a full
-cohort, and `SURVEY_COMPLETED`. `SURVEY_PARTIAL`, authentication errors, or a
+cohort, and `SURVEY_COMPLETED` (or `SURVEY_COMPLETED_WITH_ERRORS` when some
+channels dropped out; that survey is still analysed). `SURVEY_PARTIAL`,
+authentication errors, or a
 survey running longer than two hours require investigation.
 
 ## Check the private survey files

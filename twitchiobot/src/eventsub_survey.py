@@ -831,7 +831,14 @@ class EventSubSurveyRunner:
             self._manifest["status"] = status
             self._manifest["completed_at"] = _iso_utc(self._now())
             self._upload_manifest()
-            event = "SURVEY_COMPLETED" if status == "complete" else "SURVEY_PARTIAL"
+            # A survey that finished every batch but lost individual channels is
+            # still analysable, so it must not share the SURVEY_PARTIAL milestone
+            # used by _mark_partial for timeouts, shutdowns and unexpected errors.
+            event = (
+                "SURVEY_COMPLETED"
+                if status == "complete"
+                else "SURVEY_COMPLETED_WITH_ERRORS"
+            )
             logger.info(
                 "%s session=%s completed=%d failed=%d",
                 event,

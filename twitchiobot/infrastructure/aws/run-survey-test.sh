@@ -34,6 +34,10 @@ else
     SERVICE_PREFIX=${SERVICE_PREFIX:-vieweratlas-${ENVIRONMENT}}
 fi
 MODE=${1:-small}
+# Percentage of the frozen cohort allowed to fail before the test is rejected.
+# A 1,200-channel survey runs ~80 minutes, so some streams end mid-run; that is
+# expected attrition, not a broken collector. Set to 0 to demand a perfect run.
+MAX_FAILURE_PERCENT=${MAX_FAILURE_PERCENT:-2}
 
 case "$MODE" in
     small)
@@ -215,13 +219,49 @@ if [ "$exit_code" != "0" ]; then
     exit 1
 fi
 
-if grep -q "SURVEY_PARTIAL" "$milestones_file" || \
-   [ "$(grep -c "SURVEY_COMPLETED" "$milestones_file" || true)" -ne 1 ]; then
-    echo "[ERROR] The task stopped, but the survey did not finish cleanly." >&2
-    echo "A successful test must contain exactly one SURVEY_COMPLETED and no SURVEY_PARTIAL." >&2
+read_log_hint() {
     echo "Read the complete safe log with:" >&2
     echo "aws logs get-log-events --region $AWS_REGION --log-group-name /ecs/${SERVICE_PREFIX}-collector --log-stream-name $log_stream --start-from-head" >&2
+}
+
+# A genuine partial (timeout, shutdown, unexpected error) is never acceptable:
+# its manifest is not analysable and the survey stopped early.
+if grep -q "SURVEY_PARTIAL" "$milestones_file"; then
+    echo "[ERROR] The survey stopped early and its manifest is not analysable." >&2
+    read_log_hint
     exit 1
 fi
 
-echo "[INFO] Survey test completed successfully."
+terminal_line=$(grep -E "SURVEY_COMPLETED(_WITH_ERRORS)? " "$milestones_file" | tail -1 || true)
+terminal_count=$(grep -cE "SURVEY_COMPLETED(_WITH_ERRORS)? " "$milestones_file" || true)
+
+if [ -z "$terminal_line" ] || [ "$terminal_count" -ne 1 ]; then
+    echo "[ERROR] Expected exactly one terminal survey milestone, found ${terminal_count}." >&2
+    read_log_hint
+    exit 1
+fi
+
+# Channels drop out of a frozen cohort as streams end, so a long survey rarely
+# reaches 100%. Gate on the failure rate instead of demanding perfection.
+survey_completed=$(sed -n 's/.*completed=\([0-9]*\).*/\1/p' <<< "$terminal_line")
+survey_failed=$(sed -n 's/.*failed=\([0-9]*\).*/\1/p' <<< "$terminal_line")
+survey_completed=${survey_completed:-0}
+survey_failed=${survey_failed:-0}
+survey_planned=$((survey_completed + survey_failed))
+
+if [ "$survey_failed" -gt 0 ]; then
+    if [ "$survey_planned" -eq 0 ] || ! awk -v f="$survey_failed" -v p="$survey_planned" \
+        -v m="$MAX_FAILURE_PERCENT" 'BEGIN { exit !((f * 100.0 / p) <= m) }'; then
+        echo "[ERROR] ${survey_failed} of ${survey_planned} channels failed, above the" \
+             "${MAX_FAILURE_PERCENT}% limit." >&2
+        echo "Raise MAX_FAILURE_PERCENT only if the failures are expected attrition." >&2
+        read_log_hint
+        exit 1
+    fi
+    echo "[WARN] ${survey_failed} of ${survey_planned} channels failed" \
+         "(within the ${MAX_FAILURE_PERCENT}% limit)."
+    echo "[WARN] Inspect them with: python3 ../../scripts/inspect_survey.py <session-s3-uri>"
+fi
+
+echo "[INFO] Survey test completed successfully" \
+     "(${survey_completed} collected, ${survey_failed} failed)."

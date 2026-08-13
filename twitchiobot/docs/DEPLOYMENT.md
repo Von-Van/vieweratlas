@@ -139,9 +139,12 @@ task, waits for it to finish, and prints the important log milestones:
 ./run-survey-test.sh small
 ```
 
-Success includes `SURVEY_STARTED`, `BATCH_COMPLETED`, and exactly one
-`SURVEY_COMPLETED`. The helper rejects `SURVEY_PARTIAL` and a task without the
-completion milestone. The logs contain counts and session IDs, not chatter
+Success includes `SURVEY_STARTED`, `BATCH_COMPLETED`, and exactly one terminal
+milestone: `SURVEY_COMPLETED`, or `SURVEY_COMPLETED_WITH_ERRORS` when some
+channels dropped out. The helper rejects `SURVEY_PARTIAL` (a survey that stopped
+early) and a task without any terminal milestone. Individual channel failures are
+allowed up to `MAX_FAILURE_PERCENT` (default 2%), because streams end during a
+long survey and the frozen cohort is never backfilled. The logs contain counts and session IDs, not chatter
 names or messages.
 
 Next, test one full production-sized group of 100 channels for five minutes:
