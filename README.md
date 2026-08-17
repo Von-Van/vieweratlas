@@ -106,6 +106,43 @@ nodes are public: only channel-level aggregates cross that boundary. See
 6. Detects and labels communities.
 7. Exports PNG, HTML, CSV, JSON, and frontend-ready aggregate artifacts.
 
+## Methodology and Its Limits
+
+**What is measured.** A survey subscribes to `channel.chat.message` for a batch
+of channels and records the unique authors who send at least one message during
+a shared five-minute window. Lurkers are invisible to this method, and message
+text is never stored. Every number the site reports as "shared chatters" is a
+count of *observed message authors*, not of viewers.
+
+**Why that is a lower bound.** Each survey samples a small slice of a channel's
+audience. Intersecting two sparse samples recovers roughly the product of their
+sampling fractions, so a measured overlap is far smaller than the true shared
+audience and grows super-linearly as surveys accumulate. Comparisons are
+meaningful between channels in the same run; absolute values are not audience
+estimates.
+
+**Edge weight.** `weighting_mode` selects the formula:
+
+| mode | weight | use |
+| --- | --- | --- |
+| `shared_count` | \|A ∩ B\| | raw intersection; favours channels sampled more often |
+| `jaccard` | \|A ∩ B\| / \|A ∪ B\| | size-normalised similarity |
+| `overlap_coef` | \|A ∩ B\| / min(\|A\|,\|B\|) | how much of the *smaller* audience is shared |
+
+Survey cohorts churn, so channels are sampled at very different depths. A raw
+count partly measures sampling effort, which is why the normalised modes exist
+and why `min_channel_observations` can exclude channels seen only once or twice.
+
+Whatever weight drives the graph, the public payload always carries the measured
+integer count, so the published number stays a real observation rather than a
+model output.
+
+**Known limitations.** Chatters are deduplicated by login rather than by the
+stable Twitch ID already captured, so a rename counts twice.
+`max_viewer_channel_degree` drops very high-degree chatters entirely instead of
+down-weighting them. Neither the threshold nor the community-size floor has yet
+been calibrated against a full retention window.
+
 ## Public Data Boundary
 
 Raw presence snapshots contain Twitch author IDs and logins and must remain private.

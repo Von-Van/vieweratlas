@@ -346,6 +346,19 @@ class PipelineRunner:
                 f"(seen in min {self.config.analysis.min_user_appearances} channels)"
             )
 
+        # Channels sampled once contribute a single window; drop them before
+        # any size or overlap filtering so thin cohorts do not distort weights.
+        if self.config.analysis.min_channel_observations > 1:
+            original_count = len(channel_viewers)
+            keep = aggregator.filter_channels_by_observations(
+                self.config.analysis.min_channel_observations
+            )
+            channel_viewers = {c: v for c, v in channel_viewers.items() if c in keep}
+            self.logger.info(
+                f"Filtered channels: {original_count} -> {len(channel_viewers)} "
+                f"(min {self.config.analysis.min_channel_observations} observations)"
+            )
+
         # Apply filtering if configured
         if self.config.analysis.min_channel_viewers > 1:
             original_count = len(channel_viewers)
@@ -359,6 +372,8 @@ class PipelineRunner:
         builder = GraphBuilder(
             overlap_threshold=self.config.analysis.overlap_threshold,
             include_isolated_nodes=self.config.analysis.include_isolated_nodes,
+            weighting_mode=self.config.analysis.weighting_mode,
+            normalized_overlap_threshold=self.config.analysis.normalized_overlap_threshold,
         )
         graph = builder.build_graph(channel_viewers, channel_metadata)
         

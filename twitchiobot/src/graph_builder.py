@@ -23,28 +23,65 @@ class GraphBuilder:
     - Edge Weight: Number of shared viewers
     """
     
+    #: Weight formulas. ``shared_count`` is the raw intersection size; the others
+    #: normalise it so channels sampled at different depths stay comparable.
+    WEIGHTING_MODES = ("shared_count", "jaccard", "overlap_coef")
+
     def __init__(self, overlap_threshold: int = 1, max_viewer_channel_degree: int = 200,
-                 include_isolated_nodes: bool = True):
+                 include_isolated_nodes: bool = True,
+                 weighting_mode: str = "shared_count",
+                 normalized_overlap_threshold: float = 0.0):
         """
         Initialize graph builder.
 
         Args:
-            overlap_threshold: Minimum shared viewers required for an edge to exist
+            overlap_threshold: Minimum shared chatters required for an edge.
+                Applies to the raw intersection in every mode.
             max_viewer_channel_degree: Ignore viewers seen in more than this many
                 channels. Very high-degree viewer IDs are usually noisy and create
                 a combinatorial number of weak edges.
             include_isolated_nodes: Keep channels that share no viewers with any
                 other channel. Set False to drop them from the graph entirely.
+            weighting_mode: One of WEIGHTING_MODES. A raw count rewards channels
+                that were simply sampled more often, so ``jaccard`` and
+                ``overlap_coef`` divide it by union / smaller-set size instead.
+            normalized_overlap_threshold: Minimum normalised score (0-1) for an
+                edge. Ignored by ``shared_count``.
         """
+        if weighting_mode not in self.WEIGHTING_MODES:
+            raise ValueError(
+                f"weighting_mode must be one of {self.WEIGHTING_MODES}"
+            )
+        if not 0.0 <= normalized_overlap_threshold <= 1.0:
+            raise ValueError("normalized_overlap_threshold must be between 0 and 1")
+
         self.overlap_threshold = overlap_threshold
         self.max_viewer_channel_degree = max_viewer_channel_degree
         self.include_isolated_nodes = include_isolated_nodes
+        self.weighting_mode = weighting_mode
+        self.normalized_overlap_threshold = normalized_overlap_threshold
         self.graph = nx.Graph()
         self.overlap_data: Dict[Tuple[str, str], int] = {}
         self.skipped_high_degree_viewers = 0
+        self.skipped_below_normalized_threshold = 0
         
-    def build_graph(self, 
-                   channel_viewers: Dict[str, Set[str]], 
+    def _normalized_score(self, overlap: int, size1: int, size2: int) -> float:
+        """Similarity in 0-1 for the configured mode.
+
+        jaccard      -- |A n B| / |A u B|; penalises pairs of very different size.
+        overlap_coef -- |A n B| / min(|A|,|B|); asks how much of the *smaller*
+                        audience is shared, so a small channel can still score
+                        highly against a large one.
+        """
+        if overlap <= 0 or size1 <= 0 or size2 <= 0:
+            return 0.0
+        if self.weighting_mode == "overlap_coef":
+            return overlap / min(size1, size2)
+        union = size1 + size2 - overlap
+        return overlap / union if union > 0 else 0.0
+
+    def build_graph(self,
+                   channel_viewers: Dict[str, Set[str]],
                    channel_metadata: Dict[str, dict] = None) -> nx.Graph:
         """
         Build the overlap graph from viewer data.
@@ -94,10 +131,26 @@ class GraphBuilder:
             for channel1, channel2 in combinations(sorted(viewer_channel_list), 2):
                 overlap_counts[(channel1, channel2)] += 1
 
+        self.skipped_below_normalized_threshold = 0
         for (channel1, channel2), overlap in overlap_counts.items():
-            if overlap >= self.overlap_threshold:
-                self.graph.add_edge(channel1, channel2, weight=overlap)
-                self.overlap_data[(channel1, channel2)] = overlap
+            if overlap < self.overlap_threshold:
+                continue
+
+            size1 = len(channel_viewers[channel1])
+            size2 = len(channel_viewers[channel2])
+            score = self._normalized_score(overlap, size1, size2)
+            if (self.weighting_mode != "shared_count"
+                    and score < self.normalized_overlap_threshold):
+                self.skipped_below_normalized_threshold += 1
+                continue
+
+            # ``weight`` drives Louvain and thresholding; ``shared`` is always the
+            # measured intersection so the public export stays a real count.
+            weight = overlap if self.weighting_mode == "shared_count" else score
+            self.graph.add_edge(
+                channel1, channel2, weight=weight, shared=overlap, similarity=score
+            )
+            self.overlap_data[(channel1, channel2)] = overlap
         
         if not self.include_isolated_nodes:
             isolated = list(nx.isolates(self.graph))

@@ -103,6 +103,10 @@ class DataAggregator:
         self.window_end: Optional[date] = None
         self.channel_viewers: Dict[str, Set[str]] = defaultdict(set)
         self.channel_metadata: Dict[str, dict] = {}
+        # How many separate observations contributed to each channel. Survey
+        # cohorts churn, so many channels are sampled only once or twice and
+        # their viewer sets are too thin to compare against well-sampled ones.
+        self.channel_observations: Dict[str, int] = defaultdict(int)
         self.snapshots: List[dict] = []
         self.snapshot_source_counts: Dict[str, int] = defaultdict(int)
         self.skipped_outside_window = 0
@@ -124,6 +128,7 @@ class DataAggregator:
 
         chatters = snapshot.get("chatters", [])
         self.channel_viewers[channel].update(chatters)
+        self.channel_observations[channel] += 1
 
         # Normalize metadata keys for downstream consumers
         # Canonical keys: game_name, viewer_count, language, title, started_at, timestamp
@@ -580,6 +585,18 @@ class DataAggregator:
         """
         return dict(self.channel_viewers)
     
+    def get_channel_observations(self) -> Dict[str, int]:
+        """Observation count per channel (how many snapshots mentioned it)."""
+        return dict(self.channel_observations)
+
+    def filter_channels_by_observations(self, min_observations: int) -> Dict[str, Set[str]]:
+        """Channels sampled at least ``min_observations`` times."""
+        return {
+            channel: viewers
+            for channel, viewers in self.channel_viewers.items()
+            if self.channel_observations.get(channel, 0) >= min_observations
+        }
+
     def get_channel_metadata(self) -> Dict[str, dict]:
         """
         Get channel metadata (game, title, viewer count, etc.).

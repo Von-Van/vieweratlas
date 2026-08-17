@@ -415,7 +415,7 @@ export function Stats() {
               {
                 label: "Avg Overlap Weight",
                 value: "3,241",
-                desc: "Mean shared viewers per edge",
+                desc: "Mean shared chatters per edge",
               },
             ].map((m) => (
               <div key={m.label}>

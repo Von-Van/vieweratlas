@@ -65,6 +65,20 @@ def _unique_slug(label: str, cid: int, used: set[str]) -> str:
     return slug
 
 
+def _shared_count(edge_data: dict) -> int:
+    """Measured shared-chatter count for the public payload.
+
+    The graph's ``weight`` may be a normalised similarity score, but the public
+    schema requires a non-negative integer and readers expect a real observed
+    count, so ``shared`` is authoritative here.
+    """
+    value = edge_data.get("shared", edge_data.get("weight", 0))
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _capitalize_channel(name: str) -> str:
     """Best-effort display name from a lowercase channel login."""
     if not name:
@@ -239,8 +253,8 @@ def export_frontend_data(
             # Top overlaps: neighbors sorted by edge weight desc
             neighbors = []
             for neighbor in public_graph.neighbors(node):
-                weight = public_graph[node][neighbor].get("weight", 0)
-                neighbors.append((neighbor, weight))
+                edge = public_graph[node][neighbor]
+                neighbors.append((neighbor, _shared_count(edge)))
             neighbors.sort(key=lambda x: x[1], reverse=True)
 
             top_overlaps = [
@@ -286,13 +300,13 @@ def export_frontend_data(
 
         # --- Build edges array ---
         frontend_edges = [
-            {"source": u, "target": v, "weight": d.get("weight", 0)}
+            {"source": u, "target": v, "weight": _shared_count(d)}
             for u, v, d in public_graph.edges(data=True)
         ]
 
         # --- Overall stats ---
         total_viewers = aggregator_stats.get("total_unique_viewers_across_all", 0)
-        edge_weights = [d.get("weight", 0) for _, _, d in public_graph.edges(data=True)]
+        edge_weights = [_shared_count(d) for _, _, d in public_graph.edges(data=True)]
         avg_weight = round(sum(edge_weights) / len(edge_weights)) if edge_weights else 0
 
         # Derive collection period from aggregator stats if available

@@ -710,10 +710,25 @@ class TestConfig:
         assert config.analysis.overlap_threshold == 1
         assert config.analysis.resolution == 1.0
 
-    def test_rigorous_config_has_high_threshold(self):
-        config = get_rigorous_config()
-        assert config.analysis.overlap_threshold == 300
-        assert config.analysis.min_community_size == 10
+    def test_rigorous_config_is_calibrated_for_eventsub_surveys(self):
+        """Production analysis preset, measured rather than inherited.
+
+        The old TwitchAtlas threshold of 300 produced a graph with zero edges on
+        real five-minute EventSub survey data, so these values come from
+        scripts/sweep_threshold.py. They are expected to rise as data
+        accumulates; this test exists so a change is deliberate, not accidental.
+        """
+        analysis = get_rigorous_config().analysis
+        assert analysis.overlap_threshold == 2
+        assert analysis.min_community_size == 10
+        assert analysis.min_channel_observations == 3
+        assert analysis.min_channel_viewers == 10
+        assert analysis.weighting_mode == "shared_count"
+        assert analysis.include_isolated_nodes is False
+
+    def test_rigorous_config_bounds_the_analysis_window(self):
+        """Without a window the union grows daily and thresholds drift."""
+        assert get_rigorous_config().analysis.analysis_window_days == 30
 
     def test_exploratory_config_has_high_resolution(self):
         config = get_exploratory_config()
@@ -818,7 +833,22 @@ class TestConfig:
 
     def test_invalid_weighting_mode_raises(self):
         with pytest.raises(ValueError):
-            AnalysisConfig(weighting_mode="jaccard")
+            AnalysisConfig(weighting_mode="cosine")
+
+    @pytest.mark.parametrize("mode", ["shared_count", "jaccard", "overlap_coef"])
+    def test_supported_weighting_modes_accepted(self, mode):
+        assert AnalysisConfig(weighting_mode=mode).weighting_mode == mode
+
+    def test_normalized_threshold_bounds(self):
+        assert AnalysisConfig(normalized_overlap_threshold=0.5)
+        for bad in (-0.1, 1.1):
+            with pytest.raises(ValueError):
+                AnalysisConfig(normalized_overlap_threshold=bad)
+
+    def test_min_channel_observations_bounds(self):
+        assert AnalysisConfig(min_channel_observations=3)
+        with pytest.raises(ValueError):
+            AnalysisConfig(min_channel_observations=0)
 
     def test_yaml_loads_every_analysis_field(self, tmp_path):
         """Fields the hand-enumerated loader used to drop silently."""
@@ -1523,6 +1553,100 @@ class TestParquetSnapshots:
         agg = DataAggregator(str(tmp_path), storage=storage)
         assert agg.load_parquet_snapshots() == 0
         assert "must_not_be_loaded" not in agg.get_channel_viewers()
+
+
+class TestWeightingModes:
+    """Raw counts reward sampling depth; normalised modes must not."""
+
+    @pytest.fixture
+    def uneven(self):
+        # `small` is entirely contained in `big`; `peer` is the same size as
+        # `big` and shares half of it.
+        return {
+            "big": {f"u{i}" for i in range(1000)},
+            "small": {f"u{i}" for i in range(100)},
+            "peer": {f"u{i}" for i in range(500, 1500)},
+        }
+
+    def test_shared_count_is_the_unchanged_default(self, uneven):
+        g = GraphBuilder(overlap_threshold=1).build_graph(uneven)
+        assert g["big"]["peer"]["weight"] == 500
+        assert g["big"]["small"]["weight"] == 100
+
+    def test_measured_count_always_recorded_alongside_weight(self, uneven):
+        for mode in GraphBuilder.WEIGHTING_MODES:
+            g = GraphBuilder(overlap_threshold=1, weighting_mode=mode).build_graph(uneven)
+            assert g["big"]["peer"]["shared"] == 500
+            assert g["big"]["small"]["shared"] == 100
+            assert isinstance(g["big"]["peer"]["shared"], int)
+
+    def test_jaccard_normalises_by_union(self, uneven):
+        g = GraphBuilder(overlap_threshold=1, weighting_mode="jaccard").build_graph(uneven)
+        # 500 / (1000 + 1000 - 500)
+        assert g["big"]["peer"]["weight"] == pytest.approx(1 / 3)
+        # 100 / (1000 + 100 - 100)
+        assert g["big"]["small"]["weight"] == pytest.approx(0.1)
+
+    def test_overlap_coef_recognises_containment(self, uneven):
+        """A small channel fully inside a large one scores 1.0, not 100."""
+        g = GraphBuilder(overlap_threshold=1, weighting_mode="overlap_coef").build_graph(uneven)
+        assert g["big"]["small"]["weight"] == pytest.approx(1.0)
+        assert g["big"]["peer"]["weight"] == pytest.approx(0.5)
+        # Raw count ranks these the other way round.
+        assert g["big"]["small"]["shared"] < g["big"]["peer"]["shared"]
+
+    def test_normalized_threshold_drops_weak_pairs(self, uneven):
+        g = GraphBuilder(
+            overlap_threshold=1, weighting_mode="jaccard",
+            normalized_overlap_threshold=0.2,
+        ).build_graph(uneven)
+        assert g.has_edge("big", "peer")        # 0.333
+        assert not g.has_edge("big", "small")   # 0.100
+        assert g.number_of_edges() == 1
+
+    def test_normalized_threshold_ignored_by_shared_count(self, uneven):
+        g = GraphBuilder(
+            overlap_threshold=1, weighting_mode="shared_count",
+            normalized_overlap_threshold=0.9,
+        ).build_graph(uneven)
+        assert g.has_edge("big", "small")
+
+    def test_raw_threshold_still_applies_in_normalized_modes(self, uneven):
+        g = GraphBuilder(
+            overlap_threshold=200, weighting_mode="jaccard"
+        ).build_graph(uneven)
+        assert not g.has_edge("big", "small")   # only 100 shared
+        assert g.has_edge("big", "peer")
+
+    def test_invalid_mode_and_threshold_rejected(self):
+        with pytest.raises(ValueError):
+            GraphBuilder(weighting_mode="cosine")
+        with pytest.raises(ValueError):
+            GraphBuilder(normalized_overlap_threshold=1.5)
+
+
+class TestObservationFiltering:
+    """Channels sampled once cannot produce reliable overlap at any threshold."""
+
+    def _agg_with(self, tmp_path, counts):
+        agg = DataAggregator(str(tmp_path))
+        for channel, n in counts.items():
+            for i in range(n):
+                agg._ingest_snapshot({"channel": channel, "chatters": [f"u{i}", "shared"]})
+        return agg
+
+    def test_observations_counted_per_channel(self, tmp_path):
+        agg = self._agg_with(tmp_path, {"often": 5, "once": 1})
+        assert agg.get_channel_observations() == {"often": 5, "once": 1}
+
+    def test_filter_keeps_only_well_sampled_channels(self, tmp_path):
+        agg = self._agg_with(tmp_path, {"often": 5, "twice": 2, "once": 1})
+        kept = agg.filter_channels_by_observations(2)
+        assert set(kept) == {"often", "twice"}
+
+    def test_filter_of_one_is_a_no_op(self, tmp_path):
+        agg = self._agg_with(tmp_path, {"often": 5, "once": 1})
+        assert set(agg.filter_channels_by_observations(1)) == {"often", "once"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

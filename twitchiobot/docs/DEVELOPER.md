@@ -73,6 +73,28 @@ milestones and counts, never author identities or credential values.
 
 See [DATA_POLICY.md](DATA_POLICY.md) for retention and access requirements.
 
+## Graph weighting
+
+`GraphBuilder` supports three edge-weight formulas, selected by
+`weighting_mode`:
+
+- `shared_count` — the raw intersection size (default, unchanged behaviour);
+- `jaccard` — `|A n B| / |A u B|`;
+- `overlap_coef` — `|A n B| / min(|A|,|B|)`.
+
+Because survey cohorts churn, channels are observed at very different depths. A
+raw count therefore partly measures how often a channel happened to be sampled
+rather than how similar its audience is, so the normalised modes are preferred
+once enough data exists to calibrate them. `normalized_overlap_threshold`
+(0–1) gates edges in the normalised modes; `overlap_threshold` still applies to
+the raw intersection in every mode. `min_channel_observations` drops channels
+sampled fewer than N times before the graph is built.
+
+Every edge carries all three values: `weight` (whatever drives Louvain),
+`shared` (the measured integer intersection) and `similarity` (the normalised
+score). The frontend exporter publishes `shared`, so the public schema keeps an
+integer count of real observations regardless of the weighting mode.
+
 ## Private v2 data contract
 
 Each completed batch is written to:

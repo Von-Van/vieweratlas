@@ -101,6 +101,10 @@ class AnalysisConfig:
     # Data filtering
     min_channel_viewers: int = 1  # Minimum unique viewers for a channel to be included
     min_user_appearances: int = 1  # Minimum channels a user must appear in
+    # Survey cohorts churn, so many channels are sampled only once or twice. A
+    # channel seen once contributes a single 5-minute window and cannot produce
+    # reliable overlap at any threshold.
+    min_channel_observations: int = 1
     # Rolling window of survey days to analyse (30/60/90 are the intended values).
     # None unions every retained snapshot, which makes overlap_threshold drift as
     # data accumulates: viewer sets only grow, so graph density climbs over time.
@@ -108,7 +112,12 @@ class AnalysisConfig:
     
     # Graph building
     overlap_threshold: int = 1  # Minimum shared viewers for an edge (TwitchAtlas used 300)
-    weighting_mode: str = "shared_count"  # Edge weight formula: 'shared_count' (shared viewer intersection)
+    # 'shared_count' (raw intersection), 'jaccard' (|A n B| / |A u B|) or
+    # 'overlap_coef' (|A n B| / min(|A|,|B|)). Raw counts reward channels that
+    # were simply sampled more often; the normalised modes do not.
+    weighting_mode: str = "shared_count"
+    # Minimum normalised score (0-1) for an edge. Ignored by 'shared_count'.
+    normalized_overlap_threshold: float = 0.0
     include_isolated_nodes: bool = True  # Include channels with no overlaps
     
     # Community detection
@@ -137,7 +146,7 @@ class AnalysisConfig:
         """Validate configuration."""
         if self.overlap_threshold < 0:
             raise ValueError("overlap_threshold cannot be negative")
-        valid_weighting_modes = {"shared_count"}
+        valid_weighting_modes = {"shared_count", "jaccard", "overlap_coef"}
         if self.weighting_mode not in valid_weighting_modes:
             raise ValueError(f"weighting_mode must be one of {valid_weighting_modes}")
         if self.resolution <= 0:
@@ -148,6 +157,10 @@ class AnalysisConfig:
             raise ValueError("min_channel_viewers cannot be negative")
         if self.analysis_window_days is not None and self.analysis_window_days < 1:
             raise ValueError("analysis_window_days must be at least 1 or None")
+        if self.min_channel_observations < 1:
+            raise ValueError("min_channel_observations must be at least 1")
+        if not 0.0 <= self.normalized_overlap_threshold <= 1.0:
+            raise ValueError("normalized_overlap_threshold must be between 0 and 1")
         if self.frontend_max_channels < 1:
             raise ValueError("frontend_max_channels must be at least 1")
         if self.frontend_max_edges < 1:
@@ -312,10 +325,16 @@ def get_default_config() -> PipelineConfig:
 
 def get_rigorous_config() -> PipelineConfig:
     """
-    Get configuration matching TwitchAtlas parameters:
-    - Focus on meaningful overlaps (300+ shared viewers)
-    - Meaningful communities (10+ channels minimum)
-    - English-speaking streamers (language filtering recommended)
+    Production analysis preset, calibrated against real EventSub survey data.
+
+    The scheduled task runs ``main.py analyze rigorous``, so these are the values
+    that actually shape the published graph. They were measured with
+    ``scripts/sweep_threshold.py`` over a four-day, 15-survey sample, not
+    inherited from TwitchAtlas: five-minute EventSub windows produce a very
+    different overlap distribution from continuous IRC collection.
+
+    Re-run the sweep as data accumulates. Observed overlap grows super-linearly
+    with survey count, so these thresholds will need raising.
     """
     return PipelineConfig(
         collection=CollectionConfig(
@@ -323,13 +342,25 @@ def get_rigorous_config() -> PipelineConfig:
             batch_size=100
         ),
         analysis=AnalysisConfig(
-            # This preset is what the scheduled analysis task runs
-            # (`main.py analyze rigorous`), so production tuning lives here.
             analysis_window_days=30,  # Bound the union; without it density climbs daily
-            min_channel_viewers=10,  # Only include channels with 10+ viewers
-            overlap_threshold=300,  # TwitchAtlas threshold; re-tune against real surveys
+            # Survey cohorts churn: 7,098 distinct channels appeared in four
+            # days, most of them once or twice. Requiring three observations and
+            # ten authors leaves ~1,969 channels worth comparing.
+            min_channel_observations=3,
+            min_channel_viewers=10,
+            # Measured: median and p90 overlap are both 1, so a threshold of 1
+            # admits ~36,000 single-chatter coincidences. Moving to 2 drops 93%
+            # of edges and lifts modularity from 0.641 to 0.772.
+            overlap_threshold=2,
+            # Normalised modes lose to the raw count while overlaps are this
+            # thin (best jaccard 0.699, best overlap_coef 0.726). Revisit once
+            # overlaps carry real magnitude.
+            weighting_mode="shared_count",
+            # At threshold 2 roughly 44% of channels have no edge; showing them
+            # would fill the public map with unconnected dots.
+            include_isolated_nodes=False,
             resolution=1.0,
-            min_community_size=10,  # Communities of 10+ channels
+            min_community_size=10,  # Verified: 21 communities survive this floor
             label_top_n_nodes=20
         ),
         log_level="INFO",

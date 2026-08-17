@@ -178,8 +178,8 @@ export function Landing() {
             }}
           >
             ViewerAtlas discovers hidden communities by tracking
-            shared viewers between channels. Powered by live
-            chat sampling, graph theory, and the Louvain
+            shared chat participants between channels. Powered by
+            live chat sampling, graph theory, and the Louvain
             algorithm.
           </p>
 

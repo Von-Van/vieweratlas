@@ -22,7 +22,7 @@ const PIPELINE = [
     title: "Analyze",
     subtitle: "Build Overlap Graph + Run Community Detection",
     color: "#00E5CC",
-    desc: "From the co-presence data, we construct a weighted channel-overlap graph where each node is a Twitch channel and each edge weight represents the number of shared viewers between two channels. We then apply the Louvain modularity optimization algorithm to identify natural community clusters.",
+    desc: "From the co-presence data, we construct a weighted channel-overlap graph where each node is a Twitch channel and each edge weight represents the number of shared chatters observed between two channels. Only viewers who sent at least one message during a sampled window are counted, so this is a lower bound on true shared audience, not a census. We then apply the Louvain modularity optimization algorithm to identify natural community clusters.",
     details: [
       "Constructs bipartite viewer-channel graph",
       "Projects to channel-channel overlap graph",
@@ -36,7 +36,7 @@ const PIPELINE = [
     title: "Visualize",
     subtitle: "Explore the Twitch Community Map",
     color: "#FF7B00",
-    desc: "The resulting graph is visualized using a force-directed layout where node size reflects viewer count and edge thickness represents shared viewer overlap. Communities are color-coded, enabling intuitive exploration of the Twitch ecosystem.",
+    desc: "The resulting graph is visualized using a force-directed layout where node size reflects viewer count and edge thickness represents shared chatter overlap. Communities are color-coded, enabling intuitive exploration of the Twitch ecosystem.",
     details: [
       "Force-directed layout with D3-style physics",
       "Node radius scales with viewer count",

@@ -32,7 +32,7 @@ const CustomTooltipBar = ({ active, payload, label }: any) => {
       >
         <div style={{ color: "#EFEFF1", fontWeight: 600, fontSize: 13 }}>{label}</div>
         <div style={{ color: "#00E5CC", fontSize: 12 }}>
-          {payload[0].value.toLocaleString()} shared viewers
+          {payload[0].value.toLocaleString()} shared chatters
         </div>
       </div>
     );
