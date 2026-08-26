@@ -3,6 +3,7 @@ import type { Channel, Edge, Community } from "../data/mockData";
 
 interface NodeState {
   id: string;
+  communityId: string;
   x: number;
   y: number;
   vx: number;
@@ -65,6 +66,11 @@ export function NetworkGraph({
   const [tooltip, setTooltip] = useState<{ x: number; y: number; node: NodeState } | null>(null);
   const tickRef = useRef(0);
   const shouldSimulateRef = useRef(true);
+  const needsFitRef = useRef(true);
+  const communityNameMap = useMemo(
+    () => new Map(communities.map((community) => [community.id, community.label])),
+    [communities],
+  );
   const communityColorMap = useMemo(
     () => new Map(communities.map((community) => [community.id, community.color])),
     [communities],
@@ -85,8 +91,10 @@ export function NetworkGraph({
 
     const rng = seededRandom(42);
     const maxViewers = Math.max(1, ...channels.map((c) => c.viewers));
-    const minR = 6;
-    const maxR = 26;
+    // Sized for the ~1000-node precomputed graph. The old 6-26 was calibrated
+    // for the simulated path below (<=350 nodes) and guarantees overlap here.
+    const minR = 4;
+    const maxR = 16;
     const orderLength = Math.max(communityOrder.length, 1);
     const hasPrecomputedLayout = channels.every((ch) => ch.layout);
 
@@ -105,6 +113,7 @@ export function NetworkGraph({
 
       return {
         id: ch.id,
+        communityId: ch.communityId,
         x: ch.layout?.x ?? Math.cos(angle) * radius,
         y: ch.layout?.y ?? Math.sin(angle) * radius,
         vx: 0,
@@ -118,7 +127,35 @@ export function NetworkGraph({
 
     tickRef.current = 0;
     shouldSimulateRef.current = !hasPrecomputedLayout && channels.length <= 350;
+    needsFitRef.current = true;
   }, [channels, communityColorMap, communityOrder]);
+
+  // Frame the graph on load. Without this the view sits at scale 1 around the
+  // origin, so whether the graph fills the canvas depends on the coordinate
+  // scale the pipeline happened to export.
+  const fitToContent = useCallback(() => {
+    const canvas = canvasRef.current;
+    const nodes = nodesRef.current;
+    if (!canvas || !nodes.length || !canvas.width || !canvas.height) return;
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const n of nodes) {
+      minX = Math.min(minX, n.x - n.r); maxX = Math.max(maxX, n.x + n.r);
+      minY = Math.min(minY, n.y - n.r); maxY = Math.max(maxY, n.y + n.r);
+    }
+    const spanX = Math.max(1, maxX - minX);
+    const spanY = Math.max(1, maxY - minY);
+    const scale = Math.min(4, Math.max(0.3, Math.min(
+      (canvas.width * 0.92) / spanX,
+      (canvas.height * 0.92) / spanY,
+    )));
+    transformRef.current = {
+      scale,
+      x: -((minX + maxX) / 2) * scale,
+      y: -((minY + maxY) / 2) * scale,
+    };
+    needsFitRef.current = false;
+  }, []);
 
   const runSimulationStep = useCallback((alpha: number) => {
     const nodes = nodesRef.current;
@@ -268,8 +305,51 @@ export function NetworkGraph({
       }
     }
 
+    // Community region labels. With the two-level layout each community is its
+    // own cluster, so one label per region reads far better than per-node
+    // labels — which at this node count only ever landed on a few hubs.
+    if (!highlightedNode) {
+      const groups = new Map<string, { x: number; y: number; n: number; maxY: number }>();
+      for (const node of nodes) {
+        if (!node.communityId) continue;
+        const g = groups.get(node.communityId);
+        if (g) {
+          g.x += node.x; g.y += node.y; g.n += 1;
+          g.maxY = Math.max(g.maxY, node.y + node.r);
+        } else {
+          groups.set(node.communityId, { x: node.x, y: node.y, n: 1, maxY: node.y + node.r });
+        }
+      }
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.font = `600 ${13 / scale}px "Space Grotesk", sans-serif`;
+      const lineHeight = 15 / scale;
+      // Largest regions get first claim on space; a smaller region's label is
+      // dropped rather than stacked on top of one already drawn.
+      const placed: { x0: number; x1: number; y0: number; y1: number }[] = [];
+      const ordered = [...groups.entries()].sort((a, b) => b[1].n - a[1].n);
+      for (const [id, g] of ordered) {
+        if (g.n < 12) continue;
+        const name = communityNameMap.get(id);
+        if (!name) continue;
+        const cx = g.x / g.n;
+        const cy = g.maxY + 10 / scale;
+        const halfWidth = ctx.measureText(name).width / 2;
+        const box = { x0: cx - halfWidth, x1: cx + halfWidth, y0: cy, y1: cy + lineHeight };
+        if (placed.some((b) => box.x0 < b.x1 && box.x1 > b.x0 && box.y0 < b.y1 && box.y1 > b.y0)) {
+          continue;
+        }
+        placed.push(box);
+        ctx.fillStyle = "rgba(239, 239, 241, 0.92)";
+        ctx.strokeStyle = "rgba(10, 10, 15, 0.85)";
+        ctx.lineWidth = 3 / scale;
+        ctx.strokeText(name, cx, cy);
+        ctx.fillText(name, cx, cy);
+      }
+    }
+
     ctx.restore();
-  }, [edges, highlightedNode]);
+  }, [edges, highlightedNode, communityNameMap]);
 
   // Animation loop
   useEffect(() => {
@@ -284,6 +364,9 @@ export function NetworkGraph({
         tickRef.current += 3;
       }
 
+      // Refit once the canvas has real dimensions, and again after a resize.
+      if (needsFitRef.current && !shouldSimulateRef.current) fitToContent();
+
       drawGraph();
       animFrameRef.current = requestAnimationFrame(loop);
     };
@@ -293,7 +376,7 @@ export function NetworkGraph({
       running = false;
       cancelAnimationFrame(animFrameRef.current);
     };
-  }, [drawGraph, runSimulationStep]);
+  }, [drawGraph, runSimulationStep, fitToContent]);
 
   // Resize observer
   useEffect(() => {
@@ -304,6 +387,7 @@ export function NetworkGraph({
       if (!parent) return;
       canvas.width = parent.clientWidth;
       canvas.height = parent.clientHeight;
+      needsFitRef.current = true;
     });
     ro.observe(canvas.parentElement!);
     return () => ro.disconnect();

@@ -68,10 +68,15 @@ class CommunityDetector:
         logger.info(f"Detecting communities with resolution={self.resolution}")
         
         # Use Louvain algorithm for community detection
+        # random_state pins the node ordering Louvain uses. Without it an
+        # identical graph yields a different community count per run, and
+        # min_community_size then discards a different set of channels, so
+        # day-over-day movement on the published map would be partly noise.
         self.partition = community.best_partition(
             graph,
             weight='weight',
-            resolution=self.resolution
+            resolution=self.resolution,
+            random_state=42
         )
         
         # Build communities dict from partition

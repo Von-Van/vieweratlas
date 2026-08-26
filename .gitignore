@@ -40,6 +40,8 @@ community_analysis/
 twitchiobot/logs/
 twitchiobot/community_analysis/
 twitchiobot/vod_raw/
+twitchiobot/lib/
+frontend/public/data/
 twitchiobot/vod_queue.json
 twitchiobot/channels.txt
 twitchiobot/chatters_log.csv
