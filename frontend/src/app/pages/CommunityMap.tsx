@@ -2,12 +2,15 @@ import { useState, useMemo } from "react";
 import { useNavigate } from "react-router";
 import { X, Search, SlidersHorizontal, Info, ExternalLink } from "lucide-react";
 import { NetworkGraph } from "../components/NetworkGraph";
-import { useAtlasData } from "../data/useAtlasData";
+import { useAtlasData, type AnalysisWindow } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 
 export function CommunityMap() {
   const navigate = useNavigate();
-  const { data, loading } = useAtlasData();
+  const {
+    data, loading, window: activeWindow, setWindow,
+    windowAvailable, availableWindows, pendingWindows, windowPending, switching,
+  } = useAtlasData();
   const [selectedCommunities, setSelectedCommunities] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [minViewers, setMinViewers] = useState(0);
@@ -97,7 +100,9 @@ export function CommunityMap() {
             <div>
               <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 15 }}>Community Map</div>
               <div style={{ color: "#848494", fontSize: 12, marginTop: 2 }}>
-                {filteredChannels.length} channels · {filteredEdges.length} edges
+                {windowPending
+                  ? `${activeWindow}-day window pending`
+                  : `${filteredChannels.length} channels · ${filteredEdges.length} edges`}
               </div>
             </div>
             <button
@@ -164,6 +169,65 @@ export function CommunityMap() {
 
             {filtersExpanded && (
               <div className="mt-3 flex flex-col gap-3">
+                {/* Time window */}
+                {windowAvailable && (
+                  <div>
+                    <div style={{ color: "#848494", fontSize: 11, marginBottom: 6, letterSpacing: "0.04em" }}>
+                      TIME WINDOW
+                    </div>
+                    <div className="flex gap-1.5">
+                      {[...availableWindows, ...pendingWindows]
+                        .sort((a, b) => a - b)
+                        .map((days: AnalysisWindow) => {
+                          const active = activeWindow === days;
+                          const pending = pendingWindows.includes(days);
+                          return (
+                            <button
+                              key={days}
+                              onClick={() => setWindow(days)}
+                              disabled={switching}
+                              aria-pressed={active}
+                              title={
+                                pending
+                                  ? `Not enough survey history for a ${days}-day window yet`
+                                  : `Last ${days} days`
+                              }
+                              style={{
+                                flex: 1,
+                                background: active
+                                  ? pending ? "rgba(132,132,148,0.18)" : "rgba(145,71,255,0.2)"
+                                  : "#0E0E10",
+                                border: `1px solid ${
+                                  active ? (pending ? "#848494" : "#9147FF") : "#2A2A2E"
+                                }`,
+                                color: active
+                                  ? pending ? "#B9B9C6" : "#9147FF"
+                                  : pending ? "#5C5C68" : "#848494",
+                                borderRadius: 6,
+                                padding: "4px 0",
+                                fontSize: 12,
+                                cursor: switching ? "wait" : "pointer",
+                                opacity: switching && !active ? 0.5 : 1,
+                                fontFamily: "'Space Grotesk', sans-serif",
+                                fontWeight: 600,
+                              }}
+                            >
+                              {days}d
+                            </button>
+                          );
+                        })}
+                    </div>
+                    {/* The pipeline anchors this to the newest snapshot, so it
+                        reports the range actually analysed rather than the
+                        nominal window length. */}
+                    <div style={{ color: "#848494", fontSize: 11, marginTop: 6 }}>
+                      {windowPending
+                        ? `Pending — needs ${activeWindow} days of surveys`
+                        : data?.overallStats.collectionPeriod}
+                    </div>
+                  </div>
+                )}
+
                 {/* Language */}
                 <div>
                   <div style={{ color: "#848494", fontSize: 11, marginBottom: 6, letterSpacing: "0.04em" }}>
@@ -219,6 +283,8 @@ export function CommunityMap() {
 
                 {minViewers > 0 || selectedLanguage !== "All" ? (
                   <button
+                    // The window is left alone: it selects which dataset is
+                    // loaded, not which of the loaded channels are shown.
                     onClick={() => { setMinViewers(0); setSelectedLanguage("All"); }}
                     style={{
                       background: "transparent",
@@ -461,21 +527,78 @@ export function CommunityMap() {
           className="absolute top-4 right-4 z-10 flex flex-col gap-2 items-end"
           style={{ pointerEvents: "none" }}
         >
-          <div
-            className="px-3 py-1.5 rounded-lg text-xs"
-            style={{
-              background: "rgba(24,24,27,0.85)",
-              border: "1px solid #2A2A2E",
-              color: "#848494",
-              backdropFilter: "blur(8px)",
-              pointerEvents: "auto",
-            }}
-          >
-            {filteredChannels.length} nodes · {filteredEdges.length} edges
-          </div>
+          {!windowPending && (
+            <div
+              className="px-3 py-1.5 rounded-lg text-xs"
+              style={{
+                background: "rgba(24,24,27,0.85)",
+                border: "1px solid #2A2A2E",
+                color: "#848494",
+                backdropFilter: "blur(8px)",
+                pointerEvents: "auto",
+              }}
+            >
+              {filteredChannels.length} nodes · {filteredEdges.length} edges
+            </div>
+          )}
         </div>
 
-        {filteredChannels.length === 0 && (
+        {windowPending ? (
+          <div
+            // Above the graph canvas, which is painted later in the DOM and
+            // would otherwise cover this panel.
+            className="absolute inset-0 z-20 flex flex-col items-center justify-center px-6"
+            role="status"
+            aria-live="polite"
+            style={{ background: "#0E0E10", textAlign: "center" }}
+          >
+            <div
+              style={{
+                color: "#848494",
+                fontFamily: "'Space Grotesk', sans-serif",
+                fontSize: 34,
+                fontWeight: 700,
+                letterSpacing: "0.18em",
+              }}
+            >
+              PENDING
+            </div>
+            <p
+              style={{
+                color: "#848494",
+                fontSize: 13,
+                lineHeight: 1.7,
+                marginTop: 14,
+                maxWidth: 380,
+              }}
+            >
+              Collection has not run long enough for a {activeWindow}-day window.
+              It appears here automatically once {activeWindow} days of surveys
+              have accumulated — nothing needs to be redeployed.
+            </p>
+            {availableWindows.length > 0 && (
+              <button
+                onClick={() => setWindow(availableWindows[availableWindows.length - 1])}
+                style={{
+                  marginTop: 20,
+                  background: "transparent",
+                  border: "1px solid #2A2A2E",
+                  color: "#EFEFF1",
+                  borderRadius: 8,
+                  padding: "8px 16px",
+                  fontSize: 13,
+                  cursor: "pointer",
+                  fontFamily: "'Space Grotesk', sans-serif",
+                  fontWeight: 600,
+                }}
+              >
+                Show the {availableWindows[availableWindows.length - 1]}-day window
+              </button>
+            )}
+          </div>
+        ) : null}
+
+        {!windowPending && filteredChannels.length === 0 && (
           <div
             className="absolute inset-0 z-10 flex items-center justify-center"
             style={{ pointerEvents: "none" }}
@@ -494,8 +617,8 @@ export function CommunityMap() {
         )}
 
         <NetworkGraph
-          channels={filteredChannels}
-          edges={filteredEdges}
+          channels={windowPending ? [] : filteredChannels}
+          edges={windowPending ? [] : filteredEdges}
           communities={communities}
           className="w-full h-full"
           interactive={true}

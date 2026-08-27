@@ -8,20 +8,11 @@ backends (FileStorage/S3Storage via BaseStorage).
 
 import json
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
-
-try:
-    import boto3
-    from botocore.exceptions import ClientError
-    HAS_BOTO3 = True
-except ImportError:
-    HAS_BOTO3 = False
-
 
 class DailyCollectionState:
     """Persists per-channel daily collection markers for live and VOD sources."""
@@ -122,63 +113,3 @@ class DailyCollectionState:
                 json.dump(self._state, f, indent=2)
         except Exception as e:
             logger.error("Failed to persist daily collection state: %s", e)
-
-
-class DynamoDBCollectionState:
-    """Race-free dedup state using DynamoDB for multi-worker collection.
-
-    Each item uses a composite primary key ``pk`` of the form
-    ``{source}#{channel}#{utc_day}`` (e.g. ``live#xqc#2026-03-10``).
-
-    Items are auto-expired via DynamoDB TTL after ``ttl_days``.
-    """
-
-    def __init__(self, table_name: str, region: str = "us-east-1", ttl_days: int = 32, dynamodb_resource=None):
-        if not HAS_BOTO3 and dynamodb_resource is None:
-            raise ImportError("boto3 is required for DynamoDBCollectionState")
-        if dynamodb_resource is not None:
-            self._table = dynamodb_resource.Table(table_name)
-        else:
-            self._table = boto3.resource("dynamodb", region_name=region).Table(table_name)
-        self.ttl_days = ttl_days
-
-    @staticmethod
-    def _make_pk(source: str, channel: str, utc_day: str) -> str:
-        return f"{source}#{channel.lower()}#{utc_day}"
-
-    @staticmethod
-    def current_utc_day() -> str:
-        return datetime.now(timezone.utc).date().isoformat()
-
-    def has_collected(self, source: str, channel: str, utc_day: Optional[str] = None) -> bool:
-        day = utc_day or self.current_utc_day()
-        pk = self._make_pk(source, channel, day)
-        try:
-            resp = self._table.get_item(Key={"pk": pk}, ConsistentRead=True)
-            return "Item" in resp
-        except Exception as e:
-            logger.error("DynamoDB get_item failed for %s: %s", pk, e)
-            return False
-
-    def mark_collected(self, source: str, channel: str, utc_day: Optional[str] = None) -> bool:
-        """Conditionally write item. Returns True if newly marked, False if already existed."""
-        day = utc_day or self.current_utc_day()
-        pk = self._make_pk(source, channel, day)
-        ttl_epoch = int(time.time()) + (self.ttl_days * 86400)
-        try:
-            self._table.put_item(
-                Item={
-                    "pk": pk,
-                    "source": source,
-                    "channel": channel.lower(),
-                    "utc_day": day,
-                    "ttl": ttl_epoch,
-                },
-                ConditionExpression="attribute_not_exists(pk)",
-            )
-            return True
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                return False
-            logger.error("DynamoDB put_item failed for %s: %s", pk, e)
-            raise

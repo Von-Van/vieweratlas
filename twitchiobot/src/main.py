@@ -18,8 +18,7 @@ from logging.handlers import RotatingFileHandler
 
 from dotenv import load_dotenv
 
-from get_viewers import load_channels
-from data_aggregator import DataAggregator
+from data_aggregator import DataAggregator, survey_date_span
 from graph_builder import GraphBuilder
 from community_detector import CommunityDetector
 from cluster_tagger import ClusterTagger
@@ -34,7 +33,11 @@ from config import (
 )
 from storage import get_storage
 from vod_collector import VODCollector
-from frontend_exporter import FrontendExportConfig, export_frontend_data
+from frontend_exporter import (
+    FrontendExportConfig,
+    export_frontend_data,
+    export_pending_frontend_data,
+)
 from eventsub_survey import (
     EventSubSurveyRunner,
     TwitchEventSubClient,
@@ -55,6 +58,22 @@ def _handle_sigterm(signum, frame):
     logging.getLogger(__name__).info("SIGTERM received, finishing current cycle before exit...")
 
 signal.signal(signal.SIGTERM, _handle_sigterm)
+
+
+def load_channels(path: Optional[str] = None) -> list[str]:
+    """Load the optional local VOD channel list without the retired IRC bot."""
+    channel_path = Path(path or os.getenv("CHANNELS_FILE", "channels.txt"))
+    if channel_path.exists():
+        return [
+            line.strip().lower()
+            for line in channel_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    return [
+        channel.strip().lower()
+        for channel in os.getenv("TWITCH_CHANNELS", "").split(",")
+        if channel.strip()
+    ]
 
 
 def setup_logging(config: PipelineConfig):
@@ -212,93 +231,307 @@ class PipelineRunner:
         self.logger.info(f"✓ Found analysis inputs: {summary}")
         return True
     
+    def window_plan(self) -> dict:
+        """Decide which configured windows the retained data can actually support.
+
+        A 90-day window over 14 days of surveys is not a 90-day window: it
+        silently produces the 14-day graph again, costing a full extra analysis
+        pass to publish a duplicate. Rather than analyse it, the plan marks it
+        pending, and the browser shows PENDING for that button until enough
+        history exists. Windows promote themselves as surveys accumulate — no
+        redeploy, no config edit.
+
+        Returns ``{"available": [...], "pending": [...], "default": days}`` with
+        ``available`` ordered default-first, because the default window seeds the
+        community colours the others inherit and writes the private artifacts.
+        """
+        analysis = self.config.analysis
+        configured = sorted(set(analysis.analysis_windows)) or [analysis.analysis_window_days]
+
+        # An unwindowed deployment keeps its single pass and publishes nothing
+        # about windows at all.
+        if not analysis.analysis_windows:
+            return {"available": [analysis.analysis_window_days], "pending": [],
+                    "default": analysis.analysis_window_days, "covered_days": None}
+
+        earliest, latest = survey_date_span(self.storage, analysis.logs_dir)
+        covered_days = (latest - earliest).days + 1 if earliest and latest else 0
+
+        available = [days for days in configured if days <= covered_days]
+        pending = [days for days in configured if days not in available]
+
+        if not available:
+            # Publishing a three-day graph under a 14-day label would make the
+            # filter inaccurate. Publish only a schema-valid PENDING status at
+            # the stable URL until the first honest window is full.
+            default = configured[0]
+            self.logger.warning(
+                "NO_FULL_WINDOW covered=%dd — all configured windows remain PENDING",
+                covered_days,
+            )
+            self.logger.info(
+                "Window plan: %d day(s) of surveys — publishing none, pending %s, default %dd",
+                covered_days,
+                ", ".join(f"{days}d" for days in configured),
+                default,
+            )
+            return {
+                "available": [],
+                "pending": configured,
+                "default": default,
+                "covered_days": covered_days,
+            }
+
+        # Prefer the configured canonical, but it cannot be the default before
+        # the data reaches it; fall back to the widest window that is ready.
+        preferred = analysis.analysis_window_days
+        default = preferred if preferred in available else max(available)
+
+        ordered = [default, *[days for days in available if days != default]]
+        self.logger.info(
+            "Window plan: %d day(s) of surveys — publishing %s, pending %s, default %dd",
+            covered_days,
+            ", ".join(f"{d}d" for d in sorted(available)) or "none",
+            ", ".join(f"{d}d" for d in pending) or "none",
+            default,
+        )
+        return {"available": ordered, "pending": pending, "default": default,
+                "covered_days": covered_days}
+
     def run_analysis_pipeline(self) -> dict:
         """
-        Execute the complete analysis pipeline.
-        
-        Returns:
-            Dict with analysis results and status
-        """
-        self.logger.info("=" * 70)
-        self.logger.info("ANALYSIS PIPELINE START")
-        self.logger.info("=" * 70 + "\n")
-        
-        try:
-            # Step 1: Aggregate
-            self.logger.info("[1/6] AGGREGATING VIEWER DATA")
-            self.logger.info("-" * 70)
-            aggregator = self._step_aggregate()
-            if not aggregator:
-                return {"status": "error", "message": "Aggregation failed"}
-            
-            # Step 2: Build graph
-            self.logger.info("\n[2/6] BUILDING OVERLAP GRAPH")
-            self.logger.info("-" * 70)
-            graph = self._step_build_graph(aggregator)
-            if graph is None:
-                return {"status": "error", "message": "Graph building failed"}
-            
-            # Step 3: Detect communities
-            self.logger.info("\n[3/6] DETECTING COMMUNITIES")
-            self.logger.info("-" * 70)
-            partition, communities, detection_stats, graph = self._step_detect_communities(graph)
-            if partition is None:
-                return {"status": "error", "message": "Community detection failed"}
-            if not partition:
-                return {
-                    "status": "error",
-                    "message": (
-                        f"No community met min_community_size="
-                        f"{self.config.analysis.min_community_size}"
-                    ),
-                }
+        Execute the complete analysis pipeline, once per published window.
 
-            # Step 4: Tag communities
-            self.logger.info("\n[4/6] TAGGING COMMUNITIES")
-            self.logger.info("-" * 70)
-            labels, tagging_stats = self._step_tag_communities(
-                communities,
-                aggregator.get_channel_metadata()
+        Returns:
+            Dict with the canonical window's results and status
+        """
+        plan = self.window_plan()
+        windows = plan["available"]
+        self.logger.info("=" * 70)
+        self.logger.info(
+            "ANALYSIS PIPELINE START (%s)",
+            ", ".join(f"{days}d" if days else "all data" for days in windows),
+        )
+        self.logger.info("=" * 70 + "\n")
+
+        # Filled by the canonical window, read by every window after it.
+        anchor: dict = {}
+        canonical_result = None
+
+        try:
+            if not windows:
+                return self._publish_pending_plan(plan)
+            for window_days in windows:
+                is_canonical = window_days == windows[0]
+                result = self._run_window(window_days, is_canonical, anchor, plan)
+                if result.get("status") != "success":
+                    return result
+                if is_canonical:
+                    canonical_result = result
+
+            self.logger.info("\n" + "=" * 70)
+            self.logger.info("✅ ANALYSIS PIPELINE COMPLETE")
+            self.logger.info("=" * 70 + "\n")
+            return {
+                **canonical_result,
+                "windows_published": len(windows),
+                "windows_pending": plan["pending"],
+            }
+
+        except Exception as e:
+            self.logger.error(f"Pipeline failed: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    def _publish_pending_plan(self, plan: dict) -> dict:
+        """Record a successful daily run when no configured window is full."""
+        timestamp = datetime.now().isoformat()
+        private_result = {
+            "timestamp": timestamp,
+            "status": "pending",
+            "partition": {},
+            "labels": {},
+            "statistics": {
+                "window_plan": {
+                    "covered_days": plan["covered_days"],
+                    "available": [],
+                    "pending": plan["pending"],
+                    "default": plan["default"],
+                }
+            },
+        }
+        if not self.storage.upload_json("processed/analysis_results.json", private_result):
+            return {"status": "error", "message": "Could not persist pending analysis status"}
+        if not export_pending_frontend_data(
+            storage=self.storage,
+            pending_windows=tuple(plan["pending"]),
+            default_window=plan["default"],
+        ):
+            return {"status": "error", "message": "Could not persist frontend pending status"}
+
+        self.logger.info(
+            "ANALYSIS_PENDING covered_days=%d pending=%s",
+            plan["covered_days"],
+            ",".join(str(days) for days in plan["pending"]),
+        )
+        return {
+            "status": "success",
+            "num_communities": 0,
+            "num_channels": 0,
+            "num_edges": 0,
+            "modularity": 0.0,
+            "output_dir": self.config.analysis.output_dir,
+            "windows_published": 0,
+            "windows_pending": plan["pending"],
+        }
+
+    def _run_window(self, window_days, is_canonical: bool, anchor: dict,
+                    plan: dict) -> dict:
+        """Analyse and publish one rolling window.
+
+        Only the canonical window writes the private artifacts — the PNG/HTML
+        visualizations, the graph CSVs and analysis_results.json. The extra
+        windows exist to feed the map's window filter, and duplicating those
+        outputs would just have each window overwrite the last.
+        """
+        analysis = self.config.analysis
+        overlap_threshold = analysis.window_overlap_thresholds.get(
+            window_days, analysis.overlap_threshold
+        )
+        banner = f"{window_days}d" if window_days else "all data"
+
+        # Overlap grows super-linearly with survey count, so the threshold
+        # measured for one window is wrong for the others: too strict at a
+        # narrower window, far too loose at a wider one. Falling back is allowed
+        # but must never be silent, or an uncalibrated window ships looking fine.
+        if (
+            len(analysis.analysis_windows) > 1
+            and window_days != analysis.analysis_window_days
+            and window_days not in analysis.window_overlap_thresholds
+        ):
+            self.logger.warning(
+                "UNCALIBRATED_WINDOW days=%s using overlap_threshold=%d borrowed "
+                "from the %sd calibration. Measure it with "
+                "`scripts/calibrate_windows.sh` and set window_overlap_thresholds.",
+                window_days, overlap_threshold, analysis.analysis_window_days,
             )
-            
+        total = 6 if is_canonical else 4
+        self.logger.info("\n" + "#" * 70)
+        self.logger.info(
+            "WINDOW %s (overlap_threshold=%d%s)",
+            banner, overlap_threshold, ", canonical" if is_canonical else "",
+        )
+        self.logger.info("#" * 70)
+
+        # Step 1: Aggregate
+        self.logger.info("\n[1/%d] AGGREGATING VIEWER DATA", total)
+        self.logger.info("-" * 70)
+        aggregator = self._step_aggregate(window_days)
+        if not aggregator:
+            return {"status": "error", "message": f"Aggregation failed for {banner}"}
+
+        # Step 2: Build graph
+        self.logger.info("\n[2/%d] BUILDING OVERLAP GRAPH", total)
+        self.logger.info("-" * 70)
+        graph = self._step_build_graph(
+            aggregator,
+            overlap_threshold=overlap_threshold,
+            export_csv=is_canonical,
+        )
+        if graph is None:
+            return {"status": "error", "message": f"Graph building failed for {banner}"}
+
+        # Step 3: Detect communities
+        self.logger.info("\n[3/%d] DETECTING COMMUNITIES", total)
+        self.logger.info("-" * 70)
+        partition, communities, detection_stats, graph = self._step_detect_communities(graph)
+        if partition is None:
+            return {"status": "error", "message": f"Community detection failed for {banner}"}
+        if not partition:
+            return {
+                "status": "error",
+                "message": (
+                    f"No community met min_community_size="
+                    f"{analysis.min_community_size} for {banner}"
+                ),
+            }
+
+        # Step 4: Tag communities
+        self.logger.info("\n[4/%d] TAGGING COMMUNITIES", total)
+        self.logger.info("-" * 70)
+        labels, tagging_stats = self._step_tag_communities(
+            communities,
+            aggregator.get_channel_metadata()
+        )
+
+        if is_canonical:
             # Step 5: Visualize
             self.logger.info("\n[5/6] CREATING VISUALIZATIONS")
             self.logger.info("-" * 70)
             self._step_visualize(graph, partition, labels)
-            
-            # Step 6: Save results
-            self.logger.info("\n[6/6] SAVING RESULTS")
-            self.logger.info("-" * 70)
-            self._step_save_results(
-                partition, labels,
-                graph, aggregator,
-                detection_stats, tagging_stats,
-                communities
-            )
-            
-            self.logger.info("\n" + "=" * 70)
-            self.logger.info("✅ ANALYSIS PIPELINE COMPLETE")
-            self.logger.info("=" * 70 + "\n")
-            
-            return {
-                "status": "success",
-                "num_communities": detection_stats['num_communities'],
-                "num_channels": graph.number_of_nodes(),
-                "num_edges": graph.number_of_edges(),
-                "modularity": detection_stats['modularity'],
-                "output_dir": self.config.analysis.output_dir
-            }
-        
-        except Exception as e:
-            self.logger.error(f"Pipeline failed: {e}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+
+        # Step 6: Save results
+        self.logger.info("\n[%d/%d] SAVING RESULTS", total, total)
+        self.logger.info("-" * 70)
+        suffixed_key = self._frontend_key(window_days)
+        # The canonical window also refreshes the unsuffixed file that
+        # smoke-test.sh and any client cached before the filter shipped still ask
+        # for. An unwindowed run already writes that key, and uploading it twice
+        # would just burn a second versioned PUT.
+        also_write = (
+            ("data/frontend-data.json",)
+            if is_canonical and suffixed_key != "data/frontend-data.json"
+            else ()
+        )
+        self._step_save_results(
+            partition, labels,
+            graph, aggregator,
+            detection_stats, tagging_stats,
+            communities,
+            output_key=suffixed_key,
+            also_write=also_write,
+            anchor=anchor,
+            publish_private=is_canonical,
+            # A single-window run advertises nothing, so the browser hides the
+            # time filter rather than offering a window that was never written.
+            # Declared to the browser so the filter shows exactly the windows
+            # that exist, and PENDING for the ones still filling up.
+            available_windows=tuple(sorted(d for d in plan["available"] if d)),
+            pending_windows=tuple(sorted(plan["pending"])),
+            default_window=plan["default"],
+        )
+
+        return {
+            "status": "success",
+            "num_communities": detection_stats['num_communities'],
+            "num_channels": graph.number_of_nodes(),
+            "num_edges": graph.number_of_edges(),
+            "modularity": detection_stats['modularity'],
+            "output_dir": analysis.output_dir,
+        }
+
+    @staticmethod
+    def _frontend_key(window_days) -> str:
+        """Public artifact key for one window.
+
+        An unwindowed run keeps the original key so single-window deployments
+        are untouched by the filter work.
+        """
+        if window_days is None:
+            return "data/frontend-data.json"
+        return f"data/frontend-data-{window_days}d.json"
     
-    def _step_aggregate(self) -> Optional[DataAggregator]:
-        """Aggregation step."""
+    def _step_aggregate(self, window_days=None) -> Optional[DataAggregator]:
+        """Aggregation step for one window.
+
+        ``window_days`` defaults to the configured canonical window so callers
+        that predate the multi-window filter behave exactly as before.
+        """
+        if window_days is None:
+            window_days = self.config.analysis.analysis_window_days
         aggregator = DataAggregator(
             self.config.analysis.logs_dir,
             storage=self.storage,
-            window_days=self.config.analysis.analysis_window_days,
+            window_days=window_days,
         )
         json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
         self.logger.info(
@@ -328,8 +561,21 @@ class PipelineRunner:
         
         return aggregator
     
-    def _step_build_graph(self, aggregator: DataAggregator) -> Optional[object]:
-        """Graph building step."""
+    def _step_build_graph(
+        self,
+        aggregator: DataAggregator,
+        overlap_threshold: Optional[int] = None,
+        export_csv: bool = True,
+    ) -> Optional[object]:
+        """Graph building step.
+
+        ``overlap_threshold`` overrides the configured default for one window,
+        because the value calibrated at 30 days is too strict at 14 and far too
+        loose at 90. ``export_csv`` is off for non-canonical windows, whose CSVs
+        would otherwise overwrite the canonical ones under the same date key.
+        """
+        if overlap_threshold is None:
+            overlap_threshold = self.config.analysis.overlap_threshold
         channel_viewers = aggregator.get_channel_viewers()
         channel_metadata = aggregator.get_channel_metadata()
         
@@ -370,7 +616,7 @@ class PipelineRunner:
                            f"(min {self.config.analysis.min_channel_viewers} viewers)")
 
         builder = GraphBuilder(
-            overlap_threshold=self.config.analysis.overlap_threshold,
+            overlap_threshold=overlap_threshold,
             include_isolated_nodes=self.config.analysis.include_isolated_nodes,
             weighting_mode=self.config.analysis.weighting_mode,
             normalized_overlap_threshold=self.config.analysis.normalized_overlap_threshold,
@@ -389,7 +635,7 @@ class PipelineRunner:
             self.logger.error("Graph has no edges. Try lowering overlap_threshold.")
             return None
         
-        if self.config.analysis.export_graph_csv:
+        if self.config.analysis.export_graph_csv and export_csv:
             nodes_path = f"{self.config.analysis.output_dir}/graph_nodes.csv"
             edges_path = f"{self.config.analysis.output_dir}/graph_edges.csv"
             builder.export_nodes_csv(nodes_path)
@@ -488,8 +734,20 @@ class PipelineRunner:
                 self.logger.warning(f"Interactive visualization failed: {e}")
     
     def _step_save_results(self, partition, labels, graph, aggregator,
-                          detection_stats, tagging_stats, communities=None) -> None:
-        """Persist both required analysis artifacts or fail the scheduled run."""
+                          detection_stats, tagging_stats, communities=None,
+                          output_key: str = "data/frontend-data.json",
+                          also_write: tuple = (),
+                          anchor: Optional[dict] = None,
+                          publish_private: bool = True,
+                          available_windows: tuple = (),
+                          pending_windows: tuple = (),
+                          default_window: Optional[int] = None) -> None:
+        """Persist the required analysis artifacts or fail the scheduled run.
+
+        ``publish_private`` is False for the extra windows: only the canonical
+        window writes analysis_results.json, which is a single private record of
+        the run rather than one per window.
+        """
         graph_stats = {
             "num_nodes": graph.number_of_nodes(),
             "num_edges": graph.number_of_edges(),
@@ -513,7 +771,7 @@ class PipelineRunner:
             }
         }
         
-        if self.config.analysis.save_analysis_json:
+        if self.config.analysis.save_analysis_json and publish_private:
             results_key = "processed/analysis_results.json"
             if not self.storage.upload_json(results_key, results):
                 raise IOError("Could not persist private analysis results")
@@ -534,6 +792,12 @@ class PipelineRunner:
                     max_edges=self.config.analysis.frontend_max_edges,
                     top_edges_per_channel=self.config.analysis.frontend_top_edges_per_channel,
                 ),
+                output_key=output_key,
+                also_write=also_write,
+                anchor=anchor,
+                available_windows=available_windows,
+                pending_windows=pending_windows,
+                default_window=default_window,
             )
             if not exported:
                 raise IOError("Could not persist public frontend data")

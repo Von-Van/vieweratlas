@@ -1,9 +1,9 @@
 # ViewerAtlas Developer Guide
 
 This guide describes the current EventSub survey release. The old Twitch IRC
-collector, continuously running collector mode, discovery/SQS workers, and VOD
-tasks are retained only as inactive source history. Do not deploy or restart
-them.
+collector, continuously running collector mode, discovery/SQS workers, and
+their deployment assets have been removed. The VOD preprocessor remains a local
+development command only; do not deploy or schedule it.
 
 For operator-facing instructions, use [DEPLOYMENT.md](DEPLOYMENT.md) and
 [DAILY_OPERATIONS.md](DAILY_OPERATIONS.md). This page focuses on the current
@@ -111,11 +111,19 @@ and keeps legacy snapshot compatibility during migration.
 Every channel row records its frozen rank and discovery metadata, exact common
 window, collection status, unique-author count, and aligned deterministic JSON
 arrays for author IDs and logins. These files are private. Current v2 objects
-expire after 90 days and noncurrent versions after seven days.
+expire after 100 days and noncurrent versions after seven days. The retention
+must stay ahead of the widest entry in `analysis_windows`, or that window reads
+a tail that is expiring underneath it.
 
 The public `data/frontend-data.json` schema is unchanged. It contains aggregate
 channel and graph results only; it must never receive author IDs, logins, raw
 arrays, or survey manifests.
+
+The analysis publishes one file per entry in `analysis_windows` —
+`data/frontend-data-14d.json`, `-30d.json`, `-90d.json` — all sharing that same
+schema. The canonical window (`analysis_window_days`) additionally writes the
+unsuffixed file. Every one of them crosses the public boundary, so `smoke-test.sh`
+runs its privacy check against all of them.
 
 ## Twitch authentication
 
@@ -197,8 +205,14 @@ activation.
 
 ## Deferred work
 
-- Graph mathematics and the 30/60/90-day presentation controls are a separate
-  follow-up that will consume the stable IDs already captured.
+- The map's time filter offers 14/30/90-day windows. Each run publishes only
+  the windows the retained surveys can fill and marks the rest PENDING in the
+  payload, so windows promote themselves without a redeploy. Their per-window
+  overlap thresholds are not yet measured: until `window_overlap_thresholds` is
+  filled in, a promoted window borrows the 30-day value and the run logs
+  `UNCALIBRATED_WINDOW`. See `scripts/calibrate_windows.sh`.
+- The graph mathematics refactor onto the stable author IDs already captured is
+  still a separate follow-up.
 - Website channel opt-in is reserved by `selection_source` values `opt_in` and
   `both`, but is not implemented in this release.
 - The cost estimate is calculated after the first complete production survey

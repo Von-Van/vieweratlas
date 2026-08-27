@@ -15,18 +15,19 @@ import sys
 import tempfile
 import shutil
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from collections import defaultdict
 
 import pytest
+import logging
 import networkx as nx
 from unittest.mock import patch, MagicMock
 
 # Ensure src/ is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from data_aggregator import DataAggregator
+from data_aggregator import DataAggregator, survey_date_span
 from graph_builder import GraphBuilder
 from community_detector import CommunityDetector, LOUVAIN_AVAILABLE
 from cluster_tagger import ClusterTagger
@@ -34,7 +35,6 @@ from config import (
     CollectionConfig,
     AnalysisConfig,
     VODConfig,
-    SQSConfig,
     PipelineConfig,
     get_default_config,
     get_rigorous_config,
@@ -42,11 +42,11 @@ from config import (
     get_debug_config,
     load_config_from_yaml,
 )
-from daily_collection_state import DynamoDBCollectionState
-from frontend_exporter import FrontendExportConfig, export_frontend_data
-from sqs_task_queue import SQSTaskQueue, ChannelTask
-from discovery import run_discovery
-from worker import _collect_channel, _flush_parquet, run_worker_loop
+from frontend_exporter import (
+    FrontendExportConfig,
+    export_frontend_data,
+    export_pending_frontend_data,
+)
 from storage import S3Storage
 
 
@@ -876,19 +876,6 @@ class TestConfig:
         assert config.analysis.min_user_appearances == 2
         assert config.analysis.show_node_labels is False
 
-    def test_yaml_loads_sqs_section(self, tmp_path):
-        yaml_file = tmp_path / "sqs_config.yaml"
-        yaml_file.write_text(
-            "sqs:\n"
-            "  enabled: true\n"
-            '  queue_url: "https://sqs.example.com/q.fifo"\n'
-            "  worker_concurrency: 4\n"
-        )
-        config = load_config_from_yaml(str(yaml_file))
-        assert config.sqs.enabled is True
-        assert config.sqs.queue_url == "https://sqs.example.com/q.fifo"
-        assert config.sqs.worker_concurrency == 4
-
     def test_yaml_figsize_list_becomes_tuple(self, tmp_path):
         yaml_file = tmp_path / "figsize_config.yaml"
         yaml_file.write_text("analysis:\n  static_viz_figsize: [12, 9]\n")
@@ -1117,6 +1104,123 @@ class TestFrontendExporter:
         ids = [community["id"] for community in storage._json_uploads["data/frontend-data.json"]["communities"]]
         assert len(ids) == len(set(ids))
 
+    @staticmethod
+    def _windowed_graph(members_by_cid):
+        """Cliques per community joined by one weak bridge.
+
+        The public graph drops everything outside its largest connected
+        component, so disconnected communities would vanish before the identity
+        assignment under test ever sees them.
+        """
+        graph = nx.Graph()
+        partition = {}
+        firsts = []
+        for cid, members in members_by_cid.items():
+            firsts.append(members[0])
+            for offset, name in enumerate(members):
+                graph.add_node(
+                    name, viewer_count=100 - offset, viewers=50,
+                    game_name="Game", language="en",
+                )
+                partition[name] = cid
+            for a in members:
+                for b in members:
+                    if a < b:
+                        graph.add_edge(a, b, weight=20)
+        for a, b in zip(firsts, firsts[1:]):
+            graph.add_edge(a, b, weight=1)
+        return graph, partition
+
+    def _export_window(self, members_by_cid, labels, key, anchor, also_write=()):
+        graph, partition = self._windowed_graph(members_by_cid)
+        storage = MockS3Storage()
+        assert export_frontend_data(
+            graph=graph,
+            partition=partition,
+            communities={cid: set(m) for cid, m in members_by_cid.items()},
+            labels=labels,
+            detection_stats={"modularity": 0.5},
+            aggregator_stats={"total_unique_viewers_across_all": 9, "total_snapshots": 3},
+            storage=storage,
+            output_key=key,
+            also_write=also_write,
+            anchor=anchor,
+        ) is True
+        payload = storage._json_uploads[key]
+        return storage, {c["id"]: c["color"] for c in payload["communities"]}
+
+    def test_anchor_holds_community_colors_when_size_rank_changes(self):
+        """A later window must not repaint a community just because it grew.
+
+        Colour is otherwise assigned by size rank, so the map would recolour
+        itself every time the window filter moved.
+        """
+        big, small = ["a1", "a2", "a3", "a4", "a5"], ["b1", "b2", "b3"]
+        labels = {0: "FPS English", 1: "Cozy English"}
+        anchor = {}
+
+        _, canonical = self._export_window(
+            {0: big, 1: small}, labels,
+            "data/frontend-data-30d.json", anchor,
+            also_write=("data/frontend-data.json",),
+        )
+
+        # Cozy overtakes FPS in the wider window; rank ordering alone would swap
+        # their colours here.
+        _, wider = self._export_window(
+            {0: big + ["a6"], 1: small + ["b4", "b5", "b6", "b7", "b8"]},
+            labels, "data/frontend-data-90d.json", anchor,
+        )
+
+        assert set(wider) == set(canonical)
+        assert all(wider[slug] == canonical[slug] for slug in canonical)
+
+    def test_anchor_gives_a_new_community_its_own_color(self):
+        big, small = ["a1", "a2", "a3", "a4", "a5"], ["b1", "b2", "b3"]
+        labels = {0: "FPS English", 1: "Cozy English"}
+        anchor = {}
+
+        _, canonical = self._export_window(
+            {0: big, 1: small}, labels, "data/frontend-data-30d.json", anchor
+        )
+        _, wider = self._export_window(
+            {0: big, 1: small, 2: ["z1", "z2", "z3"]},
+            {**labels, 2: "Chess English"},
+            "data/frontend-data-90d.json", anchor,
+        )
+
+        assert all(wider[slug] == canonical[slug] for slug in canonical)
+        assert "chess-english" in wider
+        assert len(set(wider.values())) == 3
+
+    def test_canonical_window_also_writes_the_unsuffixed_key(self):
+        """smoke-test.sh and pre-filter clients still fetch the unsuffixed file."""
+        storage, _ = self._export_window(
+            {0: ["a1", "a2", "a3"], 1: ["b1", "b2", "b3"]},
+            {0: "FPS English", 1: "Cozy English"},
+            "data/frontend-data-30d.json", {},
+            also_write=("data/frontend-data.json",),
+        )
+        assert storage._json_uploads["data/frontend-data.json"] == \
+            storage._json_uploads["data/frontend-data-30d.json"]
+
+    def test_pending_export_is_schema_valid_and_contains_no_graph_data(self):
+        storage = MockS3Storage()
+        assert export_pending_frontend_data(
+            storage=storage,
+            pending_windows=(14, 30, 90),
+            default_window=14,
+        ) is True
+
+        payload = storage._json_uploads["data/frontend-data.json"]
+        assert payload["availableWindows"] == []
+        assert payload["pendingWindows"] == [14, 30, 90]
+        assert payload["defaultWindow"] == 14
+        assert payload["communities"] == []
+        assert payload["channels"] == []
+        assert payload["edges"] == []
+        assert "chatter" not in json.dumps(payload).lower()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # VOD Snapshot Loading Tests
@@ -1156,7 +1260,6 @@ def tmp_vod_snapshots_dir(tmp_path):
             json.dump(snap, f)
 
     return tmp_path / "logs"
-
 
 class TestVODSnapshotLoading:
     """Tests for VOD snapshot ingestion from local filesystem."""
@@ -1706,6 +1809,17 @@ class TestAnalysisWindow:
         channels = agg.get_channel_viewers()
         assert set(channels) == {"ch_2026-08-10", "ch_2026-08-11", "ch_2026-08-12"}
 
+    def test_window_history_ignores_unfinished_v2_surveys(self):
+        """An early Parquet PUT is not data until its manifest commits it."""
+        storage = _survey_storage(["2026-08-12"])
+        unfinished = "raw/snapshots/v2/date=2026-01-01/session=unfinished"
+        storage._parquet[f"{unfinished}/batch=01.parquet"] = _v2_batch_bytes(
+            "must_not_extend_history", ["alice"]
+        )
+        storage._json_uploads[f"{unfinished}/manifest.json"] = {"status": "partial"}
+
+        assert survey_date_span(storage) == (date(2026, 8, 12), date(2026, 8, 12))
+
     def test_window_boundary_is_inclusive(self, tmp_path):
         """window_days=N spans N distinct days, anchor included."""
         agg = DataAggregator(
@@ -1759,6 +1873,26 @@ class TestAnalysisWindow:
         assert stats["window_end"] == "2026-08-12"
         assert stats["collection_period"] == "Aug 10 – Aug 12, 2026"
 
+    def test_window_reports_days_covered_not_days_requested(self, tmp_path):
+        """collection_period goes straight onto the public site.
+
+        A 90-day window over 60 days of surveys must not advertise a month of
+        data that was never collected.
+        """
+        agg = DataAggregator(
+            str(tmp_path), storage=_survey_storage(["2026-08-10", "2026-08-11", "2026-08-12"]),
+            window_days=90,
+        )
+        agg.load_parquet_snapshots()
+        stats = agg.get_statistics()
+
+        # Requested 90 days; only three exist, so that is what is reported.
+        assert stats["window_start"] == "2026-08-10"
+        assert stats["window_end"] == "2026-08-12"
+        assert stats["collection_period"] == "Aug 10 – Aug 12, 2026"
+        # The requested length is still recorded, so the shortfall is visible.
+        assert stats["analysis_window_days"] == 90
+
     def test_invalid_window_rejected(self, tmp_path):
         with pytest.raises(ValueError):
             DataAggregator(str(tmp_path), window_days=0)
@@ -1769,6 +1903,295 @@ class TestAnalysisWindow:
         yaml_file = tmp_path / "window.yaml"
         yaml_file.write_text("analysis:\n  analysis_window_days: 30\n")
         assert load_config_from_yaml(str(yaml_file)).analysis.analysis_window_days == 30
+
+    def test_multi_window_config_requires_the_canonical_window(self):
+        """The canonical window writes the unsuffixed public file.
+
+        Publishing a set that excludes it would leave that file stale while the
+        suffixed ones moved.
+        """
+        AnalysisConfig(analysis_window_days=30, analysis_windows=(14, 30, 90))
+        with pytest.raises(ValueError, match="analysis_window_days must appear"):
+            AnalysisConfig(analysis_window_days=30, analysis_windows=(14, 90))
+        with pytest.raises(ValueError, match="at least 1"):
+            AnalysisConfig(analysis_window_days=30, analysis_windows=(0, 30))
+
+    def test_window_overlap_thresholds_are_validated(self):
+        AnalysisConfig(window_overlap_thresholds={14: 1, 90: 4})
+        with pytest.raises(ValueError, match="keys must be day counts"):
+            AnalysisConfig(window_overlap_thresholds={0: 1})
+        with pytest.raises(ValueError, match="values must be non-negative"):
+            AnalysisConfig(window_overlap_thresholds={14: -1})
+
+    @staticmethod
+    def _plan(window_days, windows, covered_days):
+        """window_plan() for a deployment holding `covered_days` of surveys."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(
+            collection=CollectionConfig(),
+            analysis=AnalysisConfig(analysis_window_days=window_days, analysis_windows=windows),
+        )
+        runner.logger = logging.getLogger("test")
+        runner.storage = MagicMock()
+        end = date(2026, 8, 26)
+        span = (end - timedelta(days=covered_days - 1), end) if covered_days else (None, None)
+        with patch("main.survey_date_span", return_value=span):
+            return runner.window_plan()
+
+    def test_windows_short_of_data_are_pending_not_analysed(self):
+        """A 90-day window over 14 days of surveys is not a 90-day window.
+
+        Analysing it would spend a full extra pass republishing the 14-day
+        graph, so it waits and the browser shows PENDING instead.
+        """
+        plan = self._plan(30, (14, 30, 90), covered_days=14)
+        assert plan["available"] == [14]
+        assert plan["pending"] == [30, 90]
+        # 30 is configured canonical but not ready, so the widest ready window
+        # becomes the default rather than opening on a window with no file.
+        assert plan["default"] == 14
+
+    def test_windows_promote_themselves_as_surveys_accumulate(self):
+        """No redeploy should be needed for a window to start working."""
+        before_14 = self._plan(30, (14, 30, 90), 13)
+        assert before_14["available"] == []
+        assert before_14["pending"] == [14, 30, 90]
+        assert before_14["default"] == 14
+
+        at_30 = self._plan(30, (14, 30, 90), 30)
+        assert sorted(at_30["available"]) == [14, 30]
+        assert at_30["pending"] == [90]
+        # The configured canonical is ready now, so it reclaims the default.
+        assert at_30["default"] == 30
+
+        at_90 = self._plan(30, (14, 30, 90), 90)
+        assert sorted(at_90["available"]) == [14, 30, 90]
+        assert at_90["pending"] == []
+        assert at_90["default"] == 30
+
+    def test_default_window_leads_so_it_seeds_community_colors(self):
+        plan = self._plan(30, (14, 30, 90), 90)
+        assert plan["available"][0] == plan["default"] == 30
+
+    def test_every_window_is_pending_before_the_narrowest_is_full(self):
+        """A short graph must never be published under a longer label."""
+        plan = self._plan(30, (14, 30, 90), covered_days=3)
+        assert plan["available"] == []
+        assert plan["pending"] == [14, 30, 90]
+        assert plan["default"] == 14
+
+    def test_unwindowed_deployment_declares_no_windows(self):
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(collection=CollectionConfig(), analysis=AnalysisConfig())
+        runner.logger = logging.getLogger("test")
+        runner.storage = MagicMock()
+        plan = runner.window_plan()
+        assert plan["available"] == [None] and plan["pending"] == []
+
+    def test_duplicate_windows_are_analysed_once(self):
+        """A repeat entry would cost a full extra aggregate/graph/detect pass."""
+        plan = self._plan(30, (14, 14, 30, 90), covered_days=90)
+        assert sorted(plan["available"]) == [14, 30, 90]
+
+    def test_frontend_key_is_suffixed_per_window(self):
+        import main as app_main
+
+        assert app_main.PipelineRunner._frontend_key(14) == "data/frontend-data-14d.json"
+        assert app_main.PipelineRunner._frontend_key(90) == "data/frontend-data-90d.json"
+        # An unwindowed run keeps the original key untouched.
+        assert app_main.PipelineRunner._frontend_key(None) == "data/frontend-data.json"
+
+    def test_unwindowed_run_does_not_publish_the_same_key_twice(self):
+        """A single-window deployment writes data/frontend-data.json as its own
+        output key; also_write must not duplicate that PUT."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(collection=CollectionConfig(), analysis=AnalysisConfig())
+        runner.logger = logging.getLogger("test")
+        runner.storage = MagicMock()
+
+        graph = nx.Graph()
+        graph.add_edge("a", "b", weight=9)
+        aggregator = MagicMock()
+        aggregator.get_statistics.return_value = {}
+        aggregator.get_channel_metadata.return_value = {}
+        saved = []
+
+        with patch.object(app_main.PipelineRunner, "_step_aggregate", return_value=aggregator), \
+             patch.object(app_main.PipelineRunner, "_step_build_graph", return_value=graph), \
+             patch.object(app_main.PipelineRunner, "_step_detect_communities",
+                          return_value=({"a": 0, "b": 0}, {0: {"a", "b"}},
+                                        {"num_communities": 1, "modularity": 0.5}, graph)), \
+             patch.object(app_main.PipelineRunner, "_step_tag_communities",
+                          return_value=({0: "Label"}, {})), \
+             patch.object(app_main.PipelineRunner, "_step_visualize"), \
+             patch.object(app_main.PipelineRunner, "_step_save_results",
+                          side_effect=lambda *a, **kw: saved.append(kw)):
+            assert app_main.PipelineRunner.run_analysis_pipeline(runner)["status"] == "success"
+
+        assert len(saved) == 1
+        assert saved[0]["output_key"] == "data/frontend-data.json"
+        assert saved[0]["also_write"] == ()
+
+    def test_published_windows_are_declared_to_the_browser(self):
+        """The filter renders from the payload, so it shows exactly the windows
+        that exist and PENDING for the ones still filling up."""
+        import main as app_main
+
+        def run(analysis_kwargs, covered_days):
+            runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+            runner.config = PipelineConfig(
+                collection=CollectionConfig(), analysis=AnalysisConfig(**analysis_kwargs)
+            )
+            runner.logger = logging.getLogger("test")
+            runner.storage = MagicMock()
+            graph = nx.Graph()
+            graph.add_edge("a", "b", weight=9)
+            aggregator = MagicMock()
+            aggregator.get_statistics.return_value = {}
+            aggregator.get_channel_metadata.return_value = {}
+            saved = []
+            end_day = date(2026, 8, 26)
+            span = (end_day - timedelta(days=covered_days - 1), end_day)
+            with patch("main.survey_date_span", return_value=span), \
+                 patch.object(app_main.PipelineRunner, "_step_aggregate", return_value=aggregator), \
+                 patch.object(app_main.PipelineRunner, "_step_build_graph", return_value=graph), \
+                 patch.object(app_main.PipelineRunner, "_step_detect_communities",
+                              return_value=({"a": 0, "b": 0}, {0: {"a", "b"}},
+                                            {"num_communities": 1, "modularity": 0.5}, graph)), \
+                 patch.object(app_main.PipelineRunner, "_step_tag_communities",
+                              return_value=({0: "Label"}, {})), \
+                 patch.object(app_main.PipelineRunner, "_step_visualize"), \
+                 patch.object(app_main.PipelineRunner, "_step_save_results",
+                              side_effect=lambda *a, **kw: saved.append(kw)):
+                app_main.PipelineRunner.run_analysis_pipeline(runner)
+            return saved
+
+        # Only 14 days exist: one pass runs, the other two are declared pending.
+        early = run({"analysis_window_days": 30, "analysis_windows": (14, 30, 90)}, 14)
+        assert len(early) == 1
+        assert early[0]["available_windows"] == (14,)
+        assert early[0]["pending_windows"] == (30, 90)
+        assert early[0]["default_window"] == 14
+
+        # Once every window is full, all three run and nothing is pending.
+        mature = run({"analysis_window_days": 30, "analysis_windows": (14, 30, 90)}, 90)
+        assert len(mature) == 3
+        assert all(kw["available_windows"] == (14, 30, 90) for kw in mature)
+        assert all(kw["pending_windows"] == () for kw in mature)
+        assert all(kw["default_window"] == 30 for kw in mature)
+
+        # A single-window run advertises nothing, which hides the control.
+        single = run({"analysis_window_days": 30}, 90)
+        assert single[0]["available_windows"] == (30,)
+        assert single[0]["pending_windows"] == ()
+
+    def test_all_pending_plan_refreshes_both_status_outputs(self):
+        """Daily analysis is still a successful, freshness-checkable run."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(
+            collection=CollectionConfig(),
+            analysis=AnalysisConfig(
+                analysis_window_days=30,
+                analysis_windows=(14, 30, 90),
+            ),
+        )
+        runner.logger = logging.getLogger("test")
+        runner.storage = MockS3Storage()
+        end_day = date(2026, 8, 26)
+
+        with patch(
+            "main.survey_date_span",
+            return_value=(end_day - timedelta(days=2), end_day),
+        ):
+            result = app_main.PipelineRunner.run_analysis_pipeline(runner)
+
+        assert result["status"] == "success"
+        assert result["windows_published"] == 0
+        assert result["windows_pending"] == [14, 30, 90]
+        private = runner.storage._json_uploads["processed/analysis_results.json"]
+        public = runner.storage._json_uploads["data/frontend-data.json"]
+        assert private["status"] == "pending"
+        assert private["partition"] == {}
+        assert public["pendingWindows"] == [14, 30, 90]
+
+    def test_each_window_is_analysed_and_published_once(self):
+        """The canonical window leads, carries the private artifacts, and seeds
+        the anchor the other windows reuse."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = get_rigorous_config()
+        # Stated here rather than inherited, so the test keeps meaning if the
+        # preset's window list changes.
+        runner.config.analysis.analysis_windows = (14, 30, 90)
+        runner.config.analysis.window_overlap_thresholds = {14: 1, 90: 5}
+        runner.logger = logging.getLogger("test")
+        runner.storage = MagicMock()
+
+        graph = nx.Graph()
+        graph.add_edge("a", "b", weight=9)
+        aggregator = MagicMock()
+        aggregator.get_statistics.return_value = {}
+        aggregator.get_channel_metadata.return_value = {}
+
+        aggregated, built, saved, visualized = [], [], [], []
+
+        end_day = date(2026, 8, 26)
+        with patch("main.survey_date_span",
+                   return_value=(end_day - timedelta(days=89), end_day)), \
+             patch.object(
+            app_main.PipelineRunner, "_step_aggregate",
+            side_effect=lambda window_days=None: (aggregated.append(window_days), aggregator)[1],
+        ), patch.object(
+            app_main.PipelineRunner, "_step_build_graph",
+            side_effect=lambda agg, overlap_threshold=None, export_csv=True: (
+                built.append((overlap_threshold, export_csv)), graph)[1],
+        ), patch.object(
+            app_main.PipelineRunner, "_step_detect_communities",
+            return_value=({"a": 0, "b": 0}, {0: {"a", "b"}},
+                          {"num_communities": 1, "modularity": 0.5}, graph),
+        ), patch.object(
+            app_main.PipelineRunner, "_step_tag_communities",
+            return_value=({0: "Label"}, {}),
+        ), patch.object(
+            app_main.PipelineRunner, "_step_visualize",
+            side_effect=lambda *a: visualized.append(True),
+        ), patch.object(
+            app_main.PipelineRunner, "_step_save_results",
+            side_effect=lambda *a, **kw: saved.append(kw),
+        ):
+            result = app_main.PipelineRunner.run_analysis_pipeline(runner)
+
+        assert result["status"] == "success"
+        assert result["windows_published"] == 3
+
+        # Canonical first, then the rest in ascending order.
+        assert aggregated == [30, 14, 90]
+        # Each window uses its own calibrated threshold; only the canonical run
+        # writes the graph CSVs, which share one dated key.
+        assert built == [(2, True), (1, False), (5, False)]
+
+        assert [kw["output_key"] for kw in saved] == [
+            "data/frontend-data-30d.json",
+            "data/frontend-data-14d.json",
+            "data/frontend-data-90d.json",
+        ]
+        # Only the canonical window refreshes the unsuffixed file and the
+        # private artifacts, and visualization runs once rather than per window.
+        assert [kw["also_write"] for kw in saved] == [("data/frontend-data.json",), (), ()]
+        assert [kw["publish_private"] for kw in saved] == [True, False, False]
+        assert len(visualized) == 1
+        # One anchor object threads through every window, which is what keeps
+        # community colours stable across the filter.
+        assert len({id(kw["anchor"]) for kw in saved}) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1874,436 +2297,6 @@ class TestMixedLiveVOD:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DynamoDB Collection State Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class MockDynamoDBTable:
-    """In-memory mock of a DynamoDB Table resource for testing."""
-
-    def __init__(self):
-        self._items = {}
-
-    def get_item(self, Key, ConsistentRead=False):
-        pk = Key["pk"]
-        if pk in self._items:
-            return {"Item": self._items[pk]}
-        return {}
-
-    def put_item(self, Item, ConditionExpression=None):
-        pk = Item["pk"]
-        if ConditionExpression == "attribute_not_exists(pk)" and pk in self._items:
-            from botocore.exceptions import ClientError
-            raise ClientError(
-                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "exists"}},
-                "PutItem",
-            )
-        self._items[pk] = Item
-
-
-class MockDynamoDBResource:
-    """Mock boto3 DynamoDB resource that returns MockDynamoDBTable."""
-
-    def __init__(self):
-        self._tables = {}
-
-    def Table(self, name):
-        if name not in self._tables:
-            self._tables[name] = MockDynamoDBTable()
-        return self._tables[name]
-
-
-class TestDynamoDBCollectionState:
-
-    @pytest.fixture
-    def dynamo_state(self):
-        resource = MockDynamoDBResource()
-        return DynamoDBCollectionState(
-            table_name="test-state",
-            dynamodb_resource=resource,
-            ttl_days=32,
-        )
-
-    def test_has_collected_returns_false_initially(self, dynamo_state):
-        assert dynamo_state.has_collected("live", "xqc", "2026-03-10") is False
-
-    def test_mark_collected_returns_true_first_time(self, dynamo_state):
-        assert dynamo_state.mark_collected("live", "xqc", "2026-03-10") is True
-
-    def test_mark_collected_returns_false_second_time(self, dynamo_state):
-        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
-        assert dynamo_state.mark_collected("live", "xqc", "2026-03-10") is False
-
-    def test_has_collected_returns_true_after_mark(self, dynamo_state):
-        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
-        assert dynamo_state.has_collected("live", "xqc", "2026-03-10") is True
-
-    def test_different_days_are_independent(self, dynamo_state):
-        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
-        assert dynamo_state.has_collected("live", "xqc", "2026-03-11") is False
-
-    def test_different_sources_are_independent(self, dynamo_state):
-        dynamo_state.mark_collected("live", "xqc", "2026-03-10")
-        assert dynamo_state.has_collected("vod", "xqc", "2026-03-10") is False
-
-    def test_channel_name_normalized_to_lowercase(self, dynamo_state):
-        dynamo_state.mark_collected("live", "XQC", "2026-03-10")
-        assert dynamo_state.has_collected("live", "xqc", "2026-03-10") is True
-
-    def test_pk_format(self):
-        pk = DynamoDBCollectionState._make_pk("live", "XQC", "2026-03-10")
-        assert pk == "live#xqc#2026-03-10"
-
-    def test_ttl_is_set_in_item(self):
-        resource = MockDynamoDBResource()
-        state = DynamoDBCollectionState(
-            table_name="test-state",
-            dynamodb_resource=resource,
-            ttl_days=32,
-        )
-        state.mark_collected("live", "xqc", "2026-03-10")
-        table = resource._tables["test-state"]
-        item = table._items["live#xqc#2026-03-10"]
-        assert "ttl" in item
-        assert isinstance(item["ttl"], int)
-        assert item["ttl"] > 0
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SQS Config Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestSQSConfig:
-
-    def test_default_disabled(self):
-        cfg = SQSConfig()
-        assert cfg.enabled is False
-
-    def test_enabled_requires_queue_url(self):
-        with pytest.raises(ValueError, match="queue_url required"):
-            SQSConfig(enabled=True)
-
-    def test_enabled_with_queue_url(self):
-        cfg = SQSConfig(enabled=True, queue_url="https://sqs.us-east-1.amazonaws.com/123/queue.fifo")
-        assert cfg.enabled is True
-
-    def test_pipeline_config_includes_sqs(self):
-        cfg = PipelineConfig()
-        assert cfg.sqs is not None
-        assert isinstance(cfg.sqs, SQSConfig)
-        assert cfg.sqs.enabled is False
-
-    def test_env_override(self):
-        with patch.dict(os.environ, {"SQS_ENABLED": "true", "SQS_CHANNEL_QUEUE_URL": "https://sqs.example.com/q.fifo"}):
-            cfg = SQSConfig()
-            assert cfg.enabled is True
-            assert cfg.queue_url == "https://sqs.example.com/q.fifo"
-
-    def test_dynamodb_table_env_override(self):
-        with patch.dict(os.environ, {"DYNAMODB_STATE_TABLE": "my-custom-table"}):
-            cfg = SQSConfig()
-            assert cfg.dynamodb_state_table == "my-custom-table"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SQS Task Queue Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class MockSQSClient:
-    """In-memory mock of boto3 SQS client."""
-
-    def __init__(self):
-        self._messages = []  # list of {"Body": str, "MessageId": str, "ReceiptHandle": str}
-        self._next_id = 0
-        self.deleted_receipts = []
-
-    def send_message_batch(self, QueueUrl, Entries):
-        successful = []
-        for entry in Entries:
-            self._next_id += 1
-            msg_id = f"msg-{self._next_id}"
-            self._messages.append({
-                "Body": entry["MessageBody"],
-                "MessageId": msg_id,
-                "ReceiptHandle": f"rh-{msg_id}",
-            })
-            successful.append({"Id": entry["Id"], "MessageId": msg_id})
-        return {"Successful": successful, "Failed": []}
-
-    def receive_message(self, QueueUrl, MaxNumberOfMessages=1, VisibilityTimeout=900, WaitTimeSeconds=0):
-        batch = self._messages[:MaxNumberOfMessages]
-        self._messages = self._messages[MaxNumberOfMessages:]
-        return {"Messages": batch} if batch else {}
-
-    def delete_message(self, QueueUrl, ReceiptHandle):
-        self.deleted_receipts.append(ReceiptHandle)
-        return {}
-
-
-class TestChannelTask:
-
-    def test_round_trip_json(self):
-        task = ChannelTask(channel="xqc", cycle_id="2026-03-11T14:00:00", utc_day="2026-03-11")
-        restored = ChannelTask.from_json(task.to_json())
-        assert restored.channel == "xqc"
-        assert restored.cycle_id == "2026-03-11T14:00:00"
-        assert restored.utc_day == "2026-03-11"
-
-
-class TestSQSTaskQueue:
-
-    @pytest.fixture
-    def queue(self):
-        client = MockSQSClient()
-        return SQSTaskQueue(queue_url="https://sqs.example.com/q.fifo", sqs_client=client), client
-
-    def test_publish_and_receive(self, queue):
-        q, client = queue
-        tasks = [
-            ChannelTask(channel="xqc", cycle_id="c1", utc_day="2026-03-11"),
-            ChannelTask(channel="shroud", cycle_id="c1", utc_day="2026-03-11"),
-        ]
-        sent = q.publish_tasks(tasks)
-        assert sent == 2
-
-        received = q.receive_tasks(max_messages=10)
-        assert len(received) == 2
-        assert received[0]["task"].channel == "xqc"
-        assert received[1]["task"].channel == "shroud"
-
-    def test_receive_empty_queue(self, queue):
-        q, _ = queue
-        received = q.receive_tasks(max_messages=10)
-        assert received == []
-
-    def test_delete_task(self, queue):
-        q, client = queue
-        q.publish_tasks([ChannelTask(channel="a", cycle_id="c1", utc_day="d1")])
-        received = q.receive_tasks(max_messages=1)
-        assert q.delete_task(received[0]["receipt_handle"]) is True
-
-    def test_publish_large_batch(self, queue):
-        """Batches of >10 are split into sub-batches of 10."""
-        q, client = queue
-        tasks = [ChannelTask(channel=f"ch{i}", cycle_id="c1", utc_day="d1") for i in range(25)]
-        sent = q.publish_tasks(tasks)
-        assert sent == 25
-        assert len(client._messages) == 25
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Discovery Service Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestDiscovery:
-
-    def test_run_discovery_publishes_new_channels(self):
-        """Discovery should publish tasks for channels not yet collected."""
-        sqs_client = MockSQSClient()
-        dynamo_resource = MockDynamoDBResource()
-
-        with patch("discovery.fetch_top_channels", return_value=["ch_a", "ch_b", "ch_c"]):
-            result = run_discovery(
-                channel_limit=100,
-                queue_url="https://sqs.example.com/q.fifo",
-                dynamodb_table="test-state",
-                sqs_client=sqs_client,
-                dynamodb_resource=dynamo_resource,
-            )
-
-        assert result["discovered"] == 3
-        assert result["skipped"] == 0
-        assert result["published"] == 3
-        assert len(sqs_client._messages) == 3
-
-    def test_run_discovery_skips_already_collected(self):
-        """Channels already in DynamoDB should be skipped."""
-        sqs_client = MockSQSClient()
-        dynamo_resource = MockDynamoDBResource()
-
-        # Pre-mark ch_b as collected
-        state = DynamoDBCollectionState(
-            table_name="test-state",
-            dynamodb_resource=dynamo_resource,
-        )
-        from datetime import datetime, timezone
-        utc_day = datetime.now(timezone.utc).date().isoformat()
-        state.mark_collected("live", "ch_b", utc_day)
-
-        with patch("discovery.fetch_top_channels", return_value=["ch_a", "ch_b", "ch_c"]):
-            result = run_discovery(
-                channel_limit=100,
-                queue_url="https://sqs.example.com/q.fifo",
-                dynamodb_table="test-state",
-                sqs_client=sqs_client,
-                dynamodb_resource=dynamo_resource,
-            )
-
-        assert result["discovered"] == 3
-        assert result["skipped"] == 1
-        assert result["published"] == 2
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Worker Tests
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestWorkerHelpers:
-
-    def test_collect_channel_returns_row_on_success(self):
-        mock_info = {
-            "viewer_count": 1500,
-            "game_name": "Valorant",
-            "title": "Ranked",
-            "started_at": "2026-03-11T12:00:00Z",
-            "language": "en",
-        }
-        with patch("worker.requests") as mock_requests:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"data": [mock_info]}
-            mock_resp.raise_for_status = MagicMock()
-            mock_requests.get.return_value = mock_resp
-            row = _collect_channel("xqc", "client123", "oauth123", {"alice", "bob"})
-
-        assert row is not None
-        assert row["channel"] == "xqc"
-        assert row["viewer_count"] == 1500
-        assert row["game_name"] == "Valorant"
-        assert json.loads(row["chatters_json"]) == ["alice", "bob"]
-
-    def test_collect_channel_requires_non_empty_chatters(self):
-        mock_info = {
-            "viewer_count": 1500,
-            "game_name": "Valorant",
-            "title": "Ranked",
-            "started_at": "2026-03-11T12:00:00Z",
-            "language": "en",
-        }
-        with patch("worker.requests") as mock_requests:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"data": [mock_info]}
-            mock_resp.raise_for_status = MagicMock()
-            mock_requests.get.return_value = mock_resp
-            row = _collect_channel("xqc", "client123", "oauth123", set())
-
-        assert row is None
-
-    def test_collect_channel_returns_none_when_offline(self):
-        with patch("worker.requests") as mock_requests:
-            mock_resp = MagicMock()
-            mock_resp.json.return_value = {"data": []}
-            mock_resp.raise_for_status = MagicMock()
-            mock_requests.get.return_value = mock_resp
-            row = _collect_channel("offline_ch", "client123", "oauth123")
-
-        assert row is None
-
-    def test_flush_parquet_writes_to_storage(self):
-        rows = [
-            {
-                "channel": "test_ch",
-                "timestamp": "2026-03-11T14:00:00",
-                "viewer_count": 100,
-                "game_name": "Test",
-                "title": "Test stream",
-                "started_at": "2026-03-11T12:00:00Z",
-                "language": "en",
-                "chatters_json": '["alice"]',
-            }
-        ]
-        storage = MockS3Storage()
-        assert _flush_parquet(rows, storage, "20260311_140000") is True
-        assert len(storage._parquet) == 1
-        key = list(storage._parquet.keys())[0]
-        assert key.startswith("raw/snapshots/")
-        assert key.endswith(".parquet")
-
-    def test_worker_loop_writes_then_marks_and_deletes(self, monkeypatch):
-        monkeypatch.setenv("TWITCH_CLIENT_ID", "client123")
-        monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "oauth123")
-
-        sqs_client = MockSQSClient()
-        queue = SQSTaskQueue("https://sqs.example.com/q.fifo", sqs_client=sqs_client)
-        queue.publish_tasks([ChannelTask(channel="xqc", cycle_id="c1", utc_day="2026-03-11")])
-
-        dynamo_resource = MockDynamoDBResource()
-        storage = MockS3Storage()
-        mock_info = {
-            "viewer_count": 1500,
-            "game_name": "Valorant",
-            "title": "Ranked",
-            "started_at": "2026-03-11T12:00:00Z",
-            "language": "en",
-        }
-
-        async def fake_collect_chatters(channels, oauth_token, sample_seconds):
-            return {"xqc": {"alice", "bob"}}
-
-        with patch("worker._collect_chatters_for_channels", new=fake_collect_chatters), \
-             patch("worker._fetch_stream_info", return_value=mock_info):
-            run_worker_loop(
-                queue_url="https://sqs.example.com/q.fifo",
-                dynamodb_table="test-state",
-                storage=storage,
-                sqs_client=sqs_client,
-                dynamodb_resource=dynamo_resource,
-                max_empty_polls=1,
-                sample_seconds=0,
-            )
-
-        assert len(storage._parquet) == 1
-        assert sqs_client.deleted_receipts == ["rh-msg-1"]
-        state = DynamoDBCollectionState("test-state", dynamodb_resource=dynamo_resource)
-        assert state.has_collected("live", "xqc", "2026-03-11") is True
-
-        agg = DataAggregator("unused", storage=storage)
-        assert agg.load_parquet_snapshots() == 1
-        assert agg.get_channel_viewers()["xqc"] == {"alice", "bob"}
-
-    def test_worker_loop_does_not_mark_or_delete_failed_collection(self, monkeypatch):
-        monkeypatch.setenv("TWITCH_CLIENT_ID", "client123")
-        monkeypatch.setenv("TWITCH_OAUTH_TOKEN", "oauth123")
-
-        sqs_client = MockSQSClient()
-        queue = SQSTaskQueue("https://sqs.example.com/q.fifo", sqs_client=sqs_client)
-        queue.publish_tasks([ChannelTask(channel="quiet_ch", cycle_id="c1", utc_day="2026-03-11")])
-
-        dynamo_resource = MockDynamoDBResource()
-        storage = MockS3Storage()
-        mock_info = {
-            "viewer_count": 10,
-            "game_name": "Just Chatting",
-            "title": "Quiet",
-            "started_at": "2026-03-11T12:00:00Z",
-            "language": "en",
-        }
-
-        async def fake_collect_chatters(channels, oauth_token, sample_seconds):
-            return {"quiet_ch": set()}
-
-        with patch("worker._collect_chatters_for_channels", new=fake_collect_chatters), \
-             patch("worker._fetch_stream_info", return_value=mock_info):
-            run_worker_loop(
-                queue_url="https://sqs.example.com/q.fifo",
-                dynamodb_table="test-state",
-                storage=storage,
-                sqs_client=sqs_client,
-                dynamodb_resource=dynamo_resource,
-                max_empty_polls=1,
-                sample_seconds=0,
-            )
-
-        assert storage._parquet == {}
-        assert sqs_client.deleted_receipts == []
-        state = DynamoDBCollectionState("test-state", dynamodb_resource=dynamo_resource)
-        assert state.has_collected("live", "quiet_ch", "2026-03-11") is False
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # Analysis Prerequisite Validation Tests
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2311,8 +2304,8 @@ class TestWorkerHelpers:
 class TestAnalysisInputValidation:
     """The analyze gate must accept exactly what collection writes.
 
-    Live collection (ChatLogger and worker) only ever writes Parquet under
-    raw/snapshots/, so a JSON-only check rejects a perfectly healthy dataset.
+    Live EventSub collection writes Parquet under raw/snapshots/, so a
+    JSON-only check rejects a perfectly healthy dataset.
     """
 
     def _runner(self, storage, storage_type="file", logs_dir="logs"):

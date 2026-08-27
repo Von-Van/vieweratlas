@@ -32,33 +32,6 @@ load_env_file() {
     done < "$env_file"
 }
 
-read_config_value() {
-    local section=$1
-    local key=$2
-    local default_value=$3
-    local config_file=$4
-
-    local value
-    value=$(awk -v s="$section" -v k="$key" '
-        $0 ~ "^" s ":" {in_section=1; next}
-        in_section && $0 ~ "^[^[:space:]]" {in_section=0}
-        in_section && $1 ~ "^" k ":" {
-            line=$0
-            sub(/#.*/, "", line)
-            sub(/^[^:]+:[[:space:]]*/, "", line)
-            gsub(/\"/, "", line)
-            gsub(/[[:space:]]+$/, "", line)
-            print line
-            exit
-        }
-    ' "$config_file")
-
-    if [ -z "$value" ]; then
-        value="$default_value"
-    fi
-    echo "$value"
-}
-
 load_env_file
 
 # Environment-aware naming (mirrors deploy.sh)
@@ -82,8 +55,6 @@ ALERT_EMAIL=${ALERT_EMAIL:-}
 SUBNET_IDS=${SUBNET_IDS:-}
 SECURITY_GROUP_ID=${SECURITY_GROUP_ID:-}
 PUSH_LATEST=${PUSH_LATEST:-false}
-COLLECTOR_DESIRED_COUNT=0
-ANALYSIS_DESIRED_COUNT=${ANALYSIS_DESIRED_COUNT:-0}
 BUDGET_LIMIT=${BUDGET_LIMIT:-50}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -112,16 +83,6 @@ if [ -z "$S3_BUCKET" ]; then
     err "S3_BUCKET environment variable not set"
     exit 1
 fi
-
-CONFIG_FILE="../../config/config.yaml"
-if [ ! -f "$CONFIG_FILE" ]; then
-    err "Config file not found: $CONFIG_FILE"
-    exit 1
-fi
-
-MAX_RUNTIME_HOURS=$(read_config_value "collection" "max_runtime_hours" "24" "$CONFIG_FILE")
-MAX_COLLECTION_CYCLES=$(read_config_value "collection" "max_collection_cycles" "100" "$CONFIG_FILE")
-MAX_VODS_PER_RUN=$(read_config_value "vod" "max_vods_per_run" "50" "$CONFIG_FILE")
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}ViewerAtlas Safe Deployment${NC}"
@@ -240,14 +201,18 @@ aws s3api put-bucket-versioning \
     --bucket "$S3_BUCKET" \
     --versioning-configuration Status=Enabled >/dev/null
 
+# The survey rule keeps ten days more than the widest published analysis window
+# (90). At exactly 90 the oldest day of that window is expiring while analysis
+# reads it, so the 90-day map would silently lose its own tail. Raise this rule
+# first if analysis_windows ever grows past 90, and keep DATA_POLICY.md in step.
 cat > /tmp/vieweratlas-lifecycle.json <<JSON
 {
   "Rules": [
     {
-      "ID": "DeleteSurveySnapshotsV2After90Days",
+      "ID": "DeleteSurveySnapshotsV2After100Days",
       "Status": "Enabled",
       "Filter": {"Prefix": "${S3_KEY_PREFIX}raw/snapshots/v2/"},
-      "Expiration": {"Days": 90},
+      "Expiration": {"Days": 100},
       "NoncurrentVersionExpiration": {"NoncurrentDays": 7}
     },
     {
@@ -268,6 +233,12 @@ cat > /tmp/vieweratlas-lifecycle.json <<JSON
         {"Days": 30, "StorageClass": "STANDARD_IA"}
       ],
       "Expiration": {"Days": 90}
+    },
+    {
+      "ID": "DeleteAccessLogsAfter30Days",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "${S3_KEY_PREFIX}analytics/cloudfront/"},
+      "Expiration": {"Days": 30}
     },
     {
       "ID": "ArchiveProcessedData",
@@ -304,8 +275,6 @@ SECURITY_GROUP_ID="$SECURITY_GROUP_ID" \
 ALERT_EMAIL="$ALERT_EMAIL" \
 IMAGE_TAG="$IMAGE_TAG" \
 PUSH_LATEST="$PUSH_LATEST" \
-COLLECTOR_DESIRED_COUNT="$COLLECTOR_DESIRED_COUNT" \
-ANALYSIS_DESIRED_COUNT="$ANALYSIS_DESIRED_COUNT" \
 bash ./deploy.sh
 
 info "Safe deployment completed"

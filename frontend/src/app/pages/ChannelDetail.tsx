@@ -11,7 +11,7 @@ import {
   CartesianGrid,
 } from "recharts";
 import { ArrowLeft, Users, GitBranch, TrendingUp, Globe, ExternalLink } from "lucide-react";
-import { useAtlasData } from "../data/useAtlasData";
+import { useAtlasData, ANALYSIS_WINDOWS } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 
 function getInitials(name: string) {
@@ -64,7 +64,7 @@ const CustomTooltipLine = ({ active, payload, label }: any) => {
 
 export function ChannelDetail() {
   const { id } = useParams<{ id: string }>();
-  const { data, loading } = useAtlasData();
+  const { data, loading, window: activeWindow, setWindow, windowAvailable, switching } = useAtlasData();
 
   if (loading || !data) return <LoadingSkeleton />;
 
@@ -74,6 +74,11 @@ export function ChannelDetail() {
   const color = community?.color ?? "#9147FF";
 
   if (!channel || !community) {
+    // A narrow window samples fewer channels, so a link that worked at 90 days
+    // can miss at 14. Offer the wider window instead of a dead end.
+    const widestWindow = ANALYSIS_WINDOWS[ANALYSIS_WINDOWS.length - 1];
+    const canWiden = windowAvailable && activeWindow !== widestWindow;
+
     return (
       <div
         className="flex flex-col items-center justify-center py-40"
@@ -81,23 +86,45 @@ export function ChannelDetail() {
       >
         <div style={{ fontSize: 48, marginBottom: 16 }}>😕</div>
         <div style={{ color: "#EFEFF1", fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
-          Channel not found
+          {canWiden ? "Not in this window" : "Channel not found"}
         </div>
-        <p style={{ marginBottom: 24 }}>
-          This channel isn't in the current dataset.
+        <p style={{ marginBottom: 24, maxWidth: 420, textAlign: "center", lineHeight: 1.6 }}>
+          {canWiden
+            ? `This channel wasn't sampled often enough to appear in the last ${activeWindow} days. A wider window may include it.`
+            : "This channel isn't in the current dataset."}
         </p>
-        <Link
-          to="/map"
-          className="px-5 py-2.5 rounded-xl"
-          style={{
-            background: "#9147FF",
-            color: "#fff",
-            textDecoration: "none",
-            fontWeight: 600,
-          }}
-        >
-          Back to Map
-        </Link>
+        <div className="flex items-center gap-3">
+          {canWiden && (
+            <button
+              onClick={() => setWindow(widestWindow)}
+              disabled={switching}
+              className="px-5 py-2.5 rounded-xl"
+              style={{
+                background: "#9147FF",
+                color: "#fff",
+                border: "none",
+                cursor: switching ? "wait" : "pointer",
+                fontFamily: "'Space Grotesk', sans-serif",
+                fontWeight: 600,
+              }}
+            >
+              {switching ? "Loading…" : `Try ${widestWindow} days`}
+            </button>
+          )}
+          <Link
+            to="/map"
+            className="px-5 py-2.5 rounded-xl"
+            style={{
+              background: canWiden ? "transparent" : "#9147FF",
+              border: canWiden ? "1px solid #2A2A2E" : "none",
+              color: canWiden ? "#848494" : "#fff",
+              textDecoration: "none",
+              fontWeight: 600,
+            }}
+          >
+            Back to Map
+          </Link>
+        </div>
       </div>
     );
   }

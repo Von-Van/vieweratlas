@@ -99,6 +99,35 @@ echo ""
 echo "[3/5] Creating security response headers policy..."
 HEADERS_POLICY_NAME="vieweratlas-security-headers"
 
+# Custom domain (optional). Leave DOMAIN_NAME empty to serve on the generated
+# *.cloudfront.net name. ACM_CERT_ARN must be a certificate in us-east-1 —
+# CloudFront accepts certificates from that region only, wherever else the stack
+# lives — and must cover both the apex and the www name.
+DOMAIN_NAME=${DOMAIN_NAME:-}
+ACM_CERT_ARN=${ACM_CERT_ARN:-}
+
+ALIASES_BLOCK=""
+VIEWER_CERT_BLOCK=""
+if [ -n "$DOMAIN_NAME" ]; then
+  if [ -z "$ACM_CERT_ARN" ]; then
+    echo "[ERROR] DOMAIN_NAME is set but ACM_CERT_ARN is not." >&2
+    echo "        Request a certificate in us-east-1 covering ${DOMAIN_NAME} and" >&2
+    echo "        www.${DOMAIN_NAME}, validate it by DNS, then set ACM_CERT_ARN." >&2
+    exit 1
+  fi
+  case "$ACM_CERT_ARN" in
+    arn:aws:acm:us-east-1:*) ;;
+    *)
+      echo "[ERROR] ACM_CERT_ARN must be in us-east-1; CloudFront rejects certificates" >&2
+      echo "        from any other region. Got: ${ACM_CERT_ARN}" >&2
+      exit 1
+      ;;
+  esac
+  ALIASES_BLOCK="\"Aliases\": { \"Quantity\": 2, \"Items\": [\"${DOMAIN_NAME}\", \"www.${DOMAIN_NAME}\"] },"
+  VIEWER_CERT_BLOCK="\"ViewerCertificate\": { \"ACMCertificateArn\": \"${ACM_CERT_ARN}\", \"SSLSupportMethod\": \"sni-only\", \"MinimumProtocolVersion\": \"TLSv1.2_2021\" },"
+  echo "  Custom domain: ${DOMAIN_NAME} (+ www)"
+fi
+
 # Keep this CSP in sync with the <meta http-equiv> tag in frontend/index.html.
 # frame-ancestors is ignored in meta form, so the header is what actually
 # enforces clickjacking protection.
@@ -148,6 +177,8 @@ DIST_CONFIG=$(cat <<DISTEOF
   "CallerReference": "vieweratlas-$(date +%s)",
   "Comment": "ViewerAtlas SPA + data",
   "Enabled": true,
+  ${ALIASES_BLOCK}
+  ${VIEWER_CERT_BLOCK}
   "DefaultRootObject": "index.html",
   "Origins": {
     "Quantity": 2,
@@ -230,6 +261,23 @@ echo ""
 echo "  Review the config, then create with:"
 echo "    aws cloudfront create-distribution --distribution-config file:///tmp/vieweratlas-cf-config.json"
 echo ""
+if [ -n "$DOMAIN_NAME" ]; then
+  echo "  To add the domain to an ALREADY RUNNING distribution, update it in place"
+  echo "  rather than creating a second one:"
+  echo "    aws cloudfront get-distribution-config --id \$DISTRIBUTION_ID > current.json"
+  echo "    # copy Aliases and ViewerCertificate from the config above into"
+  echo "    # current.json's DistributionConfig, then:"
+  echo "    aws cloudfront update-distribution --id \$DISTRIBUTION_ID \\"
+  echo "      --distribution-config file://current.json --if-match \$ETAG"
+  echo ""
+  echo "  Then point DNS at it with Route 53 ALIAS records (A and AAAA). Alias"
+  echo "  records work at the zone apex, where a CNAME cannot, and are free."
+  echo ""
+  echo "  NOTE: the security headers policy sets HSTS for two years with"
+  echo "  IncludeSubdomains. On ${DOMAIN_NAME} that commits every subdomain to"
+  echo "  HTTPS for that long. Confirm that is what you want before DNS goes live."
+  echo ""
+fi
 
 # ------------------------------------------------------------------
 # Step 4: Print S3 bucket policy template

@@ -42,9 +42,35 @@ messages, raw author arrays, or the private survey manifest.
 The frontend schema stays unchanged in this release. A smoke test enforces this
 private/public boundary after deployment.
 
+## Site analytics
+
+The CloudFront distribution writes standard access logs (v2) to
+`analytics/cloudfront/` in the private bucket. This is the only analytics the
+site has: no analytics JavaScript is served, no cookies are set, no third party
+receives anything, and the Content-Security-Policy stays `'self'` throughout.
+
+The delivery selects its fields explicitly and **excludes every viewer
+identifier** — no `c-ip`, no `c-ip-version`, no `cs(Cookie)`, no
+`x-forwarded-for`. What is written is the date and time, the edge location, the
+request method, path and query, the response status and size, the referrer, the
+user agent, the cache result and the host header.
+
+The consequence is deliberate: these logs can report how often a page was
+requested, and cannot report how many people requested it. Restoring `c-ip` to
+obtain unique-visitor counts would put personal data in this prefix and requires
+revisiting this policy, shortening the retention below, and treating the prefix
+as personal data everywhere it is queried. Reconstructing a viewer identity from
+the remaining fields is equally out of bounds.
+
+Access logs expire after **30 days**.
+
 ## Retention
 
-- Current versions under `raw/snapshots/v2/` expire after **90 days**.
+- Current versions under `raw/snapshots/v2/` expire after **100 days**.
+  The published analysis windows run to 90 days; the extra ten days keep the
+  oldest day of that window from expiring while analysis is still reading it.
+  This is the maximum retention for survey data and must not be raised to
+  create a longer window without revisiting this policy.
 - Replaced or deleted versions under that prefix expire after **seven days**.
 - Legacy `raw/snapshots/` data retains its former 365-day lifecycle while it is
   migrated or allowed to age out.
@@ -87,7 +113,8 @@ a failure. A partial survey must not be treated as a complete cohort by analysis
 
 ## Deferred collection modes
 
-VOD collection and the discovery/SQS worker path remain disabled. The future
+VOD collection remains disabled in production, and the retired discovery/SQS
+worker implementation has been removed. The future
 website opt-in feature will require broadcaster authorization, revocation
 handling, and a private opt-in registry. It may use the reserved
 `selection_source` values `opt_in` and `both`, but must preserve the same public

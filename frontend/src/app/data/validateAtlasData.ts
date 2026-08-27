@@ -1,4 +1,4 @@
-import type { AtlasData } from "./useAtlasData";
+import { ANALYSIS_WINDOWS, type AtlasData } from "./useAtlasData";
 
 const MAX_COMMUNITIES = 500;
 const MAX_CHANNELS = 20_000;
@@ -145,6 +145,45 @@ export function validateAtlasData(value: unknown): AtlasData {
   }
 
   if (!isOverallStats(overallStats)) throw new Error("Atlas summary statistics are invalid");
+
+  // Optional: absent in single-window exports and in any payload predating the
+  // time filter, both of which must keep loading.
+  const { availableWindows, pendingWindows, defaultWindow } = value;
+  if (availableWindows !== undefined) {
+    if (
+      !Array.isArray(availableWindows) ||
+      availableWindows.length > 10 ||
+      !availableWindows.every(
+        (days) => isCount(days) && (ANALYSIS_WINDOWS as readonly number[]).includes(days),
+      )
+    ) {
+      throw new Error("Atlas available windows are invalid");
+    }
+  }
+  if (pendingWindows !== undefined) {
+    if (
+      !Array.isArray(pendingWindows) ||
+      pendingWindows.length > 10 ||
+      !pendingWindows.every(
+        (days) => isCount(days) && (ANALYSIS_WINDOWS as readonly number[]).includes(days),
+      )
+    ) {
+      throw new Error("Atlas pending windows are invalid");
+    }
+  }
+  if (availableWindows !== undefined || pendingWindows !== undefined || defaultWindow !== undefined) {
+    if (!Array.isArray(availableWindows) || !Array.isArray(pendingWindows)) {
+      throw new Error("Atlas window metadata is incomplete");
+    }
+    const described = [...availableWindows, ...pendingWindows];
+    if (
+      new Set(described).size !== described.length ||
+      !isCount(defaultWindow) ||
+      !described.includes(defaultWindow)
+    ) {
+      throw new Error("Atlas window metadata is inconsistent");
+    }
+  }
 
   if (
     !Array.isArray(topCommunitiesBySize) ||

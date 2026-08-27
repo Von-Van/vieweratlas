@@ -68,6 +68,61 @@ def _snapshot_key_date(key: str) -> Optional[date]:
     return None
 
 
+def survey_date_span(storage, logs_dir: str = "logs") -> Tuple[Optional[date], Optional[date]]:
+    """Earliest and latest dated *completed* survey day.
+
+    Window planning has to know how much history exists *before* deciding which
+    windows are worth analysing. V2 Parquet objects are written before their
+    terminal manifest, so their dates count only when the matching manifest is
+    complete or complete-with-errors — the same commit rule used by the loader.
+    Legacy date-partitioned Parquet has no manifest and remains eligible.
+
+    Returns (None, None) when nothing datable is present.
+    """
+    keys: List[str] = []
+    if storage is not None:
+        keys = list(storage.list_files(prefix="raw/snapshots", suffix=".parquet"))
+    else:
+        search_dir = Path(logs_dir) / "raw" / "snapshots"
+        if search_dir.exists():
+            keys = [
+                str(path.relative_to(Path(logs_dir))).replace("\\", "/")
+                for path in search_dir.rglob("*.parquet")
+            ]
+
+    eligible_keys: List[str] = []
+    manifest_status: Dict[str, bool] = {}
+    for key in keys:
+        match = _V2_BATCH_KEY.fullmatch(str(key).replace("\\", "/"))
+        if match is None:
+            eligible_keys.append(key)
+            continue
+
+        manifest_key = f"{match.group('session_prefix')}/manifest.json"
+        if manifest_key not in manifest_status:
+            try:
+                if storage is not None:
+                    manifest = storage.download_json(manifest_key)
+                else:
+                    manifest_path = Path(logs_dir) / manifest_key
+                    with open(manifest_path, encoding="utf-8") as handle:
+                        manifest = json.load(handle)
+                status = manifest.get("status") if isinstance(manifest, dict) else None
+                manifest_status[manifest_key] = status in _ANALYZABLE_V2_SURVEY_STATES
+            except (OSError, ValueError, TypeError):
+                manifest_status[manifest_key] = False
+        if manifest_status[manifest_key]:
+            eligible_keys.append(key)
+
+    days = [
+        day for day in (_snapshot_key_date(key) for key in eligible_keys)
+        if day is not None
+    ]
+    if not days:
+        return None, None
+    return min(days), max(days)
+
+
 class DataAggregator:
     """
     Aggregates viewer data from JSON/CSV log files.
@@ -208,16 +263,32 @@ class DataAggregator:
 
         anchor = max(observed)
         start = anchor - timedelta(days=self.window_days - 1)
-        self.window_start, self.window_end = start, anchor
 
         selected = [key for key, day in dated if day is None or day >= start]
         self.skipped_outside_window = len(keys) - len(selected)
 
+        # Report the range actually covered, not the range requested. When fewer
+        # days are retained than the window asks for, the two differ, and
+        # window_start feeds collection_period straight onto the public site — a
+        # 90-day window over 60 days of surveys would otherwise advertise a
+        # month of data that was never collected.
+        in_window = [day for day in observed if day >= start]
+        self.window_start = min(in_window) if in_window else start
+        self.window_end = anchor
+        covered_days = (anchor - self.window_start).days + 1
+
         logger.info(
             "Analysis window: %s..%s (%d days) — %d of %d snapshot objects retained",
-            start.isoformat(), anchor.isoformat(), self.window_days,
+            self.window_start.isoformat(), anchor.isoformat(), self.window_days,
             len(selected), len(keys)
         )
+        if covered_days < self.window_days:
+            logger.warning(
+                "SHORT_WINDOW requested=%dd covered=%dd — only surveys from %s "
+                "onward exist. Results describe %d days regardless of the label.",
+                self.window_days, covered_days,
+                self.window_start.isoformat(), covered_days,
+            )
         if self.skipped_outside_window:
             logger.info(
                 "Excluded %d snapshot objects older than %s",

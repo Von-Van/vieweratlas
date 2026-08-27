@@ -232,8 +232,10 @@ def _build_public_graph(graph: nx.Graph, config: FrontendExportConfig) -> nx.Gra
         key=lambda item: (-item[2], item[0], item[1]),
     )
 
+    cap_bound = False
     for u, v, weight in candidate_edges:
         if public_graph.number_of_edges() >= config.max_edges:
+            cap_bound = True
             break
         if edge_counts[u] >= config.top_edges_per_channel:
             continue
@@ -242,6 +244,18 @@ def _build_public_graph(graph: nx.Graph, config: FrontendExportConfig) -> nx.Gra
         public_graph.add_edge(u, v, weight=weight)
         edge_counts[u] += 1
         edge_counts[v] += 1
+
+    if cap_bound:
+        # The map is now shaped by max_edges rather than by the data: the
+        # weakest edges that survived the overlap threshold were dropped by
+        # arrival order in the weight sort, not because they were weak. Raise
+        # overlap_threshold for this window rather than raising the cap.
+        logger.warning(
+            "EDGE_CAP_BOUND max_edges=%d reached from %d candidate edges; the "
+            "published graph is truncated by the cap, not by overlap_threshold. "
+            "Recalibrate this window's threshold.",
+            config.max_edges, len(candidate_edges),
+        )
 
     # Channels left with no overlap edge say nothing on an overlap map, and a
     # spring layout flings them to the boundary — where they set the coordinate
@@ -367,6 +381,83 @@ def _community_layout(
     return positions
 
 
+# Any overlap below this fraction is treated as coincidence rather than the same
+# community seen through a different window. Communities are largely stable
+# across 14/30/90 days of the same surveys, so genuine matches sit far above it.
+ANCHOR_MATCH_FLOOR = 0.2
+
+
+def _assign_identity(
+    sorted_comm_ids: list,
+    public_communities: Dict[int, Set[str]],
+    display_labels: Dict[int, str],
+    anchor: dict | None,
+) -> tuple[Dict[int, str], Dict[int, str]]:
+    """Give every community a slug and colour, reusing the anchor run's where possible.
+
+    Colour is assigned by size rank, so three independently analysed windows
+    would hand the same community three different colours and the map would
+    repaint itself every time the filter moved. With an anchor supplied, each
+    community instead inherits the slug and colour of the anchor community it
+    shares the most members with, and only genuinely new communities draw fresh
+    ones.
+
+    An empty ``anchor`` dict is *filled* from this run rather than read, which is
+    how the canonical window seeds the windows analysed after it.
+    """
+    comm_id_to_slug: Dict[int, str] = {}
+    comm_id_to_color: Dict[int, str] = {}
+    used_slugs: set[str] = set()
+    used_colors: list[str] = []
+
+    entries = (anchor or {}).get("communities", [])
+    unclaimed = list(range(len(entries)))
+
+    def _fresh_color(rank: int) -> str:
+        for candidate in COMMUNITY_COLORS:
+            if candidate not in used_colors:
+                return candidate
+        return COMMUNITY_COLORS[rank % len(COMMUNITY_COLORS)]
+
+    for rank, cid in enumerate(sorted_comm_ids):
+        members = public_communities[cid]
+        best_index, best_score = None, ANCHOR_MATCH_FLOOR
+
+        for index in unclaimed:
+            anchor_members = entries[index]["members"]
+            union = len(members | anchor_members)
+            if not union:
+                continue
+            score = len(members & anchor_members) / union
+            if score > best_score:
+                best_index, best_score = index, score
+
+        if best_index is None:
+            slug = _unique_slug(display_labels[cid], cid, used_slugs)
+            color = _fresh_color(rank)
+        else:
+            unclaimed.remove(best_index)
+            slug = entries[best_index]["slug"]
+            color = entries[best_index]["color"]
+            used_slugs.add(slug)
+
+        comm_id_to_slug[cid] = slug
+        comm_id_to_color[cid] = color
+        used_colors.append(color)
+
+    if anchor is not None and not entries:
+        anchor["communities"] = [
+            {
+                "slug": comm_id_to_slug[cid],
+                "color": comm_id_to_color[cid],
+                "members": set(public_communities[cid]),
+            }
+            for cid in sorted_comm_ids
+        ]
+
+    return comm_id_to_slug, comm_id_to_color
+
+
 def export_frontend_data(
     graph: nx.Graph,
     partition: Dict[str, int],
@@ -377,6 +468,11 @@ def export_frontend_data(
     storage: Any,
     output_key: str = "data/frontend-data.json",
     config: FrontendExportConfig | None = None,
+    anchor: dict | None = None,
+    also_write: tuple = (),
+    available_windows: tuple = (),
+    pending_windows: tuple = (),
+    default_window: int | None = None,
 ) -> bool:
     """
     Build and upload the frontend-compatible JSON from pipeline outputs.
@@ -390,6 +486,23 @@ def export_frontend_data(
         aggregator_stats: dict from DataAggregator.get_statistics().
         storage: BaseStorage instance (FileStorage or S3Storage).
         output_key: Storage key for the JSON file.
+        anchor: Optional community-identity carrier. Pass the same empty dict to
+            the canonical window first and to every later window after, so all
+            windows agree on community slugs and colours. See _assign_identity.
+        also_write: Extra storage keys to receive the same payload. The canonical
+            window uses this to publish both its window-suffixed file and the
+            unsuffixed data/frontend-data.json that older clients still fetch.
+        available_windows: Every window this run publishes. The browser reads it
+            to decide which time-filter buttons load data.
+        pending_windows: Windows configured but not yet backed by enough survey
+            history. The browser still shows their buttons, marked PENDING, so
+            the filter explains itself rather than hiding options that are
+            coming. They promote themselves once the data reaches them.
+        default_window: Which window the site opens on — the configured
+            canonical once it is ready, otherwise the widest one that is.
+
+            All three are omitted from the payload when no windows are declared,
+            keeping single-window deployments on the original schema.
 
     Returns:
         True on success, False on failure.
@@ -414,22 +527,19 @@ def export_frontend_data(
             reverse=True,
         )
 
-        comm_id_to_slug: Dict[int, str] = {}
-        comm_id_to_color: Dict[int, str] = {}
-        used_slugs: set[str] = set()
-
         display_labels = _disambiguate_labels(
             labels, sorted_comm_ids, public_communities, public_graph
         )
 
-        frontend_communities = []
-        for rank, cid in enumerate(sorted_comm_ids):
-            label = display_labels[cid]
-            slug = _unique_slug(label, cid, used_slugs)
-            color = COMMUNITY_COLORS[rank % len(COMMUNITY_COLORS)]
+        comm_id_to_slug, comm_id_to_color = _assign_identity(
+            sorted_comm_ids, public_communities, display_labels, anchor
+        )
 
-            comm_id_to_slug[cid] = slug
-            comm_id_to_color[cid] = color
+        frontend_communities = []
+        for cid in sorted_comm_ids:
+            label = display_labels[cid]
+            slug = comm_id_to_slug[cid]
+            color = comm_id_to_color[cid]
 
             frontend_communities.append({
                 "id": slug,
@@ -536,7 +646,10 @@ def export_frontend_data(
         # --- Top communities by size (top 8) ---
         frontend_top_communities = []
         for rank, cid in enumerate(sorted_comm_ids[:8]):
-            label = labels.get(cid, f"Community {cid}")
+            # display_labels, not labels: raw labels collide (several "Just
+            # Chatting (en)" communities), which renders as repeated rows with
+            # the same name in the Stats breakdown.
+            label = display_labels.get(cid, f"Community {cid}")
             members = public_communities[cid]
             total_community_viewers = sum(
                 public_graph.nodes[ch].get("viewer_count", public_graph.nodes[ch].get("viewers", 0))
@@ -559,7 +672,7 @@ def export_frontend_data(
             frontend_most_connected.append({
                 "name": _capitalize_channel(node),
                 "edges": deg,
-                "community": labels.get(cid, "Unknown"),
+                "community": display_labels.get(cid, "Unknown"),
                 "color": comm_id_to_color.get(cid, "#9147FF"),
             })
 
@@ -573,9 +686,19 @@ def export_frontend_data(
             "topCommunitiesBySize": frontend_top_communities,
             "mostConnectedChannels": frontend_most_connected,
         }
+        # A single-window deployment declares nothing and the browser hides the
+        # filter entirely; anything with a window list describes all of it.
+        if available_windows and (len(available_windows) + len(pending_windows)) > 1:
+            payload["availableWindows"] = sorted(available_windows)
+            payload["pendingWindows"] = sorted(pending_windows)
+            payload["defaultWindow"] = default_window or min(available_windows)
 
         # Upload
         success = storage.upload_json(output_key, payload)
+        for extra_key in also_write:
+            # A partial publish would leave the two keys disagreeing about the
+            # same window, so treat any miss as a failed export.
+            success = storage.upload_json(extra_key, payload) and success
         if success:
             logger.info(
                 "Frontend data exported: %d communities, %d channels, %d edges → %s",
@@ -592,3 +715,52 @@ def export_frontend_data(
     except Exception as e:
         logger.error("Frontend data export failed: %s", e, exc_info=True)
         return False
+
+
+def export_pending_frontend_data(
+    storage: Any,
+    pending_windows: tuple,
+    default_window: int,
+    output_key: str = "data/frontend-data.json",
+) -> bool:
+    """Publish a schema-valid status payload before the first window is full.
+
+    The frontend always starts at the stable unsuffixed key. During the first
+    thirteen days there is no honest 14-day graph to put there, but the browser
+    still needs the configured window metadata in order to render PENDING rather
+    than falling back to demo data. Empty aggregate arrays keep the established
+    public schema intact and contain no private observations.
+    """
+    payload = {
+        "generatedAt": datetime.now().isoformat(),
+        "availableWindows": [],
+        "pendingWindows": sorted(pending_windows),
+        "defaultWindow": default_window,
+        "communities": [],
+        "channels": [],
+        "edges": [],
+        "overallStats": {
+            "totalChannels": 0,
+            "totalViewers": 0,
+            "communitiesDetected": 0,
+            "modularityScore": 0.0,
+            "collectionPeriod": "PENDING — collecting survey history",
+            "dataPoints": 0,
+            "edgesTotal": 0,
+            "avgOverlapWeight": 0,
+            "renderedChannels": 0,
+            "renderedEdges": 0,
+        },
+        "topCommunitiesBySize": [],
+        "mostConnectedChannels": [],
+    }
+    success = storage.upload_json(output_key, payload)
+    if success:
+        logger.info(
+            "Frontend pending status exported for %s → %s",
+            ", ".join(f"{days}d" for days in sorted(pending_windows)),
+            storage.get_uri(output_key),
+        )
+    else:
+        logger.error("Failed to upload frontend pending status")
+    return success

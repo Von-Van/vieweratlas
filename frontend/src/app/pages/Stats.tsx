@@ -257,7 +257,9 @@ export function Stats() {
                 const pct = (comm.viewers / max) * 100;
                 const color = COMMUNITY_COLORS[i % COMMUNITY_COLORS.length];
                 return (
-                  <div key={comm.community}>
+                  // Rank position, not name: two communities can share a
+                  // display label, and a duplicate key silently drops a row.
+                  <div key={`${i}-${comm.community}`}>
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-2">
                         <div
@@ -326,7 +328,7 @@ export function Stats() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {mostConnectedChannels.map((ch, i) => (
               <div
-                key={ch.name}
+                key={`${i}-${ch.name}`}
                 className="flex items-center gap-4 px-4 py-3 rounded-xl"
                 style={{ background: "#0E0E10", border: "1px solid #2A2A2E" }}
               >

@@ -121,8 +121,11 @@ analysis without reactivating the retired IRC collector.
 - Confirm the SNS email subscription remains confirmed rather than
   `PendingConfirmation`. If AWS sends a new confirmation email, open it and
   click **Confirm subscription**.
-- Confirm S3 lifecycle still shows 90-day current-version and seven-day
-  noncurrent-version expiry for `raw/snapshots/v2/`.
+- Confirm S3 lifecycle still shows 100-day current-version and seven-day
+  noncurrent-version expiry for `raw/snapshots/v2/`. The extra ten days over
+  the widest published analysis window (90) keep that window's oldest day
+  from expiring while analysis is reading it.
+- Confirm `analytics/cloudfront/` still expires after 30 days.
 - Review the AWS bill. After the first full survey, estimate recurring cost from
   its measured task duration and Parquet size, using roughly 90 surveys per
   30-day month.

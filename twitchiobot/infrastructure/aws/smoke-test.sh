@@ -41,6 +41,12 @@ ANALYSIS_SCHEDULE_NAME=${ANALYSIS_SCHEDULE_NAME:-${SERVICE_PREFIX}-analysis-dail
 SCHEDULE_TIMEZONE=${SCHEDULE_TIMEZONE:-America/New_York}
 S3_SURVEY_PREFIX=${S3_SURVEY_PREFIX:-${S3_KEY_PREFIX}raw/snapshots/v2/}
 S3_FRONTEND_DATA_KEY=${S3_FRONTEND_DATA_KEY:-${S3_KEY_PREFIX}data/frontend-data.json}
+# Windows the analysis publishes for the map time filter. Left unset, this is
+# read from the canonical payload's availableWindows, because which windows exist
+# depends on how far the retained surveys reach back — a configured-but-pending
+# window has no file and must not be demanded here. Set it explicitly only to
+# assert a specific set.
+ANALYSIS_WINDOWS=${ANALYSIS_WINDOWS:-}
 S3_ANALYSIS_RESULTS_KEY=${S3_ANALYSIS_RESULTS_KEY:-${S3_KEY_PREFIX}processed/analysis_results.json}
 S3_FRESHNESS_MAX_AGE_MINUTES=${S3_FRESHNESS_MAX_AGE_MINUTES:-720}
 EXPECT_SCHEDULES_ENABLED=${EXPECT_SCHEDULES_ENABLED:-true}
@@ -272,12 +278,43 @@ print(f"Analysis results validated: {len(payload['partition'])} assigned channel
 PY
 fi
 
-# Validate that the refreshed public artifact contains graph aggregates and no
-# author identities.
-frontend_file="$tmp_dir/frontend-data.json"
-aws s3 cp "s3://${S3_BUCKET}/${S3_FRONTEND_DATA_KEY}" "$frontend_file" --region "$AWS_REGION" >/dev/null || \
+# Validate that every refreshed public artifact contains graph aggregates and no
+# author identities. The unsuffixed key is checked first, then one per published
+# window — each crosses the public boundary independently.
+canonical_file="$tmp_dir/frontend-data.json"
+aws s3 cp "s3://${S3_BUCKET}/${S3_FRONTEND_DATA_KEY}" "$canonical_file" --region "$AWS_REGION" >/dev/null || \
     fail "Frontend data is missing at s3://${S3_BUCKET}/${S3_FRONTEND_DATA_KEY}"
-"$PYTHON_BIN" - "$frontend_file" <<'PY'
+
+if [ -z "$ANALYSIS_WINDOWS" ]; then
+    # Ask the payload which windows it published rather than assuming a set.
+    ANALYSIS_WINDOWS=$("$PYTHON_BIN" - "$canonical_file" <<'PYWINDOWS'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+print(" ".join(str(int(d)) for d in payload.get("availableWindows", [])))
+PYWINDOWS
+    )
+    pending=$("$PYTHON_BIN" - "$canonical_file" <<'PYPENDING'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+print(" ".join(str(int(d)) for d in payload.get("pendingWindows", [])))
+PYPENDING
+    )
+    [ -z "$ANALYSIS_WINDOWS" ] || info "Published windows: ${ANALYSIS_WINDOWS// /, }"
+    [ -z "$pending" ] || info "Pending windows (no file expected): ${pending// /, }"
+fi
+
+frontend_keys="$S3_FRONTEND_DATA_KEY"
+for window_days in $ANALYSIS_WINDOWS; do
+    frontend_keys="${frontend_keys} ${S3_KEY_PREFIX}data/frontend-data-${window_days}d.json"
+done
+
+for frontend_key in $frontend_keys; do
+frontend_file="$tmp_dir/$(basename "$frontend_key")"
+aws s3 cp "s3://${S3_BUCKET}/${frontend_key}" "$frontend_file" --region "$AWS_REGION" >/dev/null || \
+    fail "Frontend data is missing at s3://${S3_BUCKET}/${frontend_key}"
+"$PYTHON_BIN" - "$frontend_file" "$frontend_key" <<'PY'
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as handle:
     payload = json.load(handle)
@@ -296,8 +333,9 @@ def leaks(value):
     return False
 if leaks(payload):
     raise SystemExit("Frontend payload leaks private author or message data")
-print(f"Public frontend validated: {len(payload['channels'])} channels")
+print(f"Public frontend validated: {len(payload['channels'])} channels in {sys.argv[2]}")
 PY
+done
 
 if [ "$SMOKE_MODE" = "analysis" ]; then
     info "Analysis freshness smoke test passed"

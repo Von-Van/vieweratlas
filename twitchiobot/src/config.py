@@ -11,7 +11,7 @@ Supports:
 """
 
 import os
-from dataclasses import dataclass, asdict, fields
+from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 from typing import Optional
 
@@ -109,6 +109,19 @@ class AnalysisConfig:
     # None unions every retained snapshot, which makes overlap_threshold drift as
     # data accumulates: viewer sets only grow, so graph density climbs over time.
     analysis_window_days: Optional[int] = None
+    # Extra windows to publish alongside the canonical one, each a full analysis
+    # pass exported to data/frontend-data-<N>d.json. The entry equal to
+    # analysis_window_days is canonical: it is the one that also writes the
+    # unsuffixed data/frontend-data.json, produces the private artifacts, and
+    # anchors community colours for the other windows. Empty means single-window.
+    analysis_windows: tuple = ()
+    # Per-window overlap_threshold overrides, keyed by window length in days.
+    # Observed overlap grows super-linearly with survey count, so one threshold
+    # cannot serve 14 and 90 days at once: the value calibrated for 30 days is
+    # too strict at 14 and admits an edge explosion at 90. Measure each with
+    # `scripts/sweep_threshold.py --window-days N` and record it here. Windows
+    # absent from this map fall back to overlap_threshold.
+    window_overlap_thresholds: dict = field(default_factory=dict)
     
     # Graph building
     overlap_threshold: int = 1  # Minimum shared viewers for an edge (TwitchAtlas used 300)
@@ -157,6 +170,21 @@ class AnalysisConfig:
             raise ValueError("min_channel_viewers cannot be negative")
         if self.analysis_window_days is not None and self.analysis_window_days < 1:
             raise ValueError("analysis_window_days must be at least 1 or None")
+        if any(days < 1 for days in self.analysis_windows):
+            raise ValueError("every entry in analysis_windows must be at least 1")
+        if self.analysis_windows and self.analysis_window_days not in self.analysis_windows:
+            # The canonical window is the one that writes the unsuffixed public
+            # artifact. Publishing a set that excludes it would leave that file
+            # stale while the suffixed ones move.
+            raise ValueError(
+                "analysis_window_days must appear in analysis_windows when "
+                "multiple windows are published"
+            )
+        for days, threshold in self.window_overlap_thresholds.items():
+            if not isinstance(days, int) or days < 1:
+                raise ValueError("window_overlap_thresholds keys must be day counts of at least 1")
+            if not isinstance(threshold, int) or threshold < 0:
+                raise ValueError("window_overlap_thresholds values must be non-negative integers")
         if self.min_channel_observations < 1:
             raise ValueError("min_channel_observations must be at least 1")
         if not 0.0 <= self.normalized_overlap_threshold <= 1.0:
@@ -229,37 +257,12 @@ class VODConfig:
 
 
 @dataclass
-class SQSConfig:
-    """Configuration for SQS-based distributed task queue and DynamoDB dedup."""
-
-    enabled: bool = False
-    queue_url: str = ""  # SQS FIFO queue URL
-    dynamodb_state_table: str = "vieweratlas-collection-state"
-    worker_concurrency: int = 1  # Number of concurrent worker tasks
-    visibility_timeout_s: int = 900  # SQS message visibility timeout
-
-    def __post_init__(self):
-        env_queue = os.getenv("SQS_CHANNEL_QUEUE_URL")
-        if env_queue:
-            self.queue_url = env_queue
-        env_table = os.getenv("DYNAMODB_STATE_TABLE")
-        if env_table:
-            self.dynamodb_state_table = env_table
-        env_enabled = os.getenv("SQS_ENABLED")
-        if env_enabled:
-            self.enabled = env_enabled.lower() in ("true", "1", "yes")
-        if self.enabled and not self.queue_url:
-            raise ValueError("queue_url required when SQS is enabled")
-
-
-@dataclass
 class PipelineConfig:
     """Combined configuration for entire pipeline."""
 
     collection: CollectionConfig = None
     analysis: AnalysisConfig = None
     vod: VODConfig = None
-    sqs: SQSConfig = None
 
     # Storage backend
     storage_type: str = "file"  # 'file' or 's3'
@@ -283,8 +286,6 @@ class PipelineConfig:
             self.analysis = AnalysisConfig()
         if self.vod is None:
             self.vod = VODConfig()
-        if self.sqs is None:
-            self.sqs = SQSConfig()
 
         # Allow runtime environment to control storage backend selection.
         env_storage_type = os.getenv("STORAGE_TYPE")
@@ -343,6 +344,12 @@ def get_rigorous_config() -> PipelineConfig:
         ),
         analysis=AnalysisConfig(
             analysis_window_days=30,  # Bound the union; without it density climbs daily
+            # Windows offered by the map's time filter. Listing one here does
+            # not commit to analysing it: each run publishes only the windows
+            # the retained surveys can actually fill, and declares the rest to
+            # the browser as PENDING. They promote themselves as history
+            # accumulates, so this list needs no revisiting.
+            analysis_windows=(14, 30, 90),
             # Survey cohorts churn: 7,098 distinct channels appeared in four
             # days, most of them once or twice. Requiring three observations and
             # ten authors leaves ~1,969 channels worth comparing.
@@ -411,11 +418,10 @@ _SECTION_CLASSES = {
     "collection": CollectionConfig,
     "analysis": AnalysisConfig,
     "vod": VODConfig,
-    "sqs": SQSConfig,
 }
 
 # Fields declared as tuples but naturally expressed as YAML lists.
-_TUPLE_FIELDS = {"static_viz_figsize"}
+_TUPLE_FIELDS = {"static_viz_figsize", "analysis_windows"}
 
 
 def _build_section(section_name: str, config_class, values: dict):
@@ -446,7 +452,7 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     """
     Load configuration from YAML file with environment variable overrides.
 
-    Every field of CollectionConfig, AnalysisConfig, VODConfig and SQSConfig is
+    Every field of CollectionConfig, AnalysisConfig and VODConfig is
     settable from YAML; unrecognised keys raise rather than being dropped.
 
     Args:

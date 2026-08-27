@@ -37,6 +37,22 @@ analysis:
   # every retained survey, so viewer sets only grow and density climbs until a
   # fixed overlap_threshold stops being selective.
   analysis_window_days: 30
+  # Windows offered by the map's time filter. Listing one does not commit to
+  # analysing it: each run publishes only the windows the retained surveys can
+  # actually fill, and declares the rest to the browser as PENDING. They promote
+  # themselves as history accumulates, so this needs no revisiting.
+  # The entry matching analysis_window_days is preferred as the default; until
+  # the data reaches it, the widest ready window takes that role.
+  # Leave empty to publish a single window and hide the filter entirely.
+  # Raw snapshot retention (100 days in safe-deploy.sh) must stay ahead of the
+  # widest entry here.
+  analysis_windows: [14, 30, 90]
+  # Per-window overlap_threshold overrides. Observed overlap grows
+  # super-linearly with survey count, so the value calibrated for 30 days is too
+  # strict at 14 and admits far too many edges at 90. Measure each window with
+  #   python3 scripts/sweep_threshold.py <dir-or-s3-uri> --window-days N
+  # and record the result here; unlisted windows fall back to overlap_threshold.
+  window_overlap_thresholds: {}
   overlap_threshold: 10         # Drop very weak overlaps
   weighting_mode: "shared_count"  # Edge weight formula: 'shared_count' (shared viewer count, default)
   min_community_size: 3         # Discard communities smaller than 3 channels

@@ -15,9 +15,54 @@ retrying a connection may make it a little shorter or longer. A two-hour safety
 limit stops an unhealthy run. The 1:00 AM Eastern analysis uses the finished
 surveys to refresh the website.
 
-This code-only update does **not** require recreating CloudFront, either S3
-bucket, the website, or the VPC. Do not repeat the CloudFront section of the
-original setup guide.
+This update does **not** require recreating CloudFront, either S3 bucket, or the
+VPC. It does require rebuilding the two ECS images and syncing the updated
+frontend assets to the existing website bucket. Do not create a second copy of
+any existing AWS foundation.
+
+## Redeploy an existing validated installation
+
+Use this shorter path when the collector has already passed the small, batch,
+and full rollout tests. It pauses both schedules, deploys the latest task
+definitions, publishes the frontend, runs analysis once immediately, verifies
+the new files, and restores the normal schedule.
+
+From the repository root, set the existing frontend bucket and CloudFront
+distribution, then run:
+
+```bash
+export FRONTEND_BUCKET=vieweratlas-frontend
+export DISTRIBUTION_ID=E123EXAMPLE
+
+cd twitchiobot/infrastructure/aws
+./pause-schedules.sh all
+./safe-deploy.sh
+SURVEY_SCHEDULE_STATE=DISABLED \
+ANALYSIS_SCHEDULE_STATE=DISABLED \
+./create-schedules.sh
+./apply-monitoring.sh
+
+cd ../../../frontend
+S3_BUCKET="$FRONTEND_BUCKET" \
+DISTRIBUTION_ID="$DISTRIBUTION_ID" \
+./deploy.sh
+
+cd ../twitchiobot/infrastructure/aws
+./run-analysis.sh
+aws cloudfront create-invalidation \
+  --distribution-id "$DISTRIBUTION_ID" \
+  --paths "/data/frontend-data*"
+EXPECT_SCHEDULES_ENABLED=false ./smoke-test.sh analysis
+SURVEY_SCHEDULE_STATE=ENABLED \
+ANALYSIS_SCHEDULE_STATE=ENABLED \
+./create-schedules.sh
+./smoke-test.sh analysis
+```
+
+Replace the two example values; do not paste them literally. No database
+migration or historical backfill command is required. Existing snapshots are
+reused, and each rolling window promotes itself from PENDING on a later daily
+run once enough completed survey history exists.
 
 ## Before starting
 
@@ -113,7 +158,7 @@ either token into a document, terminal command, GitHub, or `.env`.
    ./create-schedules.sh
    ```
 
-3. Apply the 90-day private-data retention rules and monitoring:
+3. Apply the 100-day private-data retention rules and monitoring:
 
    ```bash
    ./apply-monitoring.sh
@@ -228,6 +273,83 @@ next 6:00 AM survey starts, run the strict refresh check:
 `Analysis freshness smoke test passed` additionally proves both analysis
 outputs are newer than the latest completed survey.
 
+
+## Calibrate the map's time windows
+
+The map's time filter offers 14, 30 and 90-day windows. A window is analysed
+and published only once the retained surveys actually reach back that far; until
+then the browser shows **PENDING** for it and the run logs the plan. Windows
+promote themselves as history accumulates — no redeploy and no config edit.
+Before day 14, all three choices are PENDING and the stable frontend-data URL
+contains a schema-valid status payload rather than a mislabeled short graph.
+
+Only the 30-day threshold has been measured. Until the others are, each newly
+promoted window logs `UNCALIBRATED_WINDOW` and borrows the 30-day value, which is
+too strict at 14 days and admits far too many edges at 90. Re-run the calibration
+each time a window promotes.
+
+Measure all three against the surveys that now exist. From
+`infrastructure/aws`, where the rest of this guide leaves you:
+
+```bash
+../../scripts/calibrate_windows.sh
+```
+
+No arguments: it reads `S3_BUCKET` and `S3_PREFIX` from the same `.env` the
+deployment scripts use. Pass a path only to sweep somewhere else.
+
+It downloads the snapshots once, sweeps each window with the same filters
+`get_rigorous_config` uses, and prints a ready-to-paste block. Add it to
+`get_rigorous_config()` in `src/config.py`:
+
+```python
+            window_overlap_thresholds={14: <n>, 30: <n>, 90: <n>},
+```
+
+The scheduled task runs `main.py analyze rigorous`, so `config/config.yaml` is
+**not** read in production and editing it changes nothing that runs. The preset
+is baked into the analysis image, so rebuild and redeploy after the edit:
+
+```bash
+cd infrastructure/aws && ./safe-deploy.sh
+```
+
+Two warnings to act on rather than ignore:
+
+- If the script reports a window is **short of data** — a 90-day sweep over 60
+  days of surveys — its threshold describes the days that exist, not the window
+  it is labelled with. Re-run once retention has filled out.
+- If the next analysis logs `EDGE_CAP_BOUND`, that window's published graph was
+  truncated by `frontend_max_edges` rather than by its overlap threshold. Raise
+  the threshold, not the cap: the cap exists so the browser is not asked to draw
+  a graph nobody can read.
+
+## Enable site analytics
+
+Optional, and independent of everything above. This turns on CloudFront access
+logging into the private bucket; it serves no JavaScript, sets no cookies, sends
+nothing to a third party, and leaves the site's Content-Security-Policy alone.
+
+```bash
+DISTRIBUTION_ID=<your-distribution-id> ./enable-access-logs.sh
+```
+
+The delivery deliberately omits every viewer identifier, so the logs can report
+how often a page was requested and cannot report how many people requested it.
+Restoring `c-ip` to get unique visitors is a privacy decision that requires
+updating [DATA_POLICY.md](DATA_POLICY.md) to match — see its **Site analytics**
+section.
+
+Logs take up to an hour to appear. Then create the Athena table from
+`infrastructure/aws/analytics-schema.sql`, substituting `${S3_BUCKET}` and
+`${S3_PREFIX}`, and run the queries it ships with.
+
+One thing to verify before trusting per-route counts: the distribution rewrites
+403/404 to `/index.html` for SPA routing. Request a deep link such as `/map` and
+check whether `cs-uri-stem` records `/map` or `/index.html`. If it collapses to
+`/index.html`, only entry pages are visible in these logs — in-app navigation
+never touches the network at all, so route-level counts would need a
+first-party beacon instead.
 
 ## Pause, resume, and roll back
 

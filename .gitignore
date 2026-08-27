@@ -53,8 +53,6 @@ twitchiobot/docs/*.md
 !twitchiobot/docs/DATA_POLICY.md
 !twitchiobot/docs/DEPLOYMENT.md
 !twitchiobot/docs/DAILY_OPERATIONS.md
-!twitchiobot/docs/deployment-checklist.md
-!twitchiobot/docs/RUNBOOK.md
 
 # Security review artifacts
 security_best_practices_report.md

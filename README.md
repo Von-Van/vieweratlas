@@ -46,7 +46,7 @@ flowchart TB
     end
 
     subgraph store["S3 data lake · private"]
-        raw[("raw/snapshots/v2/<br/><i>Parquet · 90-day expiry</i>")]
+        raw[("raw/snapshots/v2/<br/><i>Parquet · 100-day expiry</i>")]
         manifest[("survey manifest<br/><i>commit record</i>")]
     end
 
@@ -90,7 +90,7 @@ nodes are public: only channel-level aggregates cross that boundary. See
 | Stage | AWS | Cadence |
 | --- | --- | --- |
 | Collect | EventBridge Scheduler → Fargate, DynamoDB lease, Secrets Manager | 3x daily, ~80 min |
-| Store | S3 (versioned, private, 90-day expiry) | per batch |
+| Store | S3 (versioned, private, 100-day expiry) | per batch |
 | Analyse | EventBridge Scheduler → Fargate | daily, 1 AM ET |
 | Serve | S3 + CloudFront (Origin Access Control) | on deploy |
 
@@ -147,8 +147,10 @@ been calibrated against a full retention window.
 
 Raw presence snapshots contain Twitch author IDs and logins and must remain private.
 Those are pseudonymous identifiers and may still be personal data. The
-public frontend is designed to receive only `data/frontend-data.json`, which
-contains channel-level nodes, overlaps, community labels, and aggregate metrics.
+public frontend is designed to receive only the `data/frontend-data*.json`
+exports, which contain channel-level nodes, overlaps, community labels, and
+aggregate metrics. The analysis publishes one per rolling window — 14, 30 and 90
+days — for the map's time filter, all sharing a single schema.
 
 See [DATA_POLICY.md](twitchiobot/docs/DATA_POLICY.md) for the full operational
 policy and [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
@@ -215,6 +217,9 @@ ANALYSIS_SCHEDULE_STATE=DISABLED \
 SURVEY_SCHEDULE_STATE=ENABLED \
 ANALYSIS_SCHEDULE_STATE=ENABLED \
 ./create-schedules.sh
+# Optional, once surveys have accumulated:
+DISTRIBUTION_ID=<id> ./enable-access-logs.sh
+../../scripts/calibrate_windows.sh
 ```
 
 Run that sequence in order; do not enable the schedules unless all three tests
@@ -222,6 +227,9 @@ pass. A full survey takes roughly 80 minutes and has a two-hour safety limit.
 The enabled schedules run surveys at 6:00 AM, 2:00 PM, and 10:00 PM Eastern and
 analysis at 1:00 AM Eastern. These commands create real cloud resources and
 costs, so review the deployment guide and environment template first.
+For an already validated installation, use the shorter redeployment sequence in
+[DEPLOYMENT.md](twitchiobot/docs/DEPLOYMENT.md); it includes the frontend sync,
+one immediate analysis run, verification, and schedule re-enable.
 
 ## Repository Map
 
@@ -229,6 +237,7 @@ costs, so review the deployment guide and environment template first.
 - `twitchiobot/src/`: collection, storage, graph analysis, and frontend export
 - `twitchiobot/tests/`: pipeline, reliability, and collection-state tests
 - `twitchiobot/infrastructure/`: Docker and AWS deployment assets
+- `twitchiobot/scripts/`: threshold sweeps and per-window calibration
 - `.github/workflows/`: CI, security auditing, and deploy preflight checks
 
 ## Documentation
