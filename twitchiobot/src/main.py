@@ -791,6 +791,7 @@ class PipelineRunner:
                     max_channels=self.config.analysis.frontend_max_channels,
                     max_edges=self.config.analysis.frontend_max_edges,
                     top_edges_per_channel=self.config.analysis.frontend_top_edges_per_channel,
+                    min_public_community_size=self.config.analysis.frontend_min_community_size,
                 ),
                 output_key=output_key,
                 also_write=also_write,

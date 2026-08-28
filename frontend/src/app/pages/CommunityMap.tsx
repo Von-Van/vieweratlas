@@ -449,7 +449,7 @@ export function CommunityMap() {
 
                 <div style={{ marginBottom: 8 }}>
                   <div style={{ color: "#848494", fontSize: 11, marginBottom: 6 }}>TOP OVERLAPS</div>
-                  {selectedChannel.topOverlaps.slice(0, 3).map((ov) => (
+                  {selectedChannel.topOverlaps.slice(0, 5).map((ov) => (
                     <div
                       key={ov.channelId}
                       className="flex items-center justify-between py-1"
@@ -459,7 +459,9 @@ export function CommunityMap() {
                         className="px-1.5 py-0.5 rounded text-xs"
                         style={{ background: "#18181B", color: "#00E5CC", fontWeight: 600 }}
                       >
-                        {(ov.shared / 1000).toFixed(1)}k
+                        {/* Shared chatters, not viewers: a thousands format
+                            rendered every one of these as "0.1k". */}
+                        {ov.shared.toLocaleString()}
                       </span>
                     </div>
                   ))}
@@ -492,8 +494,8 @@ export function CommunityMap() {
             >
               <Info size={14} style={{ color: "#848494", marginTop: 1, flexShrink: 0 }} />
               <p style={{ color: "#848494", fontSize: 12, lineHeight: 1.6 }}>
-                <strong style={{ color: "#EFEFF1" }}>Click</strong> a node to inspect.{" "}
-                <strong style={{ color: "#EFEFF1" }}>Drag</strong> to pan.{" "}
+                <strong style={{ color: "#EFEFF1" }}>Click</strong> a node to inspect,{" "}
+                again to clear. <strong style={{ color: "#EFEFF1" }}>Drag</strong> to pan.{" "}
                 <strong style={{ color: "#EFEFF1" }}>Scroll</strong> to zoom.
               </p>
             </div>
@@ -622,7 +624,11 @@ export function CommunityMap() {
           communities={communities}
           className="w-full h-full"
           interactive={true}
-          onNodeClick={(id) => setSelectedNode(id)}
+          onNodeClick={(id) =>
+            // Selecting dims the rest of the map, which reads as a filter, so
+            // clicking the selected channel again is the obvious way out of it.
+            setSelectedNode((prev) => (prev === id ? null : id))
+          }
           highlightedNode={selectedNode}
         />
       </div>

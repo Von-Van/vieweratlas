@@ -43,6 +43,16 @@ class FrontendExportConfig:
     max_channels: int = 1000
     max_edges: int = 25000
     top_edges_per_channel: int = 25
+    # min_community_size is applied to the full graph, before the public cap.
+    # Capping to the largest few hundred channels then shrinks communities that
+    # cleared the floor down to a handful, and the map ends up with one-channel
+    # regions carrying their own legend entry and colour. This floor is applied
+    # again to what actually survives the cap.
+    #
+    # Defaults off: dropping channels changes what the map claims, so it is the
+    # pipeline's decision to make from its own config, not a silent default for
+    # anything that constructs this dataclass.
+    min_public_community_size: int = 1
     layout_scale: int = 340
     # Communities are laid out in their own discs and then packed, rather than
     # thrown into one spring pass. A single spring layout over ~900 nodes puts
@@ -139,6 +149,54 @@ def _pack_discs(centres: dict, radii: dict, margin: float = 1.05, rounds: int = 
     return {c: (float(pos[c][0]), float(pos[c][1])) for c in ids}
 
 
+def _relax_nodes(
+    positions: dict,
+    radii: dict,
+    margin: float = 1.35,
+    rounds: int = 220,
+) -> dict:
+    """Push overlapping nodes apart while keeping the layout's arrangement.
+
+    A spring layout minimises edge energy, not ink: inside a community it
+    happily stacks tightly-bound members on the same point. At the radii the
+    browser draws (4-16 units) that is a blob rather than a group of channels,
+    so members that land closer than their two drawn radii are eased apart. The
+    displacement is small and local, so the community's shape survives.
+
+    ``margin`` above 1.0 leaves a visible gap rather than letting discs touch.
+    """
+    names = list(positions)
+    if len(names) < 2:
+        return dict(positions)
+
+    pts = np.array([positions[n] for n in names], dtype=float)
+    rad = np.array([radii.get(n, NODE_MIN_R) for n in names], dtype=float)
+    # Pairwise minimum separation, computed once.
+    wanted = (rad[:, None] + rad[None, :]) * margin
+    np.fill_diagonal(wanted, 0.0)
+
+    for _ in range(rounds):
+        delta = pts[None, :, :] - pts[:, None, :]
+        distance = np.hypot(delta[:, :, 0], delta[:, :, 1])
+        np.fill_diagonal(distance, np.inf)
+        overlap = wanted - distance
+        if not (overlap > 1e-6).any():
+            break
+        # Coincident points have no direction to separate along; nudge them
+        # onto a deterministic bearing so the push has something to act on.
+        stuck = distance < 1e-6
+        if stuck.any():
+            angles = np.linspace(0.0, 2 * math.pi, len(names), endpoint=False)
+            jitter = np.stack([np.cos(angles), np.sin(angles)], axis=1) * 1e-3
+            pts = pts + jitter * stuck.any(axis=1)[:, None]
+            continue
+        push = np.clip(overlap, 0.0, None) / 2.0
+        direction = delta / distance[:, :, None]
+        pts -= (direction * push[:, :, None]).sum(axis=1)
+
+    return {n: (float(pts[i, 0]), float(pts[i, 1])) for i, n in enumerate(names)}
+
+
 def _shared_count(edge_data: dict) -> int:
     """Measured shared-chatter count for the public payload.
 
@@ -158,6 +216,27 @@ def _capitalize_channel(name: str) -> str:
     if not name:
         return name
     return name[0].upper() + name[1:]
+
+
+def _viewer_history(attrs: dict, viewer_count: int, analysis_date: str) -> list:
+    """Per-day viewer points for one channel, formatted for the browser chart.
+
+    The aggregator supplies one ISO-dated point per collection day. Channels
+    whose samples could not be dated — older snapshot shapes carry no usable
+    timestamp — still get the single point the export used to emit for
+    everyone, so the chart degrades to a dot instead of to an empty axis.
+    """
+    series = attrs.get("viewer_series") or []
+    points = []
+    for point in series:
+        day = point.get("date", "")
+        try:
+            label = datetime.strptime(day, "%Y-%m-%d").strftime("%b %d")
+        except (TypeError, ValueError):
+            continue
+        points.append({"date": label, "viewers": int(point.get("viewers", 0) or 0)})
+
+    return points or [{"date": analysis_date, "viewers": viewer_count}]
 
 
 def _node_viewer_count(graph: nx.Graph, node: str) -> int:
@@ -202,7 +281,19 @@ def _disambiguate_labels(
     return resolved
 
 
-def _build_public_graph(graph: nx.Graph, config: FrontendExportConfig) -> nx.Graph:
+def _largest_component(graph: nx.Graph) -> tuple:
+    """Largest connected component of ``graph``, and how many nodes it leaves out."""
+    if not graph.number_of_edges():
+        return graph, 0
+    connected = max(nx.connected_components(graph), key=len)
+    return graph.subgraph(connected).copy(), graph.number_of_nodes() - len(connected)
+
+
+def _build_public_graph(
+    graph: nx.Graph,
+    config: FrontendExportConfig,
+    partition: Dict[str, int] | None = None,
+) -> nx.Graph:
     """Return a deterministic capped subgraph suitable for browser rendering."""
     selected_nodes = [
         node
@@ -260,14 +351,50 @@ def _build_public_graph(graph: nx.Graph, config: FrontendExportConfig) -> nx.Gra
     # Channels left with no overlap edge say nothing on an overlap map, and a
     # spring layout flings them to the boundary — where they set the coordinate
     # scale and squeeze the connected structure into the middle of the canvas.
-    if public_graph.number_of_edges():
-        connected = max(nx.connected_components(public_graph), key=len)
-        dropped = public_graph.number_of_nodes() - len(connected)
-        if dropped:
-            public_graph = public_graph.subgraph(connected).copy()
+    public_graph, dropped = _largest_component(public_graph)
+    if dropped:
+        logger.info(
+            "Public frontend graph: dropped %d channel(s) outside the connected core",
+            dropped,
+        )
+
+    # Re-apply the community floor to what survived the cap. Dropping a remnant
+    # can disconnect the graph again, so this alternates with the connected-core
+    # pass until both hold at once. It converges quickly — each pass strictly
+    # shrinks the graph — but the bound keeps a pathological input finite.
+    if partition and config.min_public_community_size > 1:
+        removed_total = 0
+        for _ in range(10):
+            sizes: Dict[int, int] = {}
+            for node in public_graph.nodes():
+                cid = partition.get(node)
+                if cid is not None:
+                    sizes[cid] = sizes.get(cid, 0) + 1
+            # The floor removes remnants — communities left small by the cap
+            # while others survived it intact. If nothing clears the floor there
+            # are no remnants, just a small map, and pruning would empty it.
+            if not any(size >= config.min_public_community_size for size in sizes.values()):
+                break
+            undersized = {
+                cid for cid, size in sizes.items()
+                if size < config.min_public_community_size
+            }
+            doomed = [
+                node for node in public_graph.nodes()
+                if partition.get(node) is None or partition.get(node) in undersized
+            ]
+            if not doomed:
+                break
+            public_graph = public_graph.copy()
+            public_graph.remove_nodes_from(doomed)
+            removed_total += len(doomed)
+            public_graph, orphaned = _largest_component(public_graph)
+            removed_total += orphaned
+        if removed_total:
             logger.info(
-                "Public frontend graph: dropped %d channel(s) outside the connected core",
-                dropped,
+                "Public frontend graph: dropped %d channel(s) in communities below "
+                "the public floor of %d",
+                removed_total, config.min_public_community_size,
             )
 
     if public_graph.number_of_nodes() != graph.number_of_nodes() or public_graph.number_of_edges() != graph.number_of_edges():
@@ -375,6 +502,14 @@ def _community_layout(
         local = _normalize_positions(
             {n: tuple(p) for n, p in local.items()}, radii[cid] * 0.9, percentile=90.0
         )
+        # Separate members the spring pass left stacked, then re-fit: relaxation
+        # grows the cloud, and without the second normalise a dense community
+        # would spill out of the disc that was packed to hold it.
+        local = _relax_nodes(
+            local,
+            {n: _node_radius(_node_viewer_count(graph, n), max_viewers) for n in group},
+        )
+        local = _normalize_positions(local, radii[cid] * 0.9, percentile=90.0)
         for node, (lx, ly) in local.items():
             positions[node] = (cx + lx, cy + ly)
 
@@ -510,7 +645,7 @@ def export_frontend_data(
     try:
         config = config or FrontendExportConfig()
         logger.info("Generating frontend data JSON...")
-        public_graph = _build_public_graph(graph, config)
+        public_graph = _build_public_graph(graph, config, partition)
         public_nodes = set(public_graph.nodes())
         layout = _compute_layout(public_graph, config.layout_scale, partition, config)
 
@@ -604,7 +739,7 @@ def export_frontend_data(
                 "description": f"{_capitalize_channel(node)} — {game} streamer in the {community_label} community.",
                 "language": language.capitalize() if language else "Unknown",
                 "topOverlaps": top_overlaps,
-                "viewerHistory": [{"date": analysis_date, "viewers": viewer_count}],
+                "viewerHistory": _viewer_history(attrs, viewer_count, analysis_date),
                 "edgeCount": degree,
                 "modularityScore": mod_score,
                 "layout": layout.get(node),

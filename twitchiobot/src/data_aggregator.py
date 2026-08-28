@@ -13,7 +13,7 @@ import csv
 import os
 import logging
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from io import BytesIO
 from typing import Dict, Set, List, Tuple, Optional
 from pathlib import Path
@@ -36,6 +36,7 @@ _ANALYZABLE_V2_SURVEY_STATES = {"complete", "complete_with_errors"}
 # Both layouts carry their collection day in the key, so the analysis window can
 # skip whole objects without downloading them.
 _V2_DATE_IN_KEY = re.compile(r"raw/snapshots/v2/date=(?P<date>\d{4}-\d{2}-\d{2})/")
+_ISO_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
 _LEGACY_DATE_IN_KEY = re.compile(
     r"raw/snapshots/(?P<year>\d{4})/(?P<month>\d{2})/(?P<day>\d{2})/"
 )
@@ -65,6 +66,23 @@ def _snapshot_key_date(key: str) -> Optional[date]:
         except ValueError:
             return None
 
+    return None
+
+
+def _observation_day(snapshot: dict) -> Optional[str]:
+    """ISO day an individual snapshot observed, or None if it cannot be dated.
+
+    v2 Parquet carries the collection day as a partition column; older shapes
+    only have the ISO ``timestamp``. Undated snapshots still count toward a
+    channel's totals, they just cannot join a per-day series.
+    """
+    partition = snapshot.get("date")
+    if isinstance(partition, str) and _ISO_DAY.fullmatch(partition):
+        return partition
+
+    stamp = snapshot.get("timestamp") or snapshot.get("sample_started_at") or ""
+    if isinstance(stamp, str) and len(stamp) >= 10 and _ISO_DAY.fullmatch(stamp[:10]):
+        return stamp[:10]
     return None
 
 
@@ -162,6 +180,16 @@ class DataAggregator:
         # cohorts churn, so many channels are sampled only once or twice and
         # their viewer sets are too thin to compare against well-sampled ones.
         self.channel_observations: Dict[str, int] = defaultdict(int)
+        # Per-channel observations kept for the whole window. ``channel_metadata``
+        # is written once per snapshot and therefore only ever describes the last
+        # one loaded; a channel's viewer count and game came out of whichever
+        # file pandas happened to read last rather than out of the window. These
+        # accumulate instead, so the exported values can describe the window the
+        # graph is actually built from.
+        self.channel_viewer_samples: Dict[str, Dict[str, List[int]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+        self.channel_game_counts: Dict[str, Counter] = defaultdict(Counter)
         self.snapshots: List[dict] = []
         self.snapshot_source_counts: Dict[str, int] = defaultdict(int)
         self.skipped_outside_window = 0
@@ -195,6 +223,23 @@ class DataAggregator:
             "started_at": snapshot.get("started_at", snapshot.get("uptime", "")),
             "timestamp": snapshot.get("timestamp", "")
         }
+
+        viewer_count = snapshot.get("viewer_count", snapshot.get("viewers", 0))
+        try:
+            viewer_count = int(viewer_count or 0)
+        except (TypeError, ValueError):
+            viewer_count = 0
+        # A stream that was offline for a sample reports 0. Averaging those in
+        # would describe how often a channel streams, not how large it is while
+        # it does, so only live samples join the series.
+        if viewer_count > 0:
+            day = _observation_day(snapshot)
+            if day:
+                self.channel_viewer_samples[channel][day].append(viewer_count)
+
+        game = snapshot.get("game_name", snapshot.get("game", "")) or ""
+        if game and game != "Unknown":
+            self.channel_game_counts[channel][game] += 1
 
         self.snapshots.append(snapshot)
         source = snapshot.get("_source") or snapshot.get("source") or default_source
@@ -671,11 +716,51 @@ class DataAggregator:
     def get_channel_metadata(self) -> Dict[str, dict]:
         """
         Get channel metadata (game, title, viewer count, etc.).
-        
+
+        ``viewer_count`` and ``game_name`` describe the whole analysis window
+        rather than the last snapshot ingested: the mean of a channel's live
+        samples, and the game it was seen in most often. The raw last-seen
+        values remain under ``last_viewer_count`` and ``last_game_name`` for
+        anything that wants the instantaneous reading.
+
+        ``viewer_series`` carries one point per collection day, which is what
+        the published map's per-channel trend is drawn from.
+
         Returns:
             Dict mapping channel name to metadata dict
         """
-        return dict(self.channel_metadata)
+        resolved: Dict[str, dict] = {}
+        for channel, meta in self.channel_metadata.items():
+            entry = dict(meta)
+            entry["last_viewer_count"] = meta.get("viewer_count", 0)
+            entry["last_game_name"] = meta.get("game_name", "Unknown")
+
+            by_day = self.channel_viewer_samples.get(channel) or {}
+            series = [
+                {"date": day, "viewers": round(sum(samples) / len(samples))}
+                for day, samples in sorted(by_day.items())
+                if samples
+            ]
+            entry["viewer_series"] = series
+            if series:
+                # Mean of the daily means, so a day that happened to be sampled
+                # more often does not weigh more than a day that was not.
+                entry["viewer_count"] = round(
+                    sum(point["viewers"] for point in series) / len(series)
+                )
+                entry["peak_viewer_count"] = max(point["viewers"] for point in series)
+
+            games = self.channel_game_counts.get(channel)
+            if games:
+                # Ties go to the alphabetically first game so the label a
+                # community gets does not depend on dict insertion order.
+                entry["game_name"] = min(
+                    games.most_common(),
+                    key=lambda item: (-item[1], item[0]),
+                )[0]
+
+            resolved[channel] = entry
+        return resolved
     
     def get_statistics(self) -> dict:
         """

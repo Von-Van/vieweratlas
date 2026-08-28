@@ -266,7 +266,7 @@ export function ChannelDetail() {
               {
                 icon: <Users size={16} style={{ color }} />,
                 value: channel.viewers.toLocaleString(),
-                label: "Live Viewers",
+                label: "Avg Viewers",
                 accentColor: color,
               },
               {
@@ -334,7 +334,10 @@ export function ChannelDetail() {
                   tick={{ fill: "#848494", fontSize: 11, fontFamily: "'Space Grotesk', sans-serif" }}
                   axisLine={{ stroke: "#2A2A2E" }}
                   tickLine={false}
-                  tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+                  // Shared-chatter counts are small integers, not viewer
+                  // totals: the thousands formatter used elsewhere on this page
+                  // rendered every tick on this axis as "0k".
+                  tickFormatter={(v) => v.toLocaleString()}
                 />
                 <YAxis
                   type="category"

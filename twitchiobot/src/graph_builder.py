@@ -111,6 +111,11 @@ class GraphBuilder:
                     "game_name": meta.get("game_name", meta.get("game", "Unknown")),
                     "language": meta.get("language", ""),
                     "title": meta.get("title", ""),
+                    # One point per collection day. The public export draws the
+                    # per-channel trend from this; without it the only honest
+                    # thing it can show is a single dot.
+                    "viewer_series": meta.get("viewer_series", []),
+                    "peak_viewer_count": meta.get("peak_viewer_count", 0),
                 })
             
             self.graph.add_node(channel, **attributes)

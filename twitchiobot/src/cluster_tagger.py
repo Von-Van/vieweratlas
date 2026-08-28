@@ -12,6 +12,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# A single game outright characterises the community; its name alone is the label.
+DOMINANT_GAME_SHARE = 60.0
+# Below this share the plurality game is merely the most common of many, and
+# naming the community after it is wrong rather than merely vague: a cluster of
+# 27 Japanese channels of which 4 play Valorant is not "VALORANT (ja)". Such a
+# community is named for the signal it actually has — its language.
+GAME_LABEL_MIN_SHARE = 40.0
+# Share of a community speaking one language before that language is worth naming.
+LANGUAGE_LABEL_MIN_SHARE = 40.0
+
 
 class ClusterTagger:
     """
@@ -93,73 +103,88 @@ class ClusterTagger:
         
         # Find dominant attributes
         reason = {"reasoning": ""}
-        
-        # Dominant game
+        total = len(channels)
+
+        # Shares are taken over every channel in the community, not only those
+        # carrying the attribute, so a community whose metadata is mostly
+        # unknown cannot be named after its handful of known members.
         game_counts = Counter(games)
-        if game_counts:
+        top_game, game_share = None, 0.0
+        if game_counts and total:
             top_game, game_freq = game_counts.most_common(1)[0]
-            game_percentage = (game_freq / len(channels)) * 100
-            
-            if game_percentage >= 60:  # Clear dominant game
-                label = f"{top_game}"
-                reason["dominant_game"] = top_game
-                reason["game_percentage"] = game_percentage
-                reason["reasoning"] = f"{top_game} ({game_percentage:.0f}% of channels)"
-                return label, reason
-        
-        # Dominant language + game combo
-        if languages and games:
-            lang_counts = Counter(languages)
+            game_share = (game_freq / total) * 100
+
+        lang_counts = Counter(languages)
+        top_lang, lang_share = None, 0.0
+        if lang_counts and total:
             top_lang, lang_freq = lang_counts.most_common(1)[0]
-            lang_percentage = (lang_freq / len(channels)) * 100
-            
-            if lang_percentage >= 40 and game_counts:
-                top_game = game_counts.most_common(1)[0][0]
-                label = f"{top_game} ({top_lang})"
-                reason["dominant_game"] = top_game
-                reason["dominant_language"] = top_lang
-                reason["language_percentage"] = lang_percentage
-                reason["reasoning"] = f"{top_game} / {top_lang}-speaking"
-                return label, reason
-        
-        # Only language available
-        if languages:
-            lang_counts = Counter(languages)
-            top_lang, lang_freq = lang_counts.most_common(1)[0]
-            lang_percentage = (lang_freq / len(channels)) * 100
-            
-            if lang_percentage >= 50:
-                label = f"{top_lang}-speaking Variety"
-                reason["dominant_language"] = top_lang
-                reason["language_percentage"] = lang_percentage
-                reason["reasoning"] = f"{top_lang}-speaking community"
-                return label, reason
-        
-        # Top 2-3 games if no clear dominant
+            lang_share = (lang_freq / total) * 100
+
+        # One game characterises the whole community.
+        if top_game and game_share >= DOMINANT_GAME_SHARE:
+            reason["dominant_game"] = top_game
+            reason["game_percentage"] = game_share
+            reason["reasoning"] = f"{top_game} ({game_share:.0f}% of channels)"
+            return top_game, reason
+
+        # A game worth naming, spoken in one language.
+        if (
+            top_game
+            and game_share >= GAME_LABEL_MIN_SHARE
+            and top_lang
+            and lang_share >= LANGUAGE_LABEL_MIN_SHARE
+        ):
+            # Deliberately no game_percentage key: get_statistics() counts a
+            # community as game-labelled or language-labelled, never both.
+            reason["dominant_game"] = top_game
+            reason["game_share"] = game_share
+            reason["dominant_language"] = top_lang
+            reason["language_percentage"] = lang_share
+            reason["reasoning"] = (
+                f"{top_game} ({game_share:.0f}%) / {top_lang}-speaking"
+            )
+            return f"{top_game} ({top_lang})", reason
+
+        # A language, and no game with a real claim on the name.
+        if top_lang and lang_share >= LANGUAGE_LABEL_MIN_SHARE:
+            reason["dominant_language"] = top_lang
+            reason["language_percentage"] = lang_share
+            if top_game:
+                reason["plurality_game"] = top_game
+                reason["plurality_game_share"] = game_share
+            reason["reasoning"] = (
+                f"{top_lang}-speaking, no game above "
+                f"{GAME_LABEL_MIN_SHARE:.0f}% (top: {top_game or 'none'} "
+                f"{game_share:.0f}%)"
+            )
+            return f"Variety ({top_lang})", reason
+
+        # No language signal: name the games that are there.
         if game_counts:
             top_games = game_counts.most_common(3)
             if len(top_games) >= 2:
                 game_names = [g[0] for g in top_games]
-                label = f"{game_names[0]} / {game_names[1]} Mix"
                 reason["top_games"] = game_names
                 reason["reasoning"] = f"Mixed: {', '.join(game_names[:2])}"
-                return label, reason
-        
+                return f"{game_names[0]} / {game_names[1]} Mix", reason
+            reason["dominant_game"] = top_games[0][0]
+            reason["game_percentage"] = game_share
+            reason["reasoning"] = f"{top_games[0][0]} ({game_share:.0f}% of channels)"
+            return top_games[0][0], reason
+
         # Fallback: use size or just generic label
-        num_channels = len(channels)
+        num_channels = total
         avg_viewers = int(sum(viewer_counts) / len(viewer_counts)) if viewer_counts else 0
-        
+
         if avg_viewers > 0:
-            label = f"Variety Community ({num_channels} channels)"
             reason["reasoning"] = "Variety / Mixed genres"
             reason["num_channels"] = num_channels
             reason["avg_viewers"] = avg_viewers
-            return label, reason
-        
-        label = f"Community {comm_id}"
+            return f"Variety Community ({num_channels} channels)", reason
+
         reason["reasoning"] = "Uncategorized"
         reason["num_channels"] = num_channels
-        return label, reason
+        return f"Community {comm_id}", reason
     
     def get_labels(self) -> Dict[int, str]:
         """

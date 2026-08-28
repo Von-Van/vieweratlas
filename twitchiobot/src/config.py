@@ -154,6 +154,10 @@ class AnalysisConfig:
     frontend_max_channels: int = 1000  # Public frontend node cap
     frontend_max_edges: int = 25000  # Public frontend edge cap
     frontend_top_edges_per_channel: int = 25  # Public per-node edge cap
+    # Communities this small *after* the public cap are remnants of the cap
+    # rather than structure, and each one costs the map a legend entry and a
+    # colour. Applied only while some community still clears it.
+    frontend_min_community_size: int = 4
     
     def __post_init__(self):
         """Validate configuration."""
@@ -195,6 +199,8 @@ class AnalysisConfig:
             raise ValueError("frontend_max_edges must be at least 1")
         if self.frontend_top_edges_per_channel < 1:
             raise ValueError("frontend_top_edges_per_channel must be at least 1")
+        if self.frontend_min_community_size < 1:
+            raise ValueError("frontend_min_community_size must be at least 1")
         
         # Create output directory if it doesn't exist
         Path(self.output_dir).mkdir(exist_ok=True)
@@ -358,7 +364,31 @@ def get_rigorous_config() -> PipelineConfig:
             # Measured: median and p90 overlap are both 1, so a threshold of 1
             # admits ~36,000 single-chatter coincidences. Moving to 2 drops 93%
             # of edges and lifts modularity from 0.641 to 0.772.
+            #
+            # That measurement was taken over a four-day, 15-survey sample and
+            # is the fallback for any window without its own entry below. It is
+            # now known to be far too loose once a window holds real history:
+            # re-swept over 14 days (47,864 rows) the same procedure returns 10,
+            # not 2. Treat this as the floor for an unmeasured window, not as a
+            # calibrated value, and sweep every window that promotes.
             overlap_threshold=2,
+            # Measured 2026-08-28 with scripts/calibrate_windows.sh over
+            # 2026-08-13..08-26. The sweep suggests 10, which is where its
+            # modularity peaks (0.840). This is deliberately 3 instead.
+            #
+            # Modularity is nearly flat from 3 to 10 (0.830 -> 0.840) while the
+            # connected share of channels falls from 64% to 27%. Measured
+            # end-to-end, threshold 10 publishes 654 channels against 899 at 3 —
+            # a third of the map given up for 0.010 of modularity. Modularity
+            # rewards sparsity on its own, so the sweep's argmax overshoots what
+            # an overlap map is for. 3 keeps every edge at 3+ shared chatters,
+            # which is still above the p90 of 3 for the window's pair overlaps.
+            #
+            # The 30 and 90-day entries are absent because no window that long
+            # exists yet; sweep each one as it promotes out of PENDING, and
+            # weigh coverage against modularity the same way rather than taking
+            # the suggested value unread.
+            window_overlap_thresholds={14: 3},
             # Normalised modes lose to the raw count while overlaps are this
             # thin (best jaccard 0.699, best overlap_coef 0.726). Revisit once
             # overlaps carry real magnitude.

@@ -24,6 +24,9 @@ interface NetworkGraphProps {
   highlightedNode?: string | null;
 }
 
+// Pointer travel, in screen pixels, past which a press-and-release is a pan.
+const DRAG_CLICK_SLOP = 4;
+
 function seededRandom(seed: number) {
   let s = seed;
   return () => {
@@ -57,6 +60,11 @@ export function NetworkGraph({
   highlightedNode,
 }: NetworkGraphProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Whether the pointer travelled far enough between press and release to be a
+  // pan rather than a click. Selecting is a toggle, so releasing over a node at
+  // the end of a drag must not count as clicking it — that would clear the
+  // selection the user was panning around to look at.
+  const dragMovedRef = useRef(false);
   const nodesRef = useRef<NodeState[]>([]);
   const transformRef = useRef({ x: 0, y: 0, scale: 1 });
   const animFrameRef = useRef<number>(0);
@@ -420,8 +428,12 @@ export function NetworkGraph({
     const cy = e.clientY - rect.top;
 
     if (isDraggingRef.current) {
-      transformRef.current.x += cx - lastMouseRef.current.x;
-      transformRef.current.y += cy - lastMouseRef.current.y;
+      const dx = cx - lastMouseRef.current.x;
+      const dy = cy - lastMouseRef.current.y;
+      // A few pixels of travel is the hand shaking on a click, not a pan.
+      if (Math.abs(dx) + Math.abs(dy) > DRAG_CLICK_SLOP) dragMovedRef.current = true;
+      transformRef.current.x += dx;
+      transformRef.current.y += dy;
       lastMouseRef.current = { x: cx, y: cy };
       return;
     }
@@ -446,6 +458,7 @@ export function NetworkGraph({
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!interactive) return;
     isDraggingRef.current = true;
+    dragMovedRef.current = false;
     const rect = canvasRef.current!.getBoundingClientRect();
     lastMouseRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     canvasRef.current!.style.cursor = "grabbing";
@@ -459,7 +472,7 @@ export function NetworkGraph({
     const cy = e.clientY - rect.top;
     const { x: wx, y: wy } = getWorldPos(cx, cy);
     const node = findNodeAtPos(wx, wy);
-    if (node && onNodeClick) onNodeClick(node.id);
+    if (node && onNodeClick && !dragMovedRef.current) onNodeClick(node.id);
     canvasRef.current!.style.cursor = node ? "pointer" : "grab";
   }, [interactive, getWorldPos, findNodeAtPos, onNodeClick]);
 
