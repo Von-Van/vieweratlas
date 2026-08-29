@@ -7,6 +7,6 @@ requests==2.33.0
 pyyaml==6.0.1
 pandas==2.1.4
 boto3==1.34.0
-pyarrow==23.0.1
+pyarrow==24.0.0
 matplotlib>=3.8.0
 scipy>=1.11.0
