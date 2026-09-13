@@ -384,11 +384,30 @@ def get_rigorous_config() -> PipelineConfig:
             # an overlap map is for. 3 keeps every edge at 3+ shared chatters,
             # which is still above the p90 of 3 for the window's pair overlaps.
             #
-            # The 30 and 90-day entries are absent because no window that long
-            # exists yet; sweep each one as it promotes out of PENDING, and
-            # weigh coverage against modularity the same way rather than taking
-            # the suggested value unread.
-            window_overlap_thresholds={14: 3},
+            # Re-swept 2026-09-13 over 2026-08-31..09-13 (47,777 rows) once the
+            # 30d window promoted. It reproduced the original measurement almost
+            # exactly — 0.833 at 64% connected against 0.830 at 64% — and the
+            # p90 is still 3, so 14 stays where it was.
+            #
+            # 30: measured the same day over 2026-08-15..09-13 (105,089 rows,
+            # 7,771 channels). The sweep again suggests 10; this is 4 for the
+            # same reason 14 is 3 — it is that window's p90, so every edge is in
+            # the top decile of pair overlaps. The coverage argument is weaker
+            # here (measured end-to-end, 10 publishes 879 channels against 949
+            # at 4, not the third of the map that 10 cost the 14d window,
+            # because frontend_max_channels binds first), but the window is two
+            # days past full and its thresholds will keep drifting upward, so
+            # the argmax on barely-full history is a value to grow into rather
+            # than to ship. Re-sweep once it holds a few weeks more.
+            #
+            # Also checked: no threshold in 2..10 trips EDGE_CAP_BOUND, because
+            # the 1,000-channel cap binds before frontend_max_edges does.
+            #
+            # The 90-day entry is absent because no window that long exists yet;
+            # sweep it as it promotes out of PENDING, and weigh coverage against
+            # modularity the same way rather than taking the suggested value
+            # unread.
+            window_overlap_thresholds={14: 3, 30: 4},
             # Normalised modes lose to the raw count while overlaps are this
             # thin (best jaccard 0.699, best overlap_coef 0.726). Revisit once
             # overlaps carry real magnitude.
@@ -398,7 +417,16 @@ def get_rigorous_config() -> PipelineConfig:
             include_isolated_nodes=False,
             resolution=1.0,
             min_community_size=10,  # Verified: 21 communities survive this floor
-            label_top_n_nodes=20
+            label_top_n_nodes=20,
+            # Both renders are off in production. The scheduled task is one-shot
+            # and neither artifact is ever uploaded — there is no .png or .html
+            # anywhere in the bucket — so each one only spends the container's
+            # memory and minutes to write a file that dies with the task. The
+            # PNG is the expensive half: it cost ~150s on the 14d graph and on
+            # the 30d graph it exhausted the 2 GB task limit outright. Turn them
+            # on for a local run when you actually want to look at one.
+            enable_static_viz=False,
+            enable_interactive_viz=False,
         ),
         log_level="INFO",
         verbose=False

@@ -7,6 +7,7 @@ Supports both static (Matplotlib) and interactive (PyVis) output.
 
 import networkx as nx
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgb
 import math
 from typing import Dict, Set, Tuple, Optional
 import logging
@@ -139,24 +140,30 @@ class Visualizer:
             node_sizes.append(size)
         
         # Draw edges
+        #
+        # One batched call, not one per edge. Calling draw_networkx_edges inside
+        # the loop built a separate LineCollection artist for every edge and
+        # kept them all on the axes: at 12,886 edges that fit, at 76,119 it
+        # exhausted a 2 GB task. A single call holds one artist regardless of
+        # graph size. Per-edge alpha rides in the RGBA colour because the
+        # batched call takes only a scalar `alpha`.
         logger.info("Drawing edges...")
-        weights = [display_graph[u][v]['weight'] for u, v in display_graph.edges()]
+        edges = list(display_graph.edges())
+        weights = [display_graph[u][v]['weight'] for u, v in edges]
         max_weight = max(weights) if weights else 1
-        
-        for u, v in display_graph.edges():
-            weight = display_graph[u][v]['weight']
-            # Normalize weight to opacity (0.1 to 0.8)
-            alpha = 0.1 + (weight / max_weight) * 0.7
-            # Normalize weight to line width (0.5 to 3.0)
-            width = 0.5 + (weight / max_weight) * 2.5
-            
+
+        grey = to_rgb('gray')
+        # Normalize weight to line width (0.5 to 3.0) and opacity (0.1 to 0.8).
+        widths = [0.5 + (w / max_weight) * 2.5 for w in weights]
+        colors = [(*grey, 0.1 + (w / max_weight) * 0.7) for w in weights]
+
+        if edges:
             nx.draw_networkx_edges(
                 display_graph, pos,
-                [(u, v)],
+                edgelist=edges,
                 ax=ax,
-                alpha=alpha,
-                width=width,
-                edge_color='gray'
+                width=widths,
+                edge_color=colors,
             )
         
         # Draw nodes

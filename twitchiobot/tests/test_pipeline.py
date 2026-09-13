@@ -2193,6 +2193,82 @@ class TestAnalysisWindow:
         # community colours stable across the filter.
         assert len({id(kw["anchor"]) for kw in saved}) == 1
 
+    def test_results_are_published_before_the_render(self):
+        """The render is the only step that can kill the task without raising:
+        a wide canonical window exhausts the container and the kernel SIGKILLs
+        the process, so nothing after it runs. Publishing first is what keeps an
+        unrenderable graph from costing the public dataset — it froze for three
+        days when the 30d window promoted and the PNG stopped fitting in 2 GB."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(collection=CollectionConfig(), analysis=AnalysisConfig())
+        runner.logger = logging.getLogger("test")
+        runner.storage = MagicMock()
+
+        graph = nx.Graph()
+        graph.add_edge("a", "b", weight=9)
+        aggregator = MagicMock()
+        aggregator.get_statistics.return_value = {}
+        aggregator.get_channel_metadata.return_value = {}
+        calls = []
+
+        with patch.object(app_main.PipelineRunner, "_step_aggregate", return_value=aggregator), \
+             patch.object(app_main.PipelineRunner, "_step_build_graph", return_value=graph), \
+             patch.object(app_main.PipelineRunner, "_step_detect_communities",
+                          return_value=({"a": 0, "b": 0}, {0: {"a", "b"}},
+                                        {"num_communities": 1, "modularity": 0.5}, graph)), \
+             patch.object(app_main.PipelineRunner, "_step_tag_communities",
+                          return_value=({0: "Label"}, {})), \
+             patch.object(app_main.PipelineRunner, "_step_visualize",
+                          side_effect=lambda *a, **kw: calls.append("visualize")), \
+             patch.object(app_main.PipelineRunner, "_step_save_results",
+                          side_effect=lambda *a, **kw: calls.append("save")):
+            assert app_main.PipelineRunner.run_analysis_pipeline(runner)["status"] == "success"
+
+        assert calls == ["save", "visualize"]
+
+    def test_a_failed_render_still_leaves_the_results_published(self):
+        """Whatever the render does on its way down, the payload is already in
+        S3 by the time it runs."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(collection=CollectionConfig(), analysis=AnalysisConfig())
+        runner.logger = logging.getLogger("test")
+        runner.storage = MagicMock()
+
+        graph = nx.Graph()
+        graph.add_edge("a", "b", weight=9)
+        aggregator = MagicMock()
+        aggregator.get_statistics.return_value = {}
+        aggregator.get_channel_metadata.return_value = {}
+        saved = []
+
+        with patch.object(app_main.PipelineRunner, "_step_aggregate", return_value=aggregator), \
+             patch.object(app_main.PipelineRunner, "_step_build_graph", return_value=graph), \
+             patch.object(app_main.PipelineRunner, "_step_detect_communities",
+                          return_value=({"a": 0, "b": 0}, {0: {"a", "b"}},
+                                        {"num_communities": 1, "modularity": 0.5}, graph)), \
+             patch.object(app_main.PipelineRunner, "_step_tag_communities",
+                          return_value=({0: "Label"}, {})), \
+             patch.object(app_main.PipelineRunner, "_step_visualize",
+                          side_effect=MemoryError("render blew up")), \
+             patch.object(app_main.PipelineRunner, "_step_save_results",
+                          side_effect=lambda *a, **kw: saved.append(kw)):
+            app_main.PipelineRunner.run_analysis_pipeline(runner)
+
+        assert [kw["output_key"] for kw in saved] == ["data/frontend-data.json"]
+
+    def test_the_scheduled_profile_renders_nothing(self):
+        """Neither artifact is uploaded anywhere, so the scheduled task must not
+        spend memory or minutes producing them."""
+        from config import get_rigorous_config
+
+        analysis = get_rigorous_config().analysis
+        assert analysis.enable_static_viz is False
+        assert analysis.enable_interactive_viz is False
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Mixed Live + VOD Integration Tests

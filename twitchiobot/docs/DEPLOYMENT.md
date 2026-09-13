@@ -283,15 +283,21 @@ promote themselves as history accumulates — no redeploy and no config edit.
 Before day 14, all three choices are PENDING and the stable frontend-data URL
 contains a schema-valid status payload rather than a mislabeled short graph.
 
-The 14-day threshold was measured on 2026-08-28 and is set. The 30 and 90-day
-entries are not: the value they fall back to (`overlap_threshold=2`) was swept
-over a four-day, 15-survey sample, not over 30 days, so it is a placeholder
-rather than a calibration. Overlap grows super-linearly with survey count, and
-the fallback is loose rather than strict once a window holds real history — the
-same sweep that returned 2 over four days returns 10 over fourteen. A window
-running on the fallback therefore admits far more edges than it should. Re-run
-the calibration each time a window promotes out of PENDING, and expect the
-measured value to climb.
+The 14 and 30-day thresholds are measured and set (14 on 2026-08-28,
+re-confirmed 2026-09-13; 30 on 2026-09-13, when that window promoted). The
+90-day entry is not: the value it falls back to (`overlap_threshold=2`) was
+swept over a four-day, 15-survey sample, so it is a placeholder rather than a
+calibration. Overlap grows super-linearly with survey count, and the fallback is
+loose rather than strict once a window holds real history — the same sweep that
+returned 2 over four days returns 10 over fourteen. A window running on the
+fallback therefore admits far more edges than it should. Re-run the calibration
+each time a window promotes out of PENDING, and expect the measured value to
+climb.
+
+Note that `UNCALIBRATED_WINDOW` does not cover the window named by
+`analysis_window_days`: that check skips when the two match, so the default
+window is the one place a missing entry stays silent. It is worth confirming by
+eye that the window plan's canonical entry has its own threshold.
 
 Measure all three against the surveys that now exist. From
 `infrastructure/aws`, where the rest of this guide leaves you:

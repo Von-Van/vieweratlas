@@ -414,7 +414,7 @@ class PipelineRunner:
                 "`scripts/calibrate_windows.sh` and set window_overlap_thresholds.",
                 window_days, overlap_threshold, analysis.analysis_window_days,
             )
-        total = 6 if is_canonical else 4
+        total = 6 if is_canonical else 5
         self.logger.info("\n" + "#" * 70)
         self.logger.info(
             "WINDOW %s (overlap_threshold=%d%s)",
@@ -463,14 +463,17 @@ class PipelineRunner:
             aggregator.get_channel_metadata()
         )
 
-        if is_canonical:
-            # Step 5: Visualize
-            self.logger.info("\n[5/6] CREATING VISUALIZATIONS")
-            self.logger.info("-" * 70)
-            self._step_visualize(graph, partition, labels)
-
-        # Step 6: Save results
-        self.logger.info("\n[%d/%d] SAVING RESULTS", total, total)
+        # Step 5: Save results
+        #
+        # Publishing precedes rendering because the render is the one step that
+        # can end the task without raising. A canonical window wide enough to
+        # exhaust the container's memory gets the process SIGKILLed by the
+        # kernel, so no `except` here or in _step_visualize ever runs and every
+        # later step is simply lost. That is how the 30d window's promotion
+        # silently froze the public dataset for three days. With the upload
+        # first, the payload is already durable in S3 before that risk is taken
+        # and a failed picture costs only the picture.
+        self.logger.info("\n[5/%d] SAVING RESULTS", total)
         self.logger.info("-" * 70)
         suffixed_key = self._frontend_key(window_days)
         # The canonical window also refreshes the unsuffixed file that
@@ -499,6 +502,12 @@ class PipelineRunner:
             pending_windows=tuple(sorted(plan["pending"])),
             default_window=plan["default"],
         )
+
+        if is_canonical:
+            # Step 6: Visualize. Last on purpose — see the note above step 5.
+            self.logger.info("\n[6/6] CREATING VISUALIZATIONS")
+            self.logger.info("-" * 70)
+            self._step_visualize(graph, partition, labels)
 
         return {
             "status": "success",
@@ -709,17 +718,25 @@ class PipelineRunner:
         viz = Visualizer(figsize=self.config.analysis.static_viz_figsize)
         
         if self.config.analysis.enable_static_viz:
-            viz.visualize_static(
-                graph,
-                partition,
-                labels,
-                output_file=f"{self.config.analysis.output_dir}/community_graph.png",
-                show_labels=self.config.analysis.show_node_labels,
-                edge_threshold=None,
-                label_top_n=self.config.analysis.label_top_n_nodes,
-                dpi=self.config.analysis.static_viz_dpi,
-            )
-            self.logger.info("✓ Static visualization saved")
+            # Guarded like the interactive render below: both artifacts are
+            # developer conveniences written to the task's ephemeral disk, so
+            # neither is worth failing a run over. This catches an in-process
+            # MemoryError; it cannot catch an OOM kill, which is why the caller
+            # publishes first.
+            try:
+                viz.visualize_static(
+                    graph,
+                    partition,
+                    labels,
+                    output_file=f"{self.config.analysis.output_dir}/community_graph.png",
+                    show_labels=self.config.analysis.show_node_labels,
+                    edge_threshold=None,
+                    label_top_n=self.config.analysis.label_top_n_nodes,
+                    dpi=self.config.analysis.static_viz_dpi,
+                )
+                self.logger.info("✓ Static visualization saved")
+            except Exception as e:
+                self.logger.warning(f"Static visualization failed: {e}")
         
         if self.config.analysis.enable_interactive_viz:
             try:
