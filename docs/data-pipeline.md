@@ -75,28 +75,47 @@ Each survey runs these steps:
 ### Raw record: one row per planned channel per survey
 
 Written by `EventSubSurveyRunner._row_for_target()` to
-`raw/snapshots/v2/date=YYYY-MM-DD/session=<id>/batch=NN.parquet`. Batches are
-numbered from 01.
+`raw/snapshots/v2/date=YYYY-MM-DD/session=<id>/batch=NN.parquet`, schema
+version 2. Batches are numbered from 01. The types below are the Parquet types
+of the production files.
 
-| Field | Kind | Meaning |
-| --- | --- | --- |
-| `chatters_json`, `chatter_ids_json` | Observed | Aligned JSON arrays of lowercase logins and Twitch user IDs of every account that sent at least one message in the window |
-| `unique_author_count` | Derived | Length of those arrays |
-| `viewer_count` | Observed | Helix concurrent viewers **when the cohort was frozen**, not during the window |
-| `game_id`, `game_name`, `language`, `title`, `started_at` | Observed | Helix stream metadata at discovery |
-| `rank` | Observed | Position in the frozen Helix ranking |
-| `channel_id`, `channel`, `channel_login` | Observed | Broadcaster user ID and lowercase login |
-| `sample_started_at`, `sample_ended_at`, `sample_duration_seconds`, `timestamp` | Operational | The shared listening window. `timestamp` repeats the start time. |
-| `survey_session_id`, `batch`, `schema_version`, `selection_source`, `discovered_at`, `_source` | Operational | Provenance. `selection_source` is always `top_ranked`; `opt_in` and `both` are reserved. |
-| `collection_status`, `failure_reason` | Operational | `completed`, `subscription_failed`, or `websocket_failed`, plus a fixed failure category |
+| Field | Type | Kind | Meaning |
+| --- | --- | --- | --- |
+| `chatters_json`, `chatter_ids_json` | string (JSON array) | Observed | Aligned arrays of lowercase logins and Twitch user IDs, sorted by ID, for every account that sent at least one message in the window. Never message text. |
+| `unique_author_count` | int64 | Derived | Length of those arrays |
+| `viewer_count` | int64 | Observed | Helix concurrent viewers **when the cohort was frozen**, not during the window |
+| `game_id`, `game_name`, `language`, `title` | string | Observed | Helix stream metadata at discovery |
+| `started_at` | string (ISO 8601) | Observed | When the stream went live |
+| `rank` | int64 | Observed | Position in the frozen Helix ranking |
+| `channel_id` | string | Observed | Broadcaster user ID |
+| `channel`, `channel_login` | string | Observed | Broadcaster login, lowercase (both columns hold it) |
+| `sample_started_at`, `sample_ended_at`, `timestamp` | string (ISO 8601) | Operational | The shared listening window. `timestamp` repeats the start time. |
+| `sample_duration_seconds` | int64 | Operational | 300 for completed rows, 0 for failed ones |
+| `survey_session_id` | string | Operational | Survey ID; by default its UTC start time |
+| `batch`, `schema_version` | int64 | Operational | Batch number, and `2` |
+| `discovered_at` | string (ISO 8601) | Operational | When the cohort was frozen |
+| `selection_source`, `_source` | string | Operational | Always `top_ranked` and `live` today. `opt_in` and `both` are reserved. |
+| `collection_status`, `failure_reason` | string | Operational | `completed`, `subscription_failed`, or `websocket_failed`, plus a fixed failure category |
 
 A `completed` row with an empty author list is a real observation: nobody
 spoke during the window. Failed rows are kept as operational evidence but never
 reach the graph.
 
-The session's `manifest.json` records the survey's status, its start and end
-times, the configured limits, per-batch counts (`planned`, `completed`,
-`failed`, `zero_authors`), and the object key of each batch.
+### Survey manifest
+
+Each session folder also holds `manifest.json`, also schema version 2. Its
+`status` is `running` while the survey works, then `complete`,
+`complete_with_errors`, or `partial`. The manifest also records:
+
+- `started_at` and `completed_at`;
+- the configured limits: `target_limit`, `batch_size`, `window_seconds`,
+  `timeout_seconds`;
+- survey-wide counts: `planned`, `attempted`, `completed`, `failed`,
+  `zero_authors`, `batches_planned`, `batches_completed`;
+- a `batches` array with each batch's counts and the `object_key` of its file.
+
+A `partial` survey also carries `failure_reason`, and an `error` category when
+an exception caused it.
 
 ## 2. Storage
 
@@ -104,13 +123,14 @@ times, the configured limits, per-batch counts (`planned`, `completed`,
 backends: `S3Storage` in production (bucket plus `S3_PREFIX`) and `FileStorage`
 locally (root directory `LOGS_DIR`, default `logs`). Keys are the same in both.
 
-| Key | Written by | Visibility | Lifetime |
-| --- | --- | --- | --- |
-| `raw/snapshots/v2/date=…/session=…/batch=NN.parquet` | survey | private | 100 days; noncurrent versions 7 days |
-| `raw/snapshots/v2/date=…/session=…/manifest.json` | survey | private | same |
-| `processed/analysis_results.json` | analysis, canonical window | private | overwritten daily |
-| `curated/analysis/YYYY-MM-DD/graph_{nodes,edges}.csv` | analysis, canonical window | private | moved to Standard-IA after 90 days |
-| `data/frontend-data.json`, `data/frontend-data-<N>d.json` | analysis | **public** via CloudFront | overwritten daily |
+| Key | Contents | Written by | Visibility | Lifetime |
+| --- | --- | --- | --- | --- |
+| `raw/snapshots/v2/date=…/session=…/batch=NN.parquet` | [Raw record](#raw-record-one-row-per-planned-channel-per-survey), one row per planned channel | survey | private | 100 days; noncurrent versions 7 days |
+| `raw/snapshots/v2/date=…/session=…/manifest.json` | [Survey manifest](#survey-manifest) | survey | private | same |
+| `processed/analysis_results.json` | Partition, labels, run statistics, configuration ([fields](metrics.md#private-run-record-processedanalysis_resultsjson)) | analysis, canonical window | private | overwritten daily |
+| `curated/analysis/YYYY-MM-DD/graph_nodes.csv` | `id, viewers, viewer_count, game, title` | analysis, canonical window | private | moved to Standard-IA after 90 days |
+| `curated/analysis/YYYY-MM-DD/graph_edges.csv` | `source, target, weight` | analysis, canonical window | private | same |
+| `data/frontend-data.json`, `data/frontend-data-<N>d.json` | [Public payload](#public-payload-schema) | analysis | **public** via CloudFront | overwritten daily |
 
 The lifecycle rules live in
 [`safe-deploy.sh`](../twitchiobot/infrastructure/aws/safe-deploy.sh), and
@@ -222,6 +242,52 @@ Payloads are written to `data/frontend-data-<N>d.json` for each available
 window. The canonical window also writes `data/frontend-data.json`, which the
 site loads first. The payload declares `availableWindows`, `pendingWindows`,
 and `defaultWindow`, so the browser knows which time-filter buttons have data.
+
+### Public payload schema
+
+This is the only data the website receives. The frontend validates it against
+this shape before rendering anything. [metrics.md](metrics.md) defines what each
+field measures.
+
+```ts
+type FrontendData = {
+  generatedAt: string;                 // ISO time of the export
+  availableWindows?: number[];         // e.g. [14, 30]; window keys are omitted in single-window runs
+  pendingWindows?: number[];           // e.g. [90]: configured, but not enough history yet
+  defaultWindow?: number;              // the window the site opens on
+  overallStats: {
+    totalChannels: number;             // channels in the analysed graph
+    totalViewers: number;              // distinct chatters (not viewers) in the window
+    communitiesDetected: number;
+    modularityScore: number;
+    collectionPeriod: string;          // e.g. "Aug 13 – Aug 26, 2026"
+    dataPoints: number;                // channel samples loaded
+    edgesTotal: number;
+    avgOverlapWeight: number;          // mean shared chatters per rendered edge
+    renderedChannels: number;
+    renderedEdges: number;
+  };
+  communities: { id: string; label: string; color: string; nodeCount: number; description: string }[];
+  channels: {
+    id: string;                        // lowercase login (also `name`)
+    name: string;
+    displayName: string;
+    game: string;                      // most frequent category in the window
+    viewers: number;                   // mean concurrent viewers while live (Helix)
+    communityId: string;
+    description: string;
+    language: string;                  // broadcaster language, e.g. "En"
+    topOverlaps: { channelId: string; channelName: string; shared: number }[];  // up to 5
+    viewerHistory: { date: string; viewers: number }[];                         // one point per day
+    edgeCount: number;                 // links on the rendered map (at most 25)
+    modularityScore: number;           // share of those links inside the channel's community
+    layout?: { x: number; y: number }; // position precomputed by the pipeline
+  }[];
+  edges: { source: string; target: string; weight: number }[];  // weight = shared chatters (integer)
+  topCommunitiesBySize: { community: string; channels: number; viewers: number }[];      // top 8
+  mostConnectedChannels: { name: string; edges: number; community: string; color: string }[];  // top 10
+};
+```
 
 The frontend ([`AtlasDataProvider.tsx`](../frontend/src/app/data/AtlasDataProvider.tsx))
 fetches `VITE_DATA_URL` from the same origin. It enforces a 10-second timeout
