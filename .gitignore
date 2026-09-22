@@ -5,11 +5,12 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.local
+.env.*.local
 twitchiobot/.env
 twitchiobot/config/.env
 twitchiobot/infrastructure/aws/.env
 
-#claude
+# Claude Code local settings
 .claude/
 
 # Python
@@ -45,9 +46,10 @@ frontend/public/data/
 twitchiobot/vod_queue.json
 twitchiobot/channels.txt
 twitchiobot/chatters_log.csv
+twitchiobot/demo_data/
 
-# Internal operational docs (deployment procedures, runbooks, checklists).
-# DEVELOPER.md and DATA_POLICY.md are intentionally public and referenced by README.
+# Only the four operator docs below are published. Anything else written into
+# twitchiobot/docs (private runbooks, checklists) stays local by default.
 twitchiobot/docs/*.md
 !twitchiobot/docs/DEVELOPER.md
 !twitchiobot/docs/DATA_POLICY.md

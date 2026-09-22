@@ -17,6 +17,8 @@ from typing import Dict, Set, Any
 import networkx as nx
 import numpy as np
 
+from graph_builder import ordered_subgraph
+
 logger = logging.getLogger(__name__)
 
 # Fixed color palette — deterministic assignment by community size rank
@@ -286,7 +288,7 @@ def _largest_component(graph: nx.Graph) -> tuple:
     if not graph.number_of_edges():
         return graph, 0
     connected = max(nx.connected_components(graph), key=len)
-    return graph.subgraph(connected).copy(), graph.number_of_nodes() - len(connected)
+    return ordered_subgraph(graph, connected), graph.number_of_nodes() - len(connected)
 
 
 def _build_public_graph(
@@ -314,17 +316,21 @@ def _build_public_graph(
         public_graph.add_node(node, **graph.nodes[node])
 
     edge_counts: Dict[str, int] = {node: 0 for node in selected_nodes}
+    # Rank by the analysis weight, which is a 0-1 similarity under the
+    # normalised modes: truncating it to int made every such edge tie at 0.
+    # ``shared`` travels with the edge so the payload can publish the measured
+    # count whatever the weighting mode.
     candidate_edges = sorted(
         (
-            (u, v, int(data.get("weight", 0) or 0))
+            (u, v, data.get("weight", 0) or 0, _shared_count(data))
             for u, v, data in graph.edges(data=True)
             if u in selected_node_ids and v in selected_node_ids
         ),
-        key=lambda item: (-item[2], item[0], item[1]),
+        key=lambda item: (-float(item[2]), item[0], item[1]),
     )
 
     cap_bound = False
-    for u, v, weight in candidate_edges:
+    for u, v, weight, shared in candidate_edges:
         if public_graph.number_of_edges() >= config.max_edges:
             cap_bound = True
             break
@@ -332,7 +338,7 @@ def _build_public_graph(
             continue
         if edge_counts[v] >= config.top_edges_per_channel:
             continue
-        public_graph.add_edge(u, v, weight=weight)
+        public_graph.add_edge(u, v, weight=weight, shared=shared)
         edge_counts[u] += 1
         edge_counts[v] += 1
 
@@ -480,7 +486,7 @@ def _community_layout(
         cu, cv = partition.get(u, -1), partition.get(v, -1)
         if cu != cv:
             existing = meta.get_edge_data(cu, cv, {"weight": 0})["weight"]
-            meta.add_edge(cu, cv, weight=existing + int(weight or 0))
+            meta.add_edge(cu, cv, weight=existing + (weight or 0))
 
     if meta.number_of_nodes() == 1:
         centres = {next(iter(members)): (0.0, 0.0)}
@@ -495,7 +501,7 @@ def _community_layout(
             positions[group[0]] = (cx, cy)
             continue
         local = nx.spring_layout(
-            graph.subgraph(group), seed=42, weight="weight", iterations=150
+            ordered_subgraph(graph, group), seed=42, weight="weight", iterations=150
         )
         # The same percentile guard applies within a community: one peripheral
         # member would otherwise collapse the rest into the centre of the disc.

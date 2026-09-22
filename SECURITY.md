@@ -15,8 +15,10 @@ mitigation. Reports will be acknowledged as availability permits.
 ViewerAtlas is a portfolio project and is not currently offered as a hosted
 service. Operators deploying it are responsible for:
 
-- keeping raw presence data and optional raw VOD artifacts private;
-- exposing only the aggregate `data/frontend-data.json` payload;
+- keeping raw presence data, survey manifests, and any legacy VOD artifacts
+  private;
+- exposing only the aggregate `data/frontend-data*.json` payloads (one per
+  published analysis window);
 - storing Twitch credentials in a secret manager, never in browser code;
 - reviewing IAM, network, retention, budget, and CDN security-header settings;
 - running the included CI, dependency audits, smoke tests, and rollback checks;

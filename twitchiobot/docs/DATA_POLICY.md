@@ -132,7 +132,7 @@ privacy boundary before activation.
 ## Operator responsibilities
 
 1. Keep S3, manifests, and raw survey files private.
-2. Confirm the 90-day/seven-day lifecycle rules and seven-day log retention.
+2. Confirm the 100-day/seven-day lifecycle rules and seven-day log retention.
 3. Use the guided authorization helper instead of copying tokens into files.
 4. Pause schedules during incidents or untested updates.
 5. Investigate `SURVEY_PARTIAL` alarms (a survey that stopped early; routine

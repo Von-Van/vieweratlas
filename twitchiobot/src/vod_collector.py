@@ -7,7 +7,7 @@ PresenceSnapshot records compatible with the existing live collection pipeline.
 This module converts VOD chat messages into time-bucketed presence snapshots,
 allowing historical viewer data to supplement live collections.
 
-Design based on: vodintegr.txt specification
+Local development only: VOD collection is disabled in the production deployment.
 """
 
 import json

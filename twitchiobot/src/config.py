@@ -11,7 +11,7 @@ Supports:
 """
 
 import os
-from dataclasses import dataclass, asdict, field, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Optional
 
@@ -28,7 +28,9 @@ except ImportError:
 class CollectionConfig:
     """Configuration for data collection phase."""
     
-    # Twitch API settings
+    # Unused: survey credentials come from twitch_credentials.py (Secrets
+    # Manager in production, TWITCH_* variables locally). Kept, like the
+    # retired settings below, so older YAML files that set them still load.
     oauth_token: Optional[str] = None
     client_id: Optional[str] = None
     
@@ -40,13 +42,13 @@ class CollectionConfig:
     subscription_retries: int = 2  # Retries after an individual subscription failure
     batch_retries: int = 2  # Full restarts after an unrecoverable websocket loss
     
-    # Scheduling
-    wait_for_hour_alignment: bool = True  # Sync to top of hour
-    collection_interval_minutes: int = 60  # Minutes between cycles
-    
-    # Cost Protection
-    max_runtime_hours: Optional[int] = 24  # Auto-stop after N hours (None = unlimited)
-    max_collection_cycles: Optional[int] = 100  # Auto-stop after N cycles (None = unlimited)
+    # Retired continuous-collector settings. Nothing reads them: EventBridge
+    # Scheduler owns timing and survey_timeout_seconds bounds a run. They are
+    # still accepted because the YAML loader rejects unknown keys.
+    wait_for_hour_alignment: bool = True
+    collection_interval_minutes: int = 60
+    max_runtime_hours: Optional[int] = 24
+    max_collection_cycles: Optional[int] = 100
     
     # File settings
     logs_dir: str = "logs"
@@ -148,8 +150,8 @@ class AnalysisConfig:
     resolution: float = 1.0  # Louvain resolution (higher = more communities)
     min_community_size: int = 1  # Minimum channels in a community to include
     
-    # Continuous mode
-    analysis_interval_cycles: int = 24  # Run analysis every N collection cycles
+    # Retired with the continuous collector; accepted from YAML, never read.
+    analysis_interval_cycles: int = 24
     
     # Visualization
     enable_static_viz: bool = True  # Generate PNG
@@ -306,9 +308,10 @@ class PipelineConfig:
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     
-    # Pipeline mode
-    dry_run: bool = False  # If True, don't actually write files
-    verbose: bool = False  # Extra debug output
+    # Accepted from YAML and set by the presets, but nothing reads them: a
+    # "dry run" still writes every artifact.
+    dry_run: bool = False
+    verbose: bool = False
     
     def __post_init__(self):
         """Initialize defaults if not provided."""
@@ -633,7 +636,7 @@ if __name__ == "__main__":
     print(f"  Output dir: {default.analysis.output_dir}")
     print(f"  Overlap threshold: {default.analysis.overlap_threshold}")
     
-    print("\nRigorous Config (TwitchAtlas-style):")
+    print("\nRigorous Config (production preset):")
     rigorous = get_rigorous_config()
     print(f"  Min channel viewers: {rigorous.analysis.min_channel_viewers}")
     print(f"  Overlap threshold: {rigorous.analysis.overlap_threshold}")

@@ -50,7 +50,9 @@ SURVEY_COMPLETION_ALARM_WINDOW_SECONDS=${SURVEY_COMPLETION_ALARM_WINDOW_SECONDS:
 ERROR_SPIKE_THRESHOLD=${ERROR_SPIKE_THRESHOLD:-20}
 ANALYSIS_COMPLETION_ALARM_PERIOD_SECONDS=${ANALYSIS_COMPLETION_ALARM_PERIOD_SECONDS:-21600}
 ANALYSIS_COMPLETION_EVALUATION_PERIODS=${ANALYSIS_COMPLETION_EVALUATION_PERIODS:-5}
-BUDGET_LIMIT_USD=${BUDGET_LIMIT_USD:-50}
+# safe-deploy.sh and .env name this BUDGET_LIMIT. Honour it, or running this
+# script after a deploy resets a custom budget to the $50 default.
+BUDGET_LIMIT_USD=${BUDGET_LIMIT_USD:-${BUDGET_LIMIT:-50}}
 BUDGET_NAME=${BUDGET_NAME:-vieweratlas-monthly-limit}
 SNS_TOPIC_ARN=${SNS_TOPIC_ARN:-}
 SNS_TOPIC_NAME=${SNS_TOPIC_NAME:-vieweratlas-alerts}
@@ -483,17 +485,20 @@ if not payload:
 
 config = json.loads(payload)
 rules = {rule.get("ID") for rule in config.get("Rules", [])}
-expected = {"DeleteSurveySnapshotsV2After90Days", "DeleteOldVODRaw", "ArchiveProcessedData"}
+# Must match the rule safe-deploy.sh writes: 100 days keeps the widest
+# published window (90) from losing its oldest day while analysis reads it.
+survey_rule_id = "DeleteSurveySnapshotsV2After100Days"
+expected = {survey_rule_id, "DeleteOldVODRaw", "ArchiveProcessedData"}
 missing = sorted(expected - rules)
 if missing:
     raise SystemExit(f"Missing lifecycle rules: {', '.join(missing)}")
 
 survey_rule = next(
     rule for rule in config.get("Rules", [])
-    if rule.get("ID") == "DeleteSurveySnapshotsV2After90Days"
+    if rule.get("ID") == survey_rule_id
 )
-if survey_rule.get("Expiration", {}).get("Days") != 90:
-    raise SystemExit("Survey snapshots must expire after 90 days")
+if survey_rule.get("Expiration", {}).get("Days") != 100:
+    raise SystemExit("Survey snapshots must expire after 100 days")
 if survey_rule.get("NoncurrentVersionExpiration", {}).get("NoncurrentDays") != 7:
     raise SystemExit("Noncurrent survey snapshot versions must expire after 7 days")
 print("Lifecycle configuration validated")

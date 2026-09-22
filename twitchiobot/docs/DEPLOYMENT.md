@@ -67,10 +67,10 @@ run once enough completed survey history exists.
 ## Before starting
 
 1. Start Docker Desktop and wait until it says it is running.
-2. Open Terminal and go to the AWS folder:
+2. Open Terminal and go to the AWS folder of your clone (replace the path):
 
    ```bash
-   cd /Users/jakemauldin/Documents/GitHub/vieweratlas/twitchiobot/infrastructure/aws
+   cd /path/to/vieweratlas/twitchiobot/infrastructure/aws
    export AWS_PAGER=""
    ```
 
@@ -293,6 +293,10 @@ returned 2 over four days returns 10 over fourteen. A window running on the
 fallback therefore admits far more edges than it should. Re-run the calibration
 each time a window promotes out of PENDING, and expect the measured value to
 climb.
+
+All of these were also measured before automated-account filtering existed
+(2026-09-21). Removing bots lowers overlap counts, so re-sweep every window once
+the filter is deployed rather than trusting the earlier values.
 
 Note that `UNCALIBRATED_WINDOW` does not cover the window named by
 `analysis_window_days`: that check skips when the two match, so the default

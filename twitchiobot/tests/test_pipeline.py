@@ -698,6 +698,21 @@ class TestClusterTagger:
         reasoning = tagger.get_label_reasoning(0)
         assert "reasoning" in reasoning
 
+    def test_tied_games_are_named_the_same_whatever_the_channel_order(self):
+        """Community members arrive as a set, whose order changes with the
+        process's hash seed. A tie must not make the label depend on it."""
+        metadata = {
+            "z1": {"game_name": "Zelda", "language": "en"},
+            "z2": {"game_name": "Zelda", "language": "en"},
+            "a1": {"game_name": "Asteroids", "language": "en"},
+            "a2": {"game_name": "Asteroids", "language": "en"},
+        }
+        labels = {
+            ClusterTagger().tag_communities({0: order}, metadata)[0]
+            for order in (["z1", "z2", "a1", "a2"], ["a1", "a2", "z1", "z2"])
+        }
+        assert labels == {"Asteroids (en)"}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Config Tests
@@ -1127,6 +1142,64 @@ class TestFrontendExporter:
         for edge in payload["edges"]:
             assert edge["source"] in channel_ids
             assert edge["target"] in channel_ids
+
+    @staticmethod
+    def _uneven_viewers():
+        # `small` sits entirely inside `big`; `peer` shares half of `big`.
+        return {
+            "big": {f"u{i}" for i in range(1000)},
+            "small": {f"u{i}" for i in range(100)},
+            "peer": {f"u{i}" for i in range(500, 1500)},
+        }
+
+    def _export_single_community(self, graph, viewers, config=None):
+        storage = MockS3Storage()
+        assert export_frontend_data(
+            graph=graph,
+            partition={name: 0 for name in viewers},
+            communities={0: set(viewers)},
+            labels={0: "Test"},
+            detection_stats={"modularity": 0.0},
+            aggregator_stats={},
+            storage=storage,
+            config=config,
+        )
+        return storage._json_uploads["data/frontend-data.json"]
+
+    @pytest.mark.parametrize("mode", ["jaccard", "overlap_coef"])
+    def test_normalised_modes_publish_measured_counts(self, mode):
+        """The graph weight is a 0-1 score in these modes, but the payload
+        promises the measured shared-chatter count. Truncating the score to an
+        integer used to publish 0 for every edge."""
+        viewers = self._uneven_viewers()
+        graph = GraphBuilder(overlap_threshold=1, weighting_mode=mode).build_graph(viewers)
+        payload = self._export_single_community(graph, viewers)
+
+        published = {
+            frozenset((edge["source"], edge["target"])): edge["weight"]
+            for edge in payload["edges"]
+        }
+        assert published == {
+            frozenset(("big", "peer")): 500,
+            frozenset(("big", "small")): 100,
+        }
+        assert payload["overallStats"]["avgOverlapWeight"] == 300
+
+    def test_public_cap_ranks_edges_by_the_analysis_weight(self):
+        """With one edge per channel, overlap_coef keeps the containment pair
+        (score 1.0, 100 shared) over the larger raw count (score 0.5, 500)."""
+        viewers = self._uneven_viewers()
+        graph = GraphBuilder(
+            overlap_threshold=1, weighting_mode="overlap_coef"
+        ).build_graph(viewers)
+        payload = self._export_single_community(
+            graph, viewers, FrontendExportConfig(top_edges_per_channel=1)
+        )
+
+        assert [
+            (sorted((edge["source"], edge["target"])), edge["weight"])
+            for edge in payload["edges"]
+        ] == [(["big", "small"], 100)]
 
     def test_export_makes_duplicate_community_labels_unique(self):
         graph = nx.Graph()
@@ -2452,6 +2525,9 @@ class TestAnalysisWindow:
         # private artifacts, and visualization runs once rather than per window.
         assert [kw["also_write"] for kw in saved] == [("data/frontend-data.json",), (), ()]
         assert [kw["publish_private"] for kw in saved] == [True, False, False]
+        # The saved record names the window and the threshold that built it.
+        assert [kw["window_days"] for kw in saved] == [30, 14, 90]
+        assert [kw["overlap_threshold"] for kw in saved] == [2, 1, 5]
         assert len(visualized) == 1
         # One anchor object threads through every window, which is what keeps
         # community colours stable across the filter.
@@ -2781,6 +2857,19 @@ class TestScheduledAnalysisOutcome:
 
         with pytest.raises(IOError, match="private analysis results"):
             runner._step_save_results(**self._save_args())
+
+    def test_private_results_record_the_threshold_the_window_used(self):
+        """A calibrated window is not built with the fallback overlap_threshold,
+        so recording the fallback would make the run impossible to reproduce."""
+        storage = MockS3Storage()
+        runner = self._runner_with_storage(storage)
+        assert runner.config.analysis.overlap_threshold != 3
+
+        runner._step_save_results(**self._save_args(), window_days=14, overlap_threshold=3)
+
+        recorded = storage._json_uploads["processed/analysis_results.json"]["config"]
+        assert recorded["analysis_window_days"] == 14
+        assert recorded["overlap_threshold"] == 3
 
     def test_public_frontend_write_failure_is_fatal(self):
         runner = self._runner_with_storage(MockS3Storage())

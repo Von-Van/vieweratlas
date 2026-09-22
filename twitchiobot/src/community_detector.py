@@ -7,7 +7,7 @@ internal connections (shared viewers).
 """
 
 import networkx as nx
-from typing import Dict, Set, List
+from typing import Dict, Set
 import logging
 
 logger = logging.getLogger(__name__)
@@ -220,76 +220,6 @@ class CommunityDetector:
         return graph
 
 
-class SimpleGreedyCommunityDetector:
-    """
-    Fallback community detector using a simple greedy algorithm.
-    Use if python-louvain is not available.
-    """
-    
-    def __init__(self):
-        self.partition: Dict[str, int] = {}
-        self.communities: Dict[int, Set[str]] = {}
-        
-    def detect_communities(self, graph: nx.Graph) -> Dict[str, int]:
-        """
-        Simple greedy community detection based on weighted edges.
-        
-        Algorithm:
-        1. Start with each node in its own community
-        2. Repeatedly merge communities that maximize modularity gain
-        3. Stop when no beneficial merges remain
-        
-        Args:
-            graph: NetworkX graph
-        
-        Returns:
-            Dict mapping channel -> community_id
-        """
-        logger.info("Running greedy community detection (fallback)")
-        
-        # Initialize: each node is its own community
-        self.partition = {node: i for i, node in enumerate(graph.nodes())}
-        
-        # Simple heuristic: merge communities connected by high-weight edges
-        # This is a naive approach and less sophisticated than Louvain
-        improved = True
-        iteration = 0
-        
-        while improved and iteration < 10:  # Limit iterations
-            improved = False
-            iteration += 1
-            
-            # Try merging adjacent communities
-            for u, v in graph.edges():
-                comm_u = self.partition[u]
-                comm_v = self.partition[v]
-                
-                if comm_u != comm_v:
-                    # Merge v's community into u's
-                    for node in graph.nodes():
-                        if self.partition[node] == comm_v:
-                            self.partition[node] = comm_u
-                    improved = True
-                    break
-        
-        # Rebuild communities dict
-        self.communities = {}
-        for node, comm_id in self.partition.items():
-            if comm_id not in self.communities:
-                self.communities[comm_id] = set()
-            self.communities[comm_id].add(node)
-        
-        logger.info(f"Greedy detection found {len(self.communities)} communities")
-        
-        return self.partition
-    
-    def get_partition(self) -> Dict[str, int]:
-        return dict(self.partition)
-    
-    def get_communities(self) -> Dict[int, Set[str]]:
-        return {k: v.copy() for k, v in self.communities.items()}
-
-
 if __name__ == "__main__":
     # Test with sample data
     from data_aggregator import DataAggregator
@@ -317,7 +247,4 @@ if __name__ == "__main__":
         for key, value in stats.items():
             print(f"  {key}: {value}")
     else:
-        print("\npython-louvain not available. Using greedy fallback.")
-        detector = SimpleGreedyCommunityDetector()
-        partition = detector.detect_communities(graph)
-        print(f"  Detected {len(detector.get_communities())} communities")
+        print("\npython-louvain not available. Install with: pip install python-louvain")

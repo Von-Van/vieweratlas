@@ -15,6 +15,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def ordered_subgraph(graph: nx.Graph, nodes) -> nx.Graph:
+    """Induced subgraph that keeps ``graph``'s node and edge order.
+
+    ``graph.subgraph(nodes)`` iterates the Python set it is given whenever that
+    set is under half the graph, and set order changes with every process's
+    string-hash seed. Spring layouts place nodes by iteration order, so the
+    published map moved between runs on identical data. Copying in the parent's
+    order makes the output a function of the input alone.
+    """
+    keep = set(nodes)
+    sub = graph.__class__()
+    sub.graph.update(graph.graph)
+    sub.add_nodes_from((n, d) for n, d in graph.nodes(data=True) if n in keep)
+    sub.add_edges_from(
+        (u, v, d) for u, v, d in graph.edges(data=True) if u in keep and v in keep
+    )
+    return sub
+
+
 class GraphBuilder:
     """
     Builds a weighted undirected graph where:
@@ -137,10 +156,14 @@ class GraphBuilder:
                 overlap_counts[(channel1, channel2)] += 1
 
         self.skipped_below_normalized_threshold = 0
-        for (channel1, channel2), overlap in overlap_counts.items():
-            if overlap < self.overlap_threshold:
-                continue
-
+        # Viewer sets iterate in string-hash order, so overlap_counts is filled
+        # in a different order by every process. Adding edges in sorted order
+        # keeps adjacency order, which Louvain's tie-breaking reads, fixed.
+        passing = sorted(
+            (pair, overlap) for pair, overlap in overlap_counts.items()
+            if overlap >= self.overlap_threshold
+        )
+        for (channel1, channel2), overlap in passing:
             size1 = len(channel_viewers[channel1])
             size2 = len(channel_viewers[channel2])
             score = self._normalized_score(overlap, size1, size2)

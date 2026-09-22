@@ -152,15 +152,15 @@ export function Stats() {
           <MetricCard
             icon={<Database size={18} style={{ color: "#9147FF" }} />}
             value={overallStats.totalChannels.toLocaleString()}
-            label="Total Channels Tracked"
-            sub="Active in collection window"
+            label="Channels Analyzed"
+            sub="In the overlap graph after filtering"
             accent="#9147FF"
           />
           <MetricCard
             icon={<Users size={18} style={{ color: "#00E5CC" }} />}
             value={compactNumber.format(overallStats.totalViewers)}
-            label="Unique Viewers Observed"
-            sub="Distinct chat participants"
+            label="Unique Chatters Observed"
+            sub="Distinct message authors, bots excluded"
             accent="#00E5CC"
           />
           <MetricCard
@@ -174,20 +174,20 @@ export function Stats() {
             icon={<Activity size={18} style={{ color: "#1DB954" }} />}
             value={overallStats.modularityScore.toString()}
             label="Modularity Score"
-            sub="Graph quality (0–1 scale)"
+            sub="Strength of community structure"
             accent="#1DB954"
           />
           <MetricCard
             icon={<TrendingUp size={18} style={{ color: "#FF4D6D" }} />}
             value={overallStats.edgesTotal.toLocaleString()}
             label="Total Graph Edges"
-            sub="Weighted viewer overlaps"
+            sub="Channel pairs above the overlap threshold"
             accent="#FF4D6D"
           />
           <MetricCard
             icon={<Clock size={18} style={{ color: "#FFD700" }} />}
             value={compactNumber.format(overallStats.dataPoints)}
-            label="Presence Data Points"
+            label="Channel Samples"
             sub={overallStats.collectionPeriod}
             accent="#FFD700"
           />
@@ -245,15 +245,17 @@ export function Stats() {
           >
             <div className="mb-6">
               <h2 style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 17, marginBottom: 4 }}>
-                Communities by Viewer Reach
+                Communities by Audience Size
               </h2>
               <p style={{ color: "#848494", fontSize: 13 }}>
-                Estimated unique viewer reach per community
+                Sum of member channels' average concurrent viewers
               </p>
             </div>
             <div className="flex flex-col gap-2.5">
               {topCommunitiesBySize.map((comm, i) => {
-                const max = topCommunitiesBySize[0].viewers;
+                // The list is ordered by channel count, not viewers, so the
+                // largest value can sit anywhere in it.
+                const max = Math.max(1, ...topCommunitiesBySize.map((c) => c.viewers));
                 const pct = (comm.viewers / max) * 100;
                 const color = COMMUNITY_COLORS[i % COMMUNITY_COLORS.length];
                 return (
@@ -269,7 +271,7 @@ export function Stats() {
                         <span style={{ color: "#EFEFF1", fontSize: 13 }}>{comm.community}</span>
                       </div>
                       <span style={{ color: color, fontWeight: 700, fontSize: 13 }}>
-                        {(comm.viewers / 1000000).toFixed(1)}M
+                        {compactNumber.format(comm.viewers)}
                       </span>
                     </div>
                     <div
@@ -299,7 +301,7 @@ export function Stats() {
                 Most Connected Channels
               </h2>
               <p style={{ color: "#848494", fontSize: 13 }}>
-                Channels with the highest number of weighted edges in the overlap graph
+                Channels with the most links on the published map
               </p>
             </div>
             <Link
@@ -405,19 +407,19 @@ export function Stats() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {[
               {
-                label: "Sampling Rate",
-                value: "Every 60 min",
-                desc: "Chat presence logged hourly",
+                label: "Sampling",
+                value: "3 surveys / day",
+                desc: "Five-minute chat windows across up to 1,200 top live channels",
               },
               {
-                label: "Data Points",
-                value: "2.84M",
-                desc: "Total viewer-channel observations",
+                label: "Channel Samples",
+                value: compactNumber.format(overallStats.dataPoints),
+                desc: "Channel observations in this window",
               },
               {
                 label: "Avg Overlap Weight",
-                value: "3,241",
-                desc: "Mean shared chatters per edge",
+                value: overallStats.avgOverlapWeight.toLocaleString(),
+                desc: "Mean shared chatters per drawn link",
               },
             ].map((m) => (
               <div key={m.label}>

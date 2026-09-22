@@ -21,9 +21,10 @@ A window the pipeline has not published yet — because collection has not run
 long enough to fill it — is still offered, marked **PENDING**. Selecting it
 replaces the graph with an explanation instead of requesting a file that does not
 exist, and the window starts working on its own once the surveys reach back far
-enough. The site opens on whichever window the pipeline nominates as default,
-which is the widest one that is ready. Before any full window exists, it opens
-on 14 days and displays PENDING.
+enough. The site opens on whichever window the pipeline nominates as default:
+the configured canonical window (30 days in production) once it is ready, and
+otherwise the widest window that is. Before any full window exists, it opens on
+14 days and displays PENDING.
 
 The control hides itself entirely when only one window is described — demo mode,
 a single-window deployment, or a `VITE_DATA_URL` whose siblings cannot be
@@ -34,11 +35,28 @@ usernames and VOD message content are not part of the public frontend payload.
 
 ## Development
 
+Requires Node.js 22 (the CI version; React Router 7 needs at least Node 20).
+
 ```bash
 npm ci
 npm run typecheck
 npm run dev
 ```
+
+`npm run dev` without `VITE_DATA_URL` shows the demo dataset. To view real
+pipeline output locally, copy the exported payloads into the gitignored
+`public/data/` folder and point the dev server at them:
+
+```bash
+mkdir -p public/data
+cp ../twitchiobot/demo_data/data/frontend-data*.json public/data/
+VITE_DATA_URL=/data/frontend-data.json npm run dev
+```
+
+The synthetic `demo_data/` output comes from
+`twitchiobot/scripts/make_demo_data.py`. See
+[docs/development.md](../docs/development.md#run-the-pipeline-without-twitch).
+[docs/metrics.md](../docs/metrics.md) defines every field the payload carries.
 
 ## Production Build
 
@@ -54,11 +72,15 @@ should still be verified at deployment time.
 ## Deployment
 
 `deploy.sh` builds the app and uploads `dist/` to a private S3 bucket intended to
-sit behind CloudFront Origin Access Control. Set `S3_BUCKET` and optionally
-`DISTRIBUTION_ID` before running it.
+sit behind CloudFront Origin Access Control. Set `S3_BUCKET` (default
+`vieweratlas-frontend`) and optionally `DISTRIBUTION_ID` before running it. The
+distribution itself is created once by
+`twitchiobot/infrastructure/aws/cloudfront-setup.sh`.
 
 The expected production data URL is configured in `.env.production`:
 
 ```text
 VITE_DATA_URL=/data/frontend-data.json
 ```
+
+`VITE_SITE_URL`, if set, adds canonical and `og:url` tags for a custom domain.

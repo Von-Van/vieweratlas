@@ -10,7 +10,6 @@ Supports both local filesystem and S3 storage backends.
 
 import json
 import csv
-import os
 import logging
 import re
 from collections import Counter, defaultdict
@@ -410,13 +409,13 @@ class DataAggregator:
                             count += 1
                 
                 except Exception as e:
-                    print(f"Error loading {json_key}: {e}")
+                    logger.error("Error loading %s: %s", json_key, e)
             
             return count
         else:
             # Legacy local filesystem loading
             if not self.logs_dir.exists():
-                print(f"Logs directory {self.logs_dir} does not exist")
+                logger.warning("Logs directory %s does not exist", self.logs_dir)
                 return 0
             
             json_files = list(self.logs_dir.glob("*.json"))
@@ -438,7 +437,7 @@ class DataAggregator:
                             count += 1
                 
                 except (json.JSONDecodeError, IOError) as e:
-                    print(f"Error loading {json_file}: {e}")
+                    logger.error("Error loading %s: %s", json_file, e)
             
             return count
     
@@ -486,7 +485,7 @@ class DataAggregator:
                         count += 1
             
             except (csv.Error, IOError) as e:
-                print(f"Error loading {csv_file}: {e}")
+                logger.error("Error loading %s: %s", csv_file, e)
         
         return count
 
@@ -534,7 +533,7 @@ class DataAggregator:
                             if self._ingest_snapshot(record, default_source="vod"):
                                 count += 1
                     except Exception as e:
-                        print(f"Error loading {key}: {e}")
+                        logger.error("Error loading %s: %s", key, e)
 
             # JSON fallback
             vod_files = self.storage.list_files(
@@ -550,7 +549,7 @@ class DataAggregator:
                     if self._ingest_snapshot(snapshot, default_source="vod"):
                         count += 1
                 except Exception as e:
-                    print(f"Error loading {vod_key}: {e}")
+                    logger.error("Error loading %s: %s", vod_key, e)
 
             return count
 
@@ -566,7 +565,7 @@ class DataAggregator:
                             if self._ingest_snapshot(record, default_source="vod"):
                                 count += 1
                     except Exception as e:
-                        print(f"Error loading {parquet_file}: {e}")
+                        logger.error("Error loading %s: %s", parquet_file, e)
 
             vod_files = list(base_dir.rglob("snapshot_*.json"))
             for vod_file in vod_files:
@@ -578,7 +577,7 @@ class DataAggregator:
                         count += 1
 
                 except (json.JSONDecodeError, IOError) as e:
-                    print(f"Error loading {vod_file}: {e}")
+                    logger.error("Error loading %s: %s", vod_file, e)
 
         return count
     

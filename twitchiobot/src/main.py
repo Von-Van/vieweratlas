@@ -10,7 +10,6 @@ import os
 import signal
 import sys
 import logging
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -19,7 +18,7 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 
 from data_aggregator import DataAggregator, survey_date_span
-from graph_builder import GraphBuilder
+from graph_builder import GraphBuilder, ordered_subgraph
 from community_detector import CommunityDetector
 from cluster_tagger import ClusterTagger
 from visualizer import Visualizer
@@ -494,6 +493,8 @@ class PipelineRunner:
             also_write=also_write,
             anchor=anchor,
             publish_private=is_canonical,
+            window_days=window_days,
+            overlap_threshold=overlap_threshold,
             # A single-window run advertises nothing, so the browser hides the
             # time filter rather than offering a window that was never written.
             # Declared to the browser so the filter shows exactly the windows
@@ -701,7 +702,7 @@ class PipelineRunner:
                 f"Dropped {len(detector.discarded_channels)} channels in communities "
                 f"smaller than {self.config.analysis.min_community_size}"
             )
-            graph = graph.subgraph(partition.keys()).copy()
+            graph = ordered_subgraph(graph, partition.keys())
 
         communities = detector.get_communities()
         stats = detector.get_statistics()
@@ -777,25 +778,37 @@ class PipelineRunner:
                           publish_private: bool = True,
                           available_windows: tuple = (),
                           pending_windows: tuple = (),
-                          default_window: Optional[int] = None) -> None:
+                          default_window: Optional[int] = None,
+                          window_days: Optional[int] = None,
+                          overlap_threshold: Optional[int] = None) -> None:
         """Persist the required analysis artifacts or fail the scheduled run.
 
         ``publish_private`` is False for the extra windows: only the canonical
         window writes analysis_results.json, which is a single private record of
         the run rather than one per window.
+
+        ``window_days`` and ``overlap_threshold`` describe the window actually
+        analysed. The record must carry the threshold that built this graph,
+        not the configured fallback, or the run cannot be reproduced from it.
         """
+        if overlap_threshold is None:
+            overlap_threshold = self.config.analysis.overlap_threshold
         graph_stats = {
             "num_nodes": graph.number_of_nodes(),
             "num_edges": graph.number_of_edges(),
             "density": graph.number_of_edges() / (graph.number_of_nodes() * (graph.number_of_nodes() - 1) / 2) if graph.number_of_nodes() > 1 else 0
         }
-        
+
         results = {
             "timestamp": datetime.now().isoformat(),
             "config": {
-                "overlap_threshold": self.config.analysis.overlap_threshold,
+                "analysis_window_days": window_days,
+                "overlap_threshold": overlap_threshold,
+                "weighting_mode": self.config.analysis.weighting_mode,
                 "resolution": self.config.analysis.resolution,
-                "min_channel_viewers": self.config.analysis.min_channel_viewers
+                "min_channel_viewers": self.config.analysis.min_channel_viewers,
+                "min_channel_observations": self.config.analysis.min_channel_observations,
+                "min_community_size": self.config.analysis.min_community_size,
             },
             "partition": partition,
             "labels": labels,
@@ -1036,7 +1049,7 @@ def main() -> int:
         print(f"\nExamples:")
         print(f"  python main.py analyze                    # Default config")
         print(f"  python main.py survey config.yaml         # One EventSub survey")
-        print(f"  python main.py analyze rigorous           # TwitchAtlas-style")
+        print(f"  python main.py analyze rigorous           # Production preset")
         print(f"  python main.py analyze config.yaml        # Custom YAML config")
         print(f"  python main.py preprocess_vods config.yaml 5  # Process up to 5 queued VODs")
         return 2

@@ -59,6 +59,11 @@ BUDGET_LIMIT=${BUDGET_LIMIT:-50}
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     DEFAULT_IMAGE_TAG=$(git rev-parse --short HEAD)
+    # Images are built from the working tree, not from HEAD. A tag that names a
+    # commit must not label uncommitted code, so mark it and keep it unique.
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        DEFAULT_IMAGE_TAG="${DEFAULT_IMAGE_TAG}-dirty-$(date +%Y%m%d%H%M%S)"
+    fi
 else
     DEFAULT_IMAGE_TAG=$(date +%Y%m%d%H%M%S)
 fi

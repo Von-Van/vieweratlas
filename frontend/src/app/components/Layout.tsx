@@ -251,7 +251,7 @@ export function Layout() {
                 </span>
               </div>
               <p style={{ color: "#848494", fontSize: 13, maxWidth: 300, lineHeight: 1.6 }}>
-                Mapping the Twitch universe through shared viewer communities. Open-source data analytics tool.
+                Mapping Twitch communities through shared chat audiences. Open-source data analytics tool.
               </p>
             </div>
 

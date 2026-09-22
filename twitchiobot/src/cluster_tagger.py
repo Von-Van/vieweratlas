@@ -23,6 +23,16 @@ GAME_LABEL_MIN_SHARE = 40.0
 LANGUAGE_LABEL_MIN_SHARE = 40.0
 
 
+def _ranked(counts: Counter) -> List[Tuple[str, int]]:
+    """Most frequent first, ties alphabetical.
+
+    ``Counter.most_common`` breaks ties by insertion order, and a community's
+    channels arrive as a set whose order changes with the process's hash seed,
+    so a tied community was named differently from run to run.
+    """
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
 class ClusterTagger:
     """
     Assigns descriptive labels to detected communities based on streamer metadata.
@@ -111,13 +121,13 @@ class ClusterTagger:
         game_counts = Counter(games)
         top_game, game_share = None, 0.0
         if game_counts and total:
-            top_game, game_freq = game_counts.most_common(1)[0]
+            top_game, game_freq = _ranked(game_counts)[0]
             game_share = (game_freq / total) * 100
 
         lang_counts = Counter(languages)
         top_lang, lang_share = None, 0.0
         if lang_counts and total:
-            top_lang, lang_freq = lang_counts.most_common(1)[0]
+            top_lang, lang_freq = _ranked(lang_counts)[0]
             lang_share = (lang_freq / total) * 100
 
         # One game characterises the whole community.
@@ -161,7 +171,7 @@ class ClusterTagger:
 
         # No language signal: name the games that are there.
         if game_counts:
-            top_games = game_counts.most_common(3)
+            top_games = _ranked(game_counts)[:3]
             if len(top_games) >= 2:
                 game_names = [g[0] for g in top_games]
                 reason["top_games"] = game_names
@@ -229,11 +239,11 @@ class ClusterTagger:
         labeled_count = len(self.community_labels)
         
         # Count how many communities have clear dominant attribute
-        clear_game = sum(1 for r in self.community_reasons.values() 
-                        if "game_percentage" in r and r.get("game_percentage", 0) >= 60)
-        
-        clear_language = sum(1 for r in self.community_reasons.values() 
-                           if "language_percentage" in r and r.get("language_percentage", 0) >= 40)
+        clear_game = sum(1 for r in self.community_reasons.values()
+                        if r.get("game_percentage", 0) >= DOMINANT_GAME_SHARE)
+
+        clear_language = sum(1 for r in self.community_reasons.values()
+                           if r.get("language_percentage", 0) >= LANGUAGE_LABEL_MIN_SHARE)
         
         return {
             "total_labeled": labeled_count,
@@ -241,21 +251,6 @@ class ClusterTagger:
             "with_clear_language": clear_language,
             "uncategorized": labeled_count - clear_game - clear_language
         }
-
-
-class LabeledCommunity:
-    """
-    Utility class representing a labeled community.
-    """
-    
-    def __init__(self, comm_id: int, channels: Set[str], label: str, reasoning: dict = None):
-        self.comm_id = comm_id
-        self.channels = channels
-        self.label = label
-        self.reasoning = reasoning or {}
-    
-    def __repr__(self) -> str:
-        return f"Community {self.comm_id}: '{self.label}' ({len(self.channels)} channels)"
 
 
 if __name__ == "__main__":

@@ -7,16 +7,21 @@ development command only; do not deploy or schedule it.
 
 For operator-facing instructions, use [DEPLOYMENT.md](DEPLOYMENT.md) and
 [DAILY_OPERATIONS.md](DAILY_OPERATIONS.md). This page focuses on the current
-code and its contracts.
+code and its contracts. The project-level documentation in
+[`docs/`](../../docs/) explains the data pipeline, methodology, and metrics,
+and [development.md](../../docs/development.md) covers local setup.
 
 ## Supported entry points
 
 Run commands from `twitchiobot/`:
 
 ```bash
-python src/main.py survey config.yaml
-python src/main.py analyze config.yaml
+python src/main.py survey config/config.yaml
+python src/main.py analyze rigorous
 ```
+
+The images copy `config/config.yaml` to `/app/config.yaml`, so the task
+definitions run `main.py survey config.yaml` and `main.py analyze rigorous`.
 
 `survey` is a one-shot process: it acquires the DynamoDB lease, completes one
 cohort, writes its terminal manifest, releases the lease, and exits. It is the

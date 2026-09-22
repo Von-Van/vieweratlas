@@ -34,11 +34,12 @@ jobs:
       - name: Compile Python sources
         run: |
           python -m compileall -q twitchiobot/src
+          python -m compileall -q twitchiobot/scripts
           python -m compileall -q twitchiobot/tests
 
       - name: Shell syntax checks
         run: |
-          for script in twitchiobot/infrastructure/aws/*.sh; do
+          for script in twitchiobot/infrastructure/aws/*.sh twitchiobot/scripts/*.sh frontend/deploy.sh; do
             bash -n "$script"
           done
 

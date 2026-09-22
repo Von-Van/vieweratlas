@@ -14,6 +14,13 @@ import { ArrowLeft, Users, GitBranch, TrendingUp, Globe, ExternalLink } from "lu
 import { useAtlasData, ANALYSIS_WINDOWS } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 
+// Viewer counts range from tens to hundreds of thousands; "12.5K" reads
+// correctly at both ends where a fixed thousands suffix showed "0k".
+const compactNumber = new Intl.NumberFormat("en", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
+
 function getInitials(name: string) {
   return name.slice(0, 2).toUpperCase();
 }
@@ -236,7 +243,7 @@ export function ChannelDetail() {
               </p>
 
               <div style={{ color: "#9147FF", fontSize: 13, fontWeight: 600 }}>
-                Currently playing: {channel.game}
+                Most-streamed category: {channel.game}
               </div>
             </div>
 
@@ -278,7 +285,7 @@ export function ChannelDetail() {
               {
                 icon: <TrendingUp size={16} style={{ color: "#1DB954" }} />,
                 value: channel.modularityScore,
-                label: "Modularity Score",
+                label: "In-Community Link Share",
                 accentColor: "#1DB954",
               },
               {
@@ -324,7 +331,7 @@ export function ChannelDetail() {
                 Top Audience Overlaps
               </h3>
               <p style={{ color: "#848494", fontSize: 13 }}>
-                Channels sharing the most viewers with {channel.displayName}
+                Channels sharing the most chatters with {channel.displayName}
               </p>
             </div>
             <ResponsiveContainer width="100%" height={220}>
@@ -379,7 +386,7 @@ export function ChannelDetail() {
                   tick={{ fill: "#848494", fontSize: 11, fontFamily: "'Space Grotesk', sans-serif" }}
                   axisLine={false}
                   tickLine={false}
-                  tickFormatter={(v) => `${(v / 1000).toFixed(0)}k`}
+                  tickFormatter={(v) => compactNumber.format(v)}
                 />
                 <Tooltip content={<CustomTooltipLine />} />
                 <Line
@@ -434,7 +441,7 @@ export function ChannelDetail() {
             <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 gap-4">
               <div>
                 <div style={{ color: "#848494", fontSize: 11, marginBottom: 3, letterSpacing: "0.04em" }}>
-                  MODULARITY SCORE
+                  IN-COMMUNITY LINK SHARE
                 </div>
                 <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 20 }}>
                   {channel.modularityScore}

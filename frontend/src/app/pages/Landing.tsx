@@ -23,19 +23,19 @@ const FEATURES = [
   {
     icon: <GitBranch size={20} style={{ color: "#00E5CC" }} />,
     title: "Overlap Graph Engine",
-    desc: "Builds a weighted bipartite graph from viewer co-presence data, calculating edge weights from shared audience counts.",
+    desc: "Builds a weighted channel-overlap graph from chat co-presence data, where each edge counts the chatters two channels share.",
     accent: "#00E5CC",
   },
   {
     icon: <Users size={20} style={{ color: "#FF7B00" }} />,
     title: "Louvain Community Detection",
-    desc: "Runs the Louvain modularity optimization algorithm to automatically detect and label distinct viewer communities.",
+    desc: "Runs the Louvain modularity optimization algorithm to detect communities of channels, then labels each by its dominant game and language.",
     accent: "#FF7B00",
   },
   {
     icon: <BarChart3 size={20} style={{ color: "#1DB954" }} />,
     title: "Interactive Visualization",
-    desc: "Renders the community graph with force-directed layout, zoom/pan controls, and filterable community overlays.",
+    desc: "Renders the pipeline's precomputed community layout with zoom/pan controls and filterable community overlays.",
     accent: "#1DB954",
   },
 ];
@@ -86,11 +86,14 @@ function StatCard({
 }
 
 export function Landing() {
-  const { data, loading } = useAtlasData();
+  const { data, loading, source } = useAtlasData();
 
   if (loading || !data) return <LoadingSkeleton />;
 
   const { communities, overallStats } = data;
+  // Bars are relative to the largest community shown; a fixed divisor
+  // clipped every community above it to the same full-width bar.
+  const largestCommunity = Math.max(1, ...communities.map((c) => c.nodeCount));
 
   return (
     <div
@@ -289,7 +292,7 @@ export function Landing() {
                 marginTop: 2,
               }}
             >
-              Channels Tracked
+              Channels Analyzed
             </div>
           </div>
           <div
@@ -312,7 +315,7 @@ export function Landing() {
                 marginTop: 2,
               }}
             >
-              Unique Viewers
+              Unique Chatters
             </div>
           </div>
           <div
@@ -386,7 +389,7 @@ export function Landing() {
                 lineHeight: 1.3,
               }}
             >
-              Discover Hidden Viewer Clusters
+              Discover Shared-Audience Clusters
             </h2>
             <p
               style={{
@@ -397,8 +400,8 @@ export function Landing() {
                 margin: "8px auto 0",
               }}
             >
-              Louvain community detection reveals natural
-              groupings you won't find anywhere else.
+              Louvain community detection groups channels whose
+              chat audiences overlap.
             </p>
           </div>
 
@@ -493,7 +496,7 @@ export function Landing() {
                       <div
                         className="h-full rounded-full"
                         style={{
-                          width: `${(comm.nodeCount / 120) * 100}%`,
+                          width: `${(comm.nodeCount / largestCommunity) * 100}%`,
                           background: comm.color,
                         }}
                       />
@@ -640,7 +643,7 @@ export function Landing() {
             }}
           >
             <Zap size={12} />
-            LIVE DATA — UPDATED DAILY
+            {source === "demo" ? "DEMO DATA — SAMPLE DATASET" : "LIVE DATA — UPDATED DAILY"}
           </div>
           <h2
             style={{
@@ -664,7 +667,7 @@ export function Landing() {
           >
             Dive into the interactive community graph, discover
             overlapping audiences, and see which channels share
-            the most viewers.
+            the most chatters.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-4">
             <Link

@@ -8,7 +8,7 @@ const PIPELINE = [
     title: "Collect",
     subtitle: "Live Twitch Chat Sampling",
     color: "#9147FF",
-    desc: "ViewerAtlas subscribes to Twitch EventSub chat events for fixed channel batches. It records each active message author once per five-minute channel sample—using a stable Twitch user ID with the current login—without storing message text, then builds a co-occurrence matrix of audience activity.",
+    desc: "ViewerAtlas subscribes to Twitch EventSub chat events for fixed channel batches. It records each active message author once per five-minute channel sample—using a stable Twitch user ID with the current login—without storing message text. Analysis later compares those author sets across channels.",
     details: [
       "EventSub samples strict batches of up to 100 live channels",
       "Records unique active message authors, not lurkers",
@@ -37,9 +37,9 @@ const PIPELINE = [
     title: "Visualize",
     subtitle: "Explore the Twitch Community Map",
     color: "#FF7B00",
-    desc: "The resulting graph is visualized using a force-directed layout where node size reflects viewer count and edge thickness represents shared chatter overlap. Communities are color-coded, enabling intuitive exploration of the Twitch ecosystem.",
+    desc: "The pipeline precomputes the map layout: each community is placed in its own disc, and its channels are arranged inside it with a force-directed (spring) layout. The browser draws that layout, with node size reflecting average viewer count and edge thickness representing shared chatters. Communities are color-coded, enabling intuitive exploration of the Twitch ecosystem.",
     details: [
-      "Force-directed layout with D3-style physics",
+      "Layout precomputed by the pipeline (NetworkX spring layout)",
       "Node radius scales with viewer count",
       "Edge weight maps to visual thickness",
       "Interactive zoom, pan, and click-to-inspect",
@@ -59,7 +59,7 @@ const TECH_STACK = [
 const FAQ = [
   {
     q: "Does ViewerAtlas store personal user data?",
-    a: "ViewerAtlas stores the Twitch user ID and current normalized login of each active message author in private raw survey snapshots for up to 90 days. It does not store lurkers, message text, fragments, message counts, or per-message timestamps. The public website receives only aggregate channel and community data.",
+    a: "ViewerAtlas stores the Twitch user ID and current normalized login of each active message author in private raw survey snapshots for up to 100 days. It does not store lurkers, message text, fragments, message counts, or per-message timestamps. The public website receives only aggregate channel and community data.",
   },
   {
     q: "How often is the data updated?",
@@ -288,7 +288,7 @@ export function About() {
                       "Message content is not retained by default",
                       "Raw presence data is kept private by default",
                       "The public frontend receives channel-level aggregates",
-                      "No account details or profile data collected",
+                      "Only a user ID and login per author; no profile data",
                       "Example AWS retention controls expire raw data",
                     ].map((item) => (
                       <li key={item} className="flex items-start gap-2">

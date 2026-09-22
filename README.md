@@ -4,271 +4,265 @@
 [![Security](https://github.com/Von-Van/vieweratlas/actions/workflows/security.yml/badge.svg)](https://github.com/Von-Van/vieweratlas/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-9147FF.svg)](LICENSE)
 
-ViewerAtlas is an open-source data pipeline and interactive visualization for
-mapping Twitch communities through shared audience presence. It turns sampled
-chat participation into a weighted channel-overlap graph, detects communities
-with the Louvain algorithm, and exports an explorable React frontend.
+ViewerAtlas maps which Twitch channels share an active audience. Three times a
+day it records who chats in the roughly 1,200 most-watched live channels. It
+then builds a graph in which two channels are linked by the number of chatters
+they share, finds communities in that graph with the Louvain algorithm, and
+publishes the result as an interactive map.
 
-> **Deployment status:** the repository supports the live AWS deployment
-> described below. A local frontend still labels its bundled demonstration
-> dataset and switches to validated aggregate data when `VITE_DATA_URL` is
-> configured.
+![ViewerAtlas community map built from 14 days of surveys](docs/images/community-map-14d.jpg)
 
-## Why It Is Interesting
+*The map produced from 42 surveys (2026-08-13 to 2026-08-26). It shows 900 of
+the 2,748 analysed channels, coloured by detected community, rendered locally
+from the pipeline's public output.*
 
-- End-to-end system: Twitch collection, Parquet storage, graph analysis, and a
-  production-built visualization
-- Local and AWS execution paths with Docker, ECS, S3, DynamoDB, CloudFront,
-  EventBridge Scheduler, monitoring, rollback, and cost controls
-- Privacy-conscious public boundary: raw presence data stays private while the
-  browser receives channel-level aggregates
-- Security gates for Python and npm dependencies, static analysis, tests,
-  frontend type checking, and deployment preflight validation
+## Why ViewerAtlas?
 
-## Architecture
+Twitch shows who is live and how many people are watching. It does not show
+how audiences overlap: which streamers draw on the same people, or whether a
+"scene" around a game or a language is a real community or just a category.
+ViewerAtlas answers that from behaviour rather than labels. If the same
+accounts chat in two channels, those channels share part of an audience, and
+groups of channels that share far more with each other than with everyone else
+form a community.
 
-Collection, analysis, and delivery are three independent stages joined only by
-S3. Nothing runs continuously: EventBridge Scheduler starts a one-shot Fargate
-task, it exits, and the private data it writes is never served to the browser.
+The production preset started from the settings of TwitchAtlas, an earlier
+map of Twitch communities. Measurement showed those settings could not work
+here: TwitchAtlas's edge threshold of 300 shared viewers produces no edges at
+all on five-minute samples. The pipeline was rebuilt around short, equal,
+scheduled samples whose thresholds are measured from the data, and those
+choices are documented and tested.
 
-```mermaid
-flowchart TB
-    subgraph twitch["Twitch"]
-        helix["Helix API<br/><i>top live channels</i>"]
-        eventsub["EventSub WebSocket<br/><i>channel.chat.message</i>"]
-    end
+## What It Measures
 
-    subgraph collect["Collection · 6 AM / 2 PM / 10 PM ET"]
-        sched["EventBridge Scheduler<br/><i>cron(0 6,14,22 * * ? *)</i>"]
-        survey["Fargate survey task<br/><i>0.5 vCPU · 2h timeout</i>"]
-        lease[("DynamoDB lease<br/><i>overlap guard</i>")]
-        secret[["Secrets Manager<br/><i>rotating bot token</i>"]]
-    end
+| | Quantity | Source |
+| --- | --- | --- |
+| **Observed** | For each surveyed channel and five-minute window, the set of accounts that sent at least one chat message (user ID and login; never message text) | EventSub `channel.chat.message` |
+| **Observed** | Stream metadata at the start of each survey: concurrent viewers, category, language, rank | Helix `GET /streams` |
+| **Derived** | Shared chatters between two channels over a rolling 14-, 30-, or 90-day window | Union of samples, then set intersection |
+| **Derived** | Communities, modularity, and community labels (dominant game or language) | Louvain; `cluster_tagger.py` |
+| **Published** | Channel-level aggregates only: the capped graph, communities, and mean viewers and trends per channel | `data/frontend-data*.json` |
 
-    subgraph store["S3 data lake · private"]
-        raw[("raw/snapshots/v2/<br/><i>Parquet · 100-day expiry</i>")]
-        manifest[("survey manifest<br/><i>commit record</i>")]
-    end
+Two cautions shape how the numbers should be read:
 
-    subgraph analyse["Analysis · 1 AM ET"]
-        asched["EventBridge Scheduler<br/><i>cron(0 1 * * ? *)</i>"]
-        agg["Aggregate<br/><i>rolling N-day window</i>"]
-        overlap["NetworkX overlap graph"]
-        louvain["Louvain communities"]
-    end
+- A **chatter** is someone who sent a message during a sampled window.
+  Lurkers are invisible.
+- Shared-chatter counts are **lower bounds** that grow with the number of
+  surveys. They compare channel pairs within one window; they do not measure
+  audience size.
 
-    subgraph serve["Delivery · public"]
-        json[("data/frontend-data.json<br/><i>channel-level aggregates</i>")]
-        cdn{{"CloudFront<br/><i>OAC · security headers</i>"}}
-        ui["React explorer"]
-    end
+## How It Works
 
-    helix -->|"freeze top 1,200"| survey
-    eventsub -->|"12 x 100 channels<br/>5-min windows"| survey
-    sched --> survey
-    secret -.->|"user:read:chat"| survey
-    survey <-.-> lease
-    survey -->|"1 file per batch"| raw
-    survey --> manifest
-
-    asched --> agg
-    raw --> agg
-    manifest -.->|"skips incomplete surveys"| agg
-    agg --> overlap --> louvain --> json
-    json --> cdn --> ui
-
-    classDef private fill:#2d1b4e,stroke:#9147FF,color:#fff
-    classDef public fill:#0f3d3e,stroke:#00E5CC,color:#fff
-    class raw,manifest,lease,secret private
-    class json,cdn,ui public
+```text
+Twitch Helix + EventSub
+   │  survey: 3x daily, 12 batches of <=100 channels, one shared 5-minute window per batch
+   ▼
+private Parquet + manifest (S3)
+   │  aggregate each window → remove bots → overlap graph → Louvain → labels
+   ▼
+public JSON: capped, channel-level only (S3 + CloudFront)
+   │
+   ▼
+React map with 14 / 30 / 90-day filter
 ```
 
-Purple nodes hold private data — observed chatter IDs never leave them. Teal
-nodes are public: only channel-level aggregates cross that boundary. See
-[Public Data Boundary](#public-data-boundary).
-
-| Stage | AWS | Cadence |
+| Stage | Code | Output |
 | --- | --- | --- |
-| Collect | EventBridge Scheduler → Fargate, DynamoDB lease, Secrets Manager | 3x daily, ~80 min |
-| Store | S3 (versioned, private, 100-day expiry) | per batch |
-| Analyse | EventBridge Scheduler → Fargate | daily, 1 AM ET |
-| Serve | S3 + CloudFront (Origin Access Control) | on deploy |
+| Collection | [`update_channels.py`](twitchiobot/src/update_channels.py), [`eventsub_survey.py`](twitchiobot/src/eventsub_survey.py) | `raw/snapshots/v2/…/batch=NN.parquet` and `manifest.json` |
+| Storage | [`storage.py`](twitchiobot/src/storage.py) | S3, or a local directory with the same keys |
+| Processing | [`data_aggregator.py`](twitchiobot/src/data_aggregator.py), [`chatter_filter.py`](twitchiobot/src/chatter_filter.py) | Per-channel chatter sets for each window, with bots removed |
+| Analysis | [`graph_builder.py`](twitchiobot/src/graph_builder.py), [`community_detector.py`](twitchiobot/src/community_detector.py), [`cluster_tagger.py`](twitchiobot/src/cluster_tagger.py) | Overlap graph, communities, labels |
+| Publication | [`frontend_exporter.py`](twitchiobot/src/frontend_exporter.py) | `data/frontend-data*.json` |
+| Visualization | [`frontend/`](frontend/) | Interactive map, channel pages, statistics |
 
-## What It Does
+[docs/data-pipeline.md](docs/data-pipeline.md) walks through each stage and
+its data formats.
 
-1. Discovers channels through the Twitch Helix API.
-2. Samples unique active message authors through EventSub in equal five-minute
-   channel batches; it does not collect lurkers or message text.
-3. Keeps the older VOD preprocessor available only for local development; VOD
-   collection is disabled in the production deployment.
-4. Aggregates snapshots into channel-to-viewer sets, removing chat bots and
-   other automated accounts.
-5. Builds a weighted overlap graph where shared viewers determine edge weight.
-6. Detects and labels communities.
-7. Exports PNG, HTML, CSV, JSON, and frontend-ready aggregate artifacts.
+## Example Results
 
-## Methodology and Its Limits
+These are real results from the 14-day sample: 42 surveys, 2026-08-13 to
+2026-08-26, analysed with the production preset. They were regenerated on
+2026-09-22 with the code in this repository, and only aggregates were read.
 
-**What is measured.** A survey subscribes to `channel.chat.message` for a batch
-of channels and records the unique authors who send at least one message during
-a shared five-minute window. Lurkers are invisible to this method, and message
-text is never stored. Every number the site reports as "shared chatters" is a
-count of *observed message authors*, not of viewers.
+| Step | Result |
+| --- | --- |
+| Channel samples loaded | 47,864, covering 11,835 distinct channels |
+| Distinct chatters, after removing 229 automated accounts | 897,865 |
+| Channels observed at least 3 times with at least 10 chatters | 5,082 |
+| Overlap graph at the 14-day threshold (3 shared chatters) | 3,246 channels, 13,055 edges |
+| Louvain communities of at least 10 channels | 36 communities (2,748 channels), modularity 0.81 |
+| Public map | 900 channels, 4,294 edges, 19 communities |
 
-**Why that is a lower bound.** Each survey samples a small slice of a channel's
-audience. Intersecting two sparse samples recovers roughly the product of their
-sampling fractions, so a measured overlap is far smaller than the true shared
-audience and grows super-linearly as surveys accumulate. Comparisons are
-meaningful between channels in the same run; absolute values are not audience
-estimates.
+Three findings from that run:
 
-**Automated accounts.** Chat bots send messages, so a survey records them like
-anyone else, and a bot shared by N channels adds a "shared chatter" to every
-one of the N(N−1)/2 pairs among them. Over two weeks of real surveys, automated
-accounts supplied 97% of all channel-pair overlap increments. The largest were
-already skipped by `max_viewer_channel_degree`, but a long tail below that cap
-reached the graph. Analysis now removes them before any overlap is counted:
+- **Bots dominate raw overlap.** 229 accounts, 0.03% of all chatters,
+  supplied 97% of every channel-pair overlap increment. Left in, they would
+  have added 681 edges (5% of the unfiltered graph) that link channels
+  through bots alone.
+- **Communities follow language and game.** Every detected community has a
+  dominant attribute: 13 have one game on at least 60% of their channels, and
+  the other 23 share a broadcast language on at least 40%. Neither attribute
+  is an input to community detection, so this agreement shows the overlap
+  signal carries real structure. It does not explain why audiences cluster.
+- **The signal is sparse.** 86% of chatters appear in only one channel. The
+  graph is built from the roughly 122,000 who appear in two or more.
 
-- known chat-bot services such as Nightbot, StreamElements, Fossabot and
-  Pokémon Community Game, listed in `chatter_filter.py` and extendable per
-  deployment with `excluded_chatters`; and
-- any account active in more than `max_concurrent_channels` (3) channels
-  during the same five-minute survey window. A person keeps up with a couple of
-  chats at once; above that line, accounts come overwhelmingly from a farm of
-  generated accounts, recognisable by one narrow band of recent Twitch IDs.
+On synthetic data with eight planted communities
+([`make_demo_data.py`](twitchiobot/scripts/make_demo_data.py)), the same
+pipeline recovers all eight planted communities. See
+[methodology.md](docs/methodology.md#validation-performed).
 
-On the 14-day graph this removed 681 edges (5%) that existed only because of
-these accounts, most of them between casino streams sharing the farm. Only
-counts are logged; which accounts were excluded is never recorded.
+## Technical Architecture
 
-**Edge weight.** `weighting_mode` selects the formula:
+Collection, analysis, and delivery are independent one-shot jobs joined only
+by S3. Nothing runs continuously.
 
-| mode | weight | use |
-| --- | --- | --- |
-| `shared_count` | \|A ∩ B\| | raw intersection; favours channels sampled more often |
-| `jaccard` | \|A ∩ B\| / \|A ∪ B\| | size-normalised similarity |
-| `overlap_coef` | \|A ∩ B\| / min(\|A\|,\|B\|) | how much of the *smaller* audience is shared |
+- **Pipeline:** Python 3.11 with TwitchIO (EventSub), pandas and PyArrow,
+  NetworkX, and python-louvain, covered by a pytest suite that needs no network
+  or credentials.
+- **AWS:** EventBridge Scheduler starts ECS Fargate tasks. Data sits in a
+  private S3 data lake with lifecycle expiry. A DynamoDB lease prevents
+  overlapping surveys, and Secrets Manager holds the rotating bot credential.
+  The site is served by CloudFront with Origin Access Control and security
+  headers, and CloudWatch alarms and a budget watch for failures and cost.
+- **Frontend:** React 18, TypeScript, and Vite. The page draws a layout the
+  pipeline precomputed and validates every payload before rendering it.
+- **CI and security:** tests, compile and shell checks, frontend typecheck and
+  build, pip-audit, Bandit, npm audit, and Dependabot.
 
-Survey cohorts churn, so channels are sampled at very different depths. A raw
-count partly measures sampling effort, which is why the normalised modes exist
-and why `min_channel_observations` can exclude channels seen only once or twice.
+[docs/architecture.md](docs/architecture.md) has the full component map,
+infrastructure diagram, and design decisions.
 
-Whatever weight drives the graph, the public payload always carries the measured
-integer count, so the published number stays a real observation rather than a
-model output.
+## Running ViewerAtlas
 
-**Known limitations.** Chatters are deduplicated by login rather than by the
-stable Twitch ID already captured, so a rename counts twice.
-`max_viewer_channel_degree` drops very high-degree chatters entirely instead of
-down-weighting them. The concurrency rule can exclude the rare person who chats
-in four or more surveyed channels within five minutes, and a command-driven bot
-missing from the list still passes through. Neither the threshold nor the
-community-size floor has yet been calibrated against a full retention window.
-
-## Public Data Boundary
-
-Raw presence snapshots contain Twitch author IDs and logins and must remain private.
-Those are pseudonymous identifiers and may still be personal data. The
-public frontend is designed to receive only the `data/frontend-data*.json`
-exports, which contain channel-level nodes, overlaps, community labels, and
-aggregate metrics. The analysis publishes one per rolling window — 14, 30 and 90
-days — for the map's time filter, all sharing a single schema.
-
-See [DATA_POLICY.md](twitchiobot/docs/DATA_POLICY.md) for the full operational
-policy and [SECURITY.md](SECURITY.md) for reporting and deployment guidance.
-
-## Run Locally
-
-### Pipeline
+You can run the whole pipeline without a Twitch account, on synthetic surveys:
 
 ```bash
-cd twitchiobot
+git clone https://github.com/Von-Van/vieweratlas.git
+cd vieweratlas/twitchiobot
+python3.11 -m venv .venv && source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
-cp config/.env.example .env
 pytest -q
-python src/main.py analyze default
+python scripts/make_demo_data.py
+STORAGE_TYPE=file LOGS_DIR=demo_data python src/main.py analyze rigorous
 ```
 
-The production survey uses the guided authorization step in the deployment
-guide. It atomically stores the Client ID, Client Secret, bot account ID,
-access token, and refresh token together in one AWS Secrets Manager secret;
-none of those values belongs in the deployment `.env` file.
-
-### Frontend
+To view the output in the frontend (Node.js 22):
 
 ```bash
-cd frontend
+cd ../frontend
 npm ci
-npm run typecheck
-npm run dev
+mkdir -p public/data && cp ../twitchiobot/demo_data/data/frontend-data*.json public/data/
+VITE_DATA_URL=/data/frontend-data.json npm run dev
 ```
 
-Without `VITE_DATA_URL`, the interface uses a visibly labeled demonstration
-dataset. Production builds use `/data/frontend-data.json`, matching the pipeline
-export and CloudFront path.
+- **Real data.** Collecting your own surveys needs a Twitch application and a
+  bot token with the `user:read:chat` scope; see
+  [docs/development.md](docs/development.md#collect-real-data-locally).
+- **Cloud deployment.** Scheduled AWS collection follows
+  [twitchiobot/docs/DEPLOYMENT.md](twitchiobot/docs/DEPLOYMENT.md). Those
+  scripts create real resources and costs.
+- **Reproducibility.** Production survey data is personal data and is not
+  distributed. The synthetic path reproduces the pipeline, not the published
+  results.
 
-## Runtime Modes
+## Data & Methodology
 
-Run from `twitchiobot/`:
+- [Data pipeline](docs/data-pipeline.md): sources, formats, storage layout,
+  and every transformation, with the code that performs it.
+- [Methodology](docs/methodology.md): sampling design, bot removal, threshold
+  calibration, community detection, labelling, validation, and interpretation.
+- [Metrics reference](docs/metrics.md): what each published field measures
+  and how to read it.
+- [Data policy](twitchiobot/docs/DATA_POLICY.md): what is stored, for how
+  long, and who can see it.
 
-```bash
-python src/main.py analyze [default|rigorous|explorer|debug|config.yaml]
-python src/main.py survey config.yaml
-```
+**Privacy.** Raw survey files hold Twitch user IDs and logins, which are
+pseudonymous personal data. They stay in a private bucket and expire after 100
+days. The public site receives only channel-level aggregates, and a
+post-deployment smoke test checks that every public payload contains no chatter
+identities.
 
-The older VOD command is not part of the supported production rollout.
+## Limitations
 
-## Deployment Design
+- **Chatters, not viewers.** Lurkers are invisible, and chat-heavy channels,
+  genres, and cultures are over-represented.
+- **A sample, not a census.** Samples are three five-minute windows a day at
+  fixed US Eastern times, across the top ~1,200 live channels. Other channels,
+  hours, and time zones are under-covered.
+- **Counts depend on sampling effort.** Overlap counts grow faster than
+  linearly with surveys and with how often a channel was sampled, so they
+  compare pairs within one window only.
+- **Heuristic cleaning.** Bot removal can drop a rare human who chats in four
+  or more surveyed chats within five minutes, and can miss unlisted bots.
+  Chatters are matched by login, so a rename counts twice.
+- **Calibration is a judgment.** The 14- and 30-day thresholds were measured
+  before the bot filter existed and are due to be re-measured. The 90-day
+  window has no measured threshold yet.
+- **Observational.** The map shows where audiences overlap, not why: not
+  raids, recommendations, or migration.
+- **A projection.** The public map shows the 1,000 most-watched analysed
+  channels, with at most 25 links each.
 
-The included AWS scripts model a production deployment with private S3 buckets,
-CloudFront Origin Access Control, least-privilege task roles, Secrets Manager,
-non-root containers, monitoring, rollback, and conservative cost limits.
+The complete list, with mitigations, is in
+[methodology.md](docs/methodology.md#limitations-and-known-biases).
 
-```bash
-cd twitchiobot/infrastructure/aws
-export AWS_PAGER=""
-./authorize-twitch.sh
-./safe-deploy.sh
-SURVEY_SCHEDULE_STATE=DISABLED \
-ANALYSIS_SCHEDULE_STATE=DISABLED \
-./create-schedules.sh
-./apply-monitoring.sh
-./run-survey-test.sh small
-./run-survey-test.sh batch
-./run-survey-test.sh full
-SURVEY_SCHEDULE_STATE=ENABLED \
-ANALYSIS_SCHEDULE_STATE=ENABLED \
-./create-schedules.sh
-# Optional, once surveys have accumulated:
-DISTRIBUTION_ID=<id> ./enable-access-logs.sh
-../../scripts/calibrate_windows.sh
-```
+## Project Status
 
-Run that sequence in order; do not enable the schedules unless all three tests
-pass. A full survey takes roughly 80 minutes and has a two-hour safety limit.
-The enabled schedules run surveys at 6:00 AM, 2:00 PM, and 10:00 PM Eastern and
-analysis at 1:00 AM Eastern. These commands create real cloud resources and
-costs, so review the deployment guide and environment template first.
-For an already validated installation, use the shorter redeployment sequence in
-[DEPLOYMENT.md](twitchiobot/docs/DEPLOYMENT.md); it includes the frontend sync,
-one immediate analysis run, verification, and schedule re-enable.
+| Area | Status |
+| --- | --- |
+| EventSub survey collection (3× daily on AWS) | Production |
+| Rolling-window analysis and the public map (14- and 30-day windows) | Production. The 90-day window publishes itself once 90 days of surveys exist. |
+| Automated-account filter | Implemented; threshold re-measurement pending |
+| Normalized edge weights (Jaccard, overlap coefficient) | Experimental: implemented and tested, not used in production |
+| VOD chat preprocessor, PNG and HTML renders | Local development only; disabled in production |
+| CloudFront access analytics (no viewer identifiers) | Optional |
+| Identity by stable Twitch ID; broadcaster opt-in | Planned |
+
+## Roadmap
+
+1. Re-measure every window's overlap threshold with the bot filter active,
+   and calibrate the 90-day window once it fills.
+2. Key chatters by stable Twitch user ID instead of login.
+3. Apply the rolling window to legacy inputs, or confirm none remain.
+4. Revisit normalized edge weights once overlaps carry more magnitude.
+5. Add Python and TypeScript linting to CI.
+
+## Development Process
+
+ViewerAtlas is built with AI coding assistants, which help with
+implementation, debugging, refactoring, documentation, analysis, and review.
+The project owner sets the research question, the data collected and
+published, the metrics and analytical rules, and the architecture. The owner
+also interprets and validates results and decides which changes are
+accepted. Decisions are recorded next to the code that implements them, with
+the measurements behind them. See
+[docs/development.md](docs/development.md#development-process).
 
 ## Repository Map
 
-- `frontend/`: React, TypeScript, Vite, and the interactive graph explorer
-- `twitchiobot/src/`: collection, storage, graph analysis, and frontend export
-- `twitchiobot/tests/`: pipeline, reliability, and collection-state tests
-- `twitchiobot/infrastructure/`: Docker and AWS deployment assets
-- `twitchiobot/scripts/`: threshold sweeps and per-window calibration
-- `.github/workflows/`: CI, security auditing, and deploy preflight checks
+| Path | Contents |
+| --- | --- |
+| [`twitchiobot/src/`](twitchiobot/src/) | Collection, storage, analysis, and export (Python) |
+| [`twitchiobot/tests/`](twitchiobot/tests/) | pytest suite |
+| [`twitchiobot/scripts/`](twitchiobot/scripts/) | Threshold calibration, survey inspection, Twitch authorization, synthetic data |
+| [`twitchiobot/config/`](twitchiobot/config/) | `config.yaml` and the local `.env` template |
+| [`twitchiobot/infrastructure/`](twitchiobot/infrastructure/) | Dockerfiles and AWS deployment, monitoring, and operations scripts |
+| [`twitchiobot/docs/`](twitchiobot/docs/) | Operator runbooks, developer contracts, data policy |
+| [`frontend/`](frontend/) | React map, channel pages, and statistics |
+| [`docs/`](docs/) | Project documentation |
+| [`.github/workflows/`](.github/workflows/) | CI, security audit, deploy preflight |
 
 ## Documentation
 
+- [Architecture](docs/architecture.md), [Data pipeline](docs/data-pipeline.md),
+  [Methodology](docs/methodology.md), [Metrics](docs/metrics.md),
+  [Development](docs/development.md)
 - [Frontend guide](frontend/README.md)
-- [Deployment guide](twitchiobot/docs/DEPLOYMENT.md)
-- [Daily operations](twitchiobot/docs/DAILY_OPERATIONS.md)
-- [Developer guide](twitchiobot/docs/DEVELOPER.md)
-- [Data policy](twitchiobot/docs/DATA_POLICY.md)
+- [Deployment guide](twitchiobot/docs/DEPLOYMENT.md),
+  [Daily operations](twitchiobot/docs/DAILY_OPERATIONS.md),
+  [Developer contracts](twitchiobot/docs/DEVELOPER.md),
+  [Data policy](twitchiobot/docs/DATA_POLICY.md)
 - [Security policy](SECURITY.md)
 
 ## License

@@ -23,7 +23,7 @@ Open Terminal, enter the AWS folder, and disable the AWS pager. Repeat these
 two setup commands whenever you open a new Terminal window:
 
 ```bash
-cd /Users/jakemauldin/Documents/GitHub/vieweratlas/twitchiobot/infrastructure/aws
+cd /path/to/vieweratlas/twitchiobot/infrastructure/aws
 export AWS_PAGER=""
 ```
 
