@@ -177,6 +177,108 @@ VITE_DATA_URL=/data/frontend-data.json npm run dev
   distributed. The synthetic path reproduces the pipeline, not the published
   results.
 
+## Data Schema
+
+Every stage reads and writes a single storage tree. The keys are the same in S3
+and in a local directory:
+
+```text
+<storage root>/
+├── raw/snapshots/v2/date=YYYY-MM-DD/session=<id>/     private, expires after 100 days
+│   ├── batch=NN.parquet           one row per channel planned in the batch
+│   └── manifest.json              survey status and per-batch counts
+├── processed/analysis_results.json                    private record of the latest run
+├── curated/analysis/YYYY-MM-DD/graph_nodes.csv        private: id, viewers, viewer_count, game, title
+├── curated/analysis/YYYY-MM-DD/graph_edges.csv        private: source, target, weight
+└── data/frontend-data.json, frontend-data-<N>d.json   public, one per analysis window
+```
+
+**Survey batch** (`batch=NN.parquet`, schema version 2, private):
+
+| Column | Type | Contents |
+| --- | --- | --- |
+| `survey_session_id` | string | Survey ID; by default its UTC start time |
+| `batch`, `rank` | int64 | Batch number (from 1) and position in the frozen Helix ranking |
+| `schema_version` | int64 | `2` |
+| `channel_id` | string | Broadcaster user ID |
+| `channel`, `channel_login` | string | Broadcaster login, lowercase (both columns hold it) |
+| `viewer_count` | int64 | Helix concurrent viewers when the cohort was frozen |
+| `game_id`, `game_name`, `language`, `title` | string | Helix stream metadata at the same moment |
+| `started_at`, `discovered_at` | string (ISO 8601) | When the stream went live; when the cohort was frozen |
+| `sample_started_at`, `sample_ended_at`, `timestamp` | string (ISO 8601) | The batch's shared listening window. `timestamp` repeats the start. |
+| `sample_duration_seconds` | int64 | 300 for completed rows, 0 for failed ones |
+| `collection_status`, `failure_reason` | string | `completed`, `subscription_failed`, or `websocket_failed`, plus a fixed failure category |
+| `unique_author_count` | int64 | Distinct chatters in the window |
+| `chatter_ids_json`, `chatters_json` | string (JSON array) | Chatter user IDs and lowercase logins, aligned and sorted by ID. Never message text. |
+| `selection_source`, `_source` | string | Always `top_ranked` and `live` today |
+
+**Survey manifest** (`manifest.json`, private). `status` is `running`,
+`complete`, `complete_with_errors`, or `partial`. Only `complete` and
+`complete_with_errors` surveys are analysed.
+
+The manifest also records:
+
+- `started_at` and `completed_at`;
+- the configured limits: `target_limit`, `batch_size`, `window_seconds`,
+  `timeout_seconds`;
+- survey-wide counts: `planned`, `attempted`, `completed`, `failed`,
+  `zero_authors`, `batches_planned`, `batches_completed`;
+- a `batches` array with each batch's counts and the `object_key` of its file.
+
+A `partial` survey also carries `failure_reason`, and an `error` category when
+an exception caused it.
+
+**Public payload** (`data/frontend-data*.json`). This is the only data the
+website receives, and the frontend validates it against this shape
+([`validateAtlasData.ts`](frontend/src/app/data/validateAtlasData.ts)) before
+rendering anything:
+
+```ts
+type FrontendData = {
+  generatedAt: string;                 // ISO time of the export
+  availableWindows?: number[];         // e.g. [14, 30]; window keys are omitted in single-window runs
+  pendingWindows?: number[];           // e.g. [90]: configured, but not enough history yet
+  defaultWindow?: number;              // the window the site opens on
+  overallStats: {
+    totalChannels: number;             // channels in the analysed graph
+    totalViewers: number;              // distinct chatters (not viewers) in the window
+    communitiesDetected: number;
+    modularityScore: number;
+    collectionPeriod: string;          // e.g. "Aug 13 – Aug 26, 2026"
+    dataPoints: number;                // channel samples loaded
+    edgesTotal: number;
+    avgOverlapWeight: number;          // mean shared chatters per rendered edge
+    renderedChannels: number;
+    renderedEdges: number;
+  };
+  communities: { id: string; label: string; color: string; nodeCount: number; description: string }[];
+  channels: {
+    id: string;                        // lowercase login (also `name`)
+    name: string;
+    displayName: string;
+    game: string;                      // most frequent category in the window
+    viewers: number;                   // mean concurrent viewers while live (Helix)
+    communityId: string;
+    description: string;
+    language: string;                  // broadcaster language, e.g. "En"
+    topOverlaps: { channelId: string; channelName: string; shared: number }[];  // up to 5
+    viewerHistory: { date: string; viewers: number }[];                         // one point per day
+    edgeCount: number;                 // links on the rendered map (at most 25)
+    modularityScore: number;           // share of those links inside the channel's community
+    layout?: { x: number; y: number }; // position precomputed by the pipeline
+  }[];
+  edges: { source: string; target: string; weight: number }[];  // weight = shared chatters (integer)
+  topCommunitiesBySize: { community: string; channels: number; viewers: number }[];      // top 8
+  mostConnectedChannels: { name: string; edges: number; community: string; color: string }[];  // top 10
+};
+```
+
+`processed/analysis_results.json` holds the full partition, the labels, the run
+statistics, and the configuration that produced them.
+[docs/metrics.md](docs/metrics.md) defines every field, and
+[docs/data-pipeline.md](docs/data-pipeline.md) explains how each one is
+produced.
+
 ## Data & Methodology
 
 - [Data pipeline](docs/data-pipeline.md): sources, formats, storage layout,
