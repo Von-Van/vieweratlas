@@ -73,6 +73,40 @@ milestones and counts, never author identities or credential values.
 
 See [DATA_POLICY.md](DATA_POLICY.md) for retention and access requirements.
 
+## Automated-account filtering
+
+`chatter_filter.py` removes automated accounts from every channel's viewer set
+immediately after loading, before any statistic, filter, or overlap is
+computed. `DataAggregator.exclude_automated_chatters()` applies it once per
+analysis window, and `scripts/sweep_threshold.py` calls it the same way so that
+calibration sees the graph production builds.
+
+Two rules, both set in `AnalysisConfig`:
+
+- `exclude_known_bots` (default on) drops `KNOWN_BOT_LOGINS`, a curated list of
+  chat-bot services; `excluded_chatters` adds deployment-specific logins.
+  Channel-specific bots are deliberately not guessed at by name: they create no
+  overlap, and name patterns catch people too.
+- `max_concurrent_channels` (default 3) drops any account active in more than
+  that many channels within one `(survey_session_id, batch)` pair, which is a
+  single shared five-minute listening window. Rows without that pairing
+  (legacy, CSV, VOD) are never judged. `None` disables the rule.
+
+Matching is by lowercase login, like the rest of analysis; the stable-ID
+refactor listed under deferred work should move it onto IDs.
+
+Each run logs `AUTOMATED_CHATTERS_EXCLUDED` with per-rule account counts,
+removed memberships and removed pair overlaps. The same counts, plus the number
+of accounts at each peak concurrency, are kept under
+`statistics.aggregator.automated_chatters` in the private
+`analysis_results.json`; that distribution is what to re-check the threshold
+against. Which accounts were excluded is never logged or persisted. The public
+schema is unchanged; its chatter total simply excludes these accounts.
+
+Filtering lowers overlap counts, so thresholds calibrated before it existed must
+be re-swept. `calibrate_windows.sh` pins `max_concurrent_channels` to the
+rigorous preset alongside the other filters.
+
 ## Graph weighting
 
 `GraphBuilder` supports three edge-weight formulas, selected by

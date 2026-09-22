@@ -53,6 +53,12 @@ analysis:
   #   python3 scripts/sweep_threshold.py <dir-or-s3-uri> --window-days N
   # and record the result here; unlisted windows fall back to overlap_threshold.
   window_overlap_thresholds: {}
+  # Automated accounts are removed before any overlap is counted: a chat bot
+  # shared by N channels would otherwise add a "shared chatter" to every pair
+  # of them. See src/chatter_filter.py for the rules and their measurement.
+  exclude_known_bots: true      # Drop chat-bot services (Nightbot, StreamElements, ...)
+  excluded_chatters: []         # Extra logins to drop, e.g. a bot the list lacks
+  max_concurrent_channels: 3    # Active in more chats than this at once = automated
   overlap_threshold: 10         # Drop very weak overlaps
   weighting_mode: "shared_count"  # Edge weight formula: 'shared_count' (shared viewer count, default)
   min_community_size: 3         # Discard communities smaller than 3 channels

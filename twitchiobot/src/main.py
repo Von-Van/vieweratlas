@@ -546,6 +546,25 @@ class PipelineRunner:
         self.logger.info(
             f"Loaded {json_count} JSON + {csv_count} CSV + {vod_count} VOD + {parquet_count} Parquet snapshots"
         )
+
+        # Before any statistic is taken, so every figure below and every graph
+        # built from this aggregator describes people rather than bots.
+        analysis = self.config.analysis
+        excluded = aggregator.exclude_automated_chatters(
+            exclude_known_bots=analysis.exclude_known_bots,
+            excluded_chatters=analysis.excluded_chatters,
+            max_concurrent_channels=analysis.max_concurrent_channels,
+        )
+        # Counts only. Which accounts the concurrency rule flagged must never
+        # reach a log: it can misjudge a person, and logs sit outside the
+        # private data boundary.
+        self.logger.info(
+            "AUTOMATED_CHATTERS_EXCLUDED accounts=%d known_bots=%d listed=%d "
+            "concurrent=%d memberships=%d channels=%d pair_overlaps=%d",
+            excluded["accounts"], excluded["known_bots"], excluded["listed"],
+            excluded["concurrent"], excluded["memberships"], excluded["channels"],
+            excluded["pair_overlaps"],
+        )
         self.logger.info(
             f"Viewer set memory estimate: {aggregator.get_viewer_memory_estimate_mb():.1f} MB"
         )

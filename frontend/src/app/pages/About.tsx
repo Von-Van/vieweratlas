@@ -24,6 +24,7 @@ const PIPELINE = [
     color: "#00E5CC",
     desc: "From the co-presence data, we construct a weighted channel-overlap graph where each node is a Twitch channel and each edge weight represents the number of shared chatters observed between two channels. Only viewers who sent at least one message during a sampled window are counted, so this is a lower bound on true shared audience, not a census. We then apply the Louvain modularity optimization algorithm to identify natural community clusters.",
     details: [
+      "Removes chat bots and automated accounts first",
       "Constructs bipartite viewer-channel graph",
       "Projects to channel-channel overlap graph",
       "Applies Louvain algorithm for community detection",

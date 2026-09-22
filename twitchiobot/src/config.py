@@ -15,6 +15,8 @@ from dataclasses import dataclass, asdict, field, fields
 from pathlib import Path
 from typing import Optional
 
+from chatter_filter import DEFAULT_MAX_CONCURRENT_CHANNELS
+
 try:
     import yaml
     HAS_YAML = True
@@ -105,6 +107,15 @@ class AnalysisConfig:
     # channel seen once contributes a single 5-minute window and cannot produce
     # reliable overlap at any threshold.
     min_channel_observations: int = 1
+    # Automated accounts. A chat bot is a message author like anyone else, and
+    # one present in N channels adds a shared chatter to all N(N-1)/2 pairs
+    # among them. chatter_filter.py documents the measurement behind both rules.
+    exclude_known_bots: bool = True  # Drop chat-bot services (KNOWN_BOT_LOGINS)
+    # Further logins to drop, e.g. a bot service the built-in list lacks.
+    excluded_chatters: tuple = ()
+    # An account active in more than this many channels during one five-minute
+    # survey window is treated as automated. None disables the rule.
+    max_concurrent_channels: Optional[int] = DEFAULT_MAX_CONCURRENT_CHANNELS
     # Rolling window of survey days to analyse (30/60/90 are the intended values).
     # None unions every retained snapshot, which makes overlap_threshold drift as
     # data accumulates: viewer sets only grow, so graph density climbs over time.
@@ -191,6 +202,21 @@ class AnalysisConfig:
                 raise ValueError("window_overlap_thresholds values must be non-negative integers")
         if self.min_channel_observations < 1:
             raise ValueError("min_channel_observations must be at least 1")
+        if self.max_concurrent_channels is not None and (
+            not isinstance(self.max_concurrent_channels, int)
+            or isinstance(self.max_concurrent_channels, bool)
+            or self.max_concurrent_channels < 1
+        ):
+            raise ValueError("max_concurrent_channels must be an integer of at least 1, or None")
+        # A bare YAML string would otherwise be split into single characters.
+        if isinstance(self.excluded_chatters, str) or not all(
+            isinstance(login, str) and login.strip() for login in self.excluded_chatters
+        ):
+            raise ValueError("excluded_chatters must be a list of Twitch logins")
+        # Analysis keys chatters by lowercase login.
+        self.excluded_chatters = tuple(
+            sorted({login.strip().lower() for login in self.excluded_chatters})
+        )
         if not 0.0 <= self.normalized_overlap_threshold <= 1.0:
             raise ValueError("normalized_overlap_threshold must be between 0 and 1")
         if self.frontend_max_channels < 1:
@@ -361,6 +387,19 @@ def get_rigorous_config() -> PipelineConfig:
             # ten authors leaves ~1,969 channels worth comparing.
             min_channel_observations=3,
             min_channel_viewers=10,
+            # Measured 2026-09-21 over 2026-08-13..26 (898,094 accounts): chat
+            # bots and a farm of generated accounts supplied 97% of every
+            # channel-pair overlap increment. By account age, accounts peaking
+            # at one or two concurrent chats match the population; at four and
+            # above, 72-90% come from the farm's narrow band of recent account
+            # IDs against 12% of everyone. More than three is the crossover.
+            #
+            # The overlap thresholds below were calibrated before this filter
+            # existed, on counts the bots had inflated. Re-sweep every window
+            # (scripts/calibrate_windows.sh applies the same filter) before
+            # trusting them again.
+            exclude_known_bots=True,
+            max_concurrent_channels=3,
             # Measured: median and p90 overlap are both 1, so a threshold of 1
             # admits ~36,000 single-chatter coincidences. Moving to 2 drops 93%
             # of edges and lifts modularity from 0.641 to 0.772.
@@ -479,7 +518,7 @@ _SECTION_CLASSES = {
 }
 
 # Fields declared as tuples but naturally expressed as YAML lists.
-_TUPLE_FIELDS = {"static_viz_figsize", "analysis_windows"}
+_TUPLE_FIELDS = {"static_viz_figsize", "analysis_windows", "excluded_chatters"}
 
 
 def _build_section(section_name: str, config_class, values: dict):

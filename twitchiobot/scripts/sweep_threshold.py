@@ -6,6 +6,12 @@ surveys observe a 5-minute window three times a day, so the overlap distribution
 is different and the old value is unlikely to be right. This measures it rather
 than guessing.
 
+Automated accounts are excluded first, exactly as analysis excludes them, so
+the thresholds suit the graph the pipeline actually builds. The distribution of
+accounts by peak concurrent channels is printed to re-check
+max_concurrent_channels against: people fall away steeply, and where the curve
+flattens is where automated accounts take over.
+
 Prints only aggregate statistics — no author IDs or logins leave the machine.
 
 Usage:
@@ -21,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from chatter_filter import DEFAULT_MAX_CONCURRENT_CHANNELS  # noqa: E402
 from community_detector import CommunityDetector  # noqa: E402
 from data_aggregator import DataAggregator  # noqa: E402
 from graph_builder import GraphBuilder  # noqa: E402
@@ -76,6 +83,12 @@ def main() -> int:
                          "pairs that score 1.0 under normalised modes")
     ap.add_argument("--min-observations", type=int, default=1,
                     help="Drop channels sampled fewer than N times before graphing")
+    ap.add_argument("--max-concurrent-channels", type=int,
+                    default=DEFAULT_MAX_CONCURRENT_CHANNELS,
+                    help="Exclude accounts active in more than N channels during "
+                         "one survey window, as analysis does (0 disables)")
+    ap.add_argument("--keep-known-bots", action="store_true",
+                    help="Leave known chat-bot services in the data")
     ap.add_argument("--mode", default="all",
                     choices=["all", "shared_count", "jaccard", "overlap_coef"])
     args = ap.parse_args()
@@ -96,10 +109,29 @@ def main() -> int:
     agg = DataAggregator(str(base), storage=FileStorage(base_dir=str(base)),
                          window_days=args.window_days)
     loaded = agg.load_parquet_snapshots()
+    accounts_loaded = len({v for s in agg.channel_viewers.values() for v in s})
+    excluded = agg.exclude_automated_chatters(
+        exclude_known_bots=not args.keep_known_bots,
+        max_concurrent_channels=args.max_concurrent_channels or None,
+    )
     viewers = agg.get_channel_viewers()
     if not viewers:
         print("No channel rows loaded. Check the path points at raw/snapshots/v2/…")
         return 1
+
+    peaks = excluded["peak_distribution"]
+    if peaks:
+        buckets = {"1": accounts_loaded - sum(peaks.values())}
+        for peak, count in peaks.items():
+            label = str(peak) if peak < 6 else "6+"
+            buckets[label] = buckets.get(label, 0) + count
+        print("accounts by peak concurrent channels: "
+              + " | ".join(f"{label}: {count:,}" for label, count in buckets.items()))
+    print(f"automated accounts excluded: {excluded['accounts']:,} "
+          f"({excluded['known_bots']} known bots, {excluded['listed']} listed, "
+          f"{excluded['concurrent']} concurrent) | "
+          f"{excluded['memberships']:,} channel memberships | "
+          f"{excluded['pair_overlaps']:,} pair overlaps")
 
     if args.min_observations > 1:
         before = len(viewers)

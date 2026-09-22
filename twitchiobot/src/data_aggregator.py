@@ -15,9 +15,11 @@ import logging
 import re
 from collections import Counter, defaultdict
 from io import BytesIO
-from typing import Dict, Set, List, Tuple, Optional
+from typing import Dict, Iterable, Set, List, Tuple, Optional
 from pathlib import Path
 from datetime import datetime, date, timedelta
+
+from chatter_filter import DEFAULT_MAX_CONCURRENT_CHANNELS, remove_automated_chatters
 
 # Import storage abstraction
 try:
@@ -193,6 +195,8 @@ class DataAggregator:
         self.snapshots: List[dict] = []
         self.snapshot_source_counts: Dict[str, int] = defaultdict(int)
         self.skipped_outside_window = 0
+        # Count-only report from exclude_automated_chatters(); None until run.
+        self.automated_chatters: Optional[dict] = None
 
         # Initialize storage backend
         if storage is not None:
@@ -683,7 +687,31 @@ class DataAggregator:
         vod_count = self.load_vod_snapshots()
         parquet_count = self.load_parquet_snapshots()
         return json_count, csv_count, vod_count, parquet_count
-    
+
+    def exclude_automated_chatters(
+        self,
+        *,
+        exclude_known_bots: bool = True,
+        excluded_chatters: Iterable[str] = (),
+        max_concurrent_channels: Optional[int] = DEFAULT_MAX_CONCURRENT_CHANNELS,
+    ) -> dict:
+        """Remove chat bots and other automated accounts from every channel.
+
+        Call once, after loading: the concurrency rule needs every snapshot in
+        the window, and a second call would find nothing left to count.
+        Everything computed afterwards — statistics, filters, the graph — sees
+        the cleaned viewer sets. Returns a count-only report, also kept for
+        get_statistics(); chatter_filter documents the rules.
+        """
+        self.automated_chatters = remove_automated_chatters(
+            self.channel_viewers,
+            self.snapshots,
+            exclude_known_bots=exclude_known_bots,
+            excluded_chatters=excluded_chatters,
+            max_concurrent_channels=max_concurrent_channels,
+        )
+        return self.automated_chatters
+
     def get_viewer_memory_estimate_mb(self) -> float:
         """Estimate memory used by viewer sets, in MB."""
         total_bytes = sum(
@@ -788,6 +816,7 @@ class DataAggregator:
             "total_unique_viewers_across_all": len(all_viewers),
             "top_channels_by_viewers": channel_sizes[:10],
             "snapshot_sources": dict(self.snapshot_source_counts),
+            "automated_chatters": self.automated_chatters,
             "analysis_window_days": self.window_days,
             "window_start": self.window_start.isoformat() if self.window_start else None,
             "window_end": self.window_end.isoformat() if self.window_end else None,

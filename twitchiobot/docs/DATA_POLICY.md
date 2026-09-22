@@ -42,6 +42,15 @@ messages, raw author arrays, or the private survey manifest.
 The frontend schema stays unchanged in this release. A smoke test enforces this
 private/public boundary after deployment.
 
+## Automated-account filtering
+
+Analysis removes chat bots, and accounts active in several surveyed chats at
+once, before building the graph (see DEVELOPER.md). That classification is
+computed in memory for each run and then discarded. It is never written to
+logs, to `analysis_results.json`, or to the public payload, which record only
+how many accounts each rule removed. Raw survey files are not modified, so a
+change to either rule applies to every retained survey on the next run.
+
 ## Site analytics
 
 The CloudFront distribution writes standard access logs (v2) to

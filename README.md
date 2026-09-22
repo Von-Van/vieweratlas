@@ -101,7 +101,8 @@ nodes are public: only channel-level aggregates cross that boundary. See
    channel batches; it does not collect lurkers or message text.
 3. Keeps the older VOD preprocessor available only for local development; VOD
    collection is disabled in the production deployment.
-4. Aggregates snapshots into channel-to-viewer sets.
+4. Aggregates snapshots into channel-to-viewer sets, removing chat bots and
+   other automated accounts.
 5. Builds a weighted overlap graph where shared viewers determine edge weight.
 6. Detects and labels communities.
 7. Exports PNG, HTML, CSV, JSON, and frontend-ready aggregate artifacts.
@@ -120,6 +121,25 @@ sampling fractions, so a measured overlap is far smaller than the true shared
 audience and grows super-linearly as surveys accumulate. Comparisons are
 meaningful between channels in the same run; absolute values are not audience
 estimates.
+
+**Automated accounts.** Chat bots send messages, so a survey records them like
+anyone else, and a bot shared by N channels adds a "shared chatter" to every
+one of the N(N−1)/2 pairs among them. Over two weeks of real surveys, automated
+accounts supplied 97% of all channel-pair overlap increments. The largest were
+already skipped by `max_viewer_channel_degree`, but a long tail below that cap
+reached the graph. Analysis now removes them before any overlap is counted:
+
+- known chat-bot services such as Nightbot, StreamElements, Fossabot and
+  Pokémon Community Game, listed in `chatter_filter.py` and extendable per
+  deployment with `excluded_chatters`; and
+- any account active in more than `max_concurrent_channels` (3) channels
+  during the same five-minute survey window. A person keeps up with a couple of
+  chats at once; above that line, accounts come overwhelmingly from a farm of
+  generated accounts, recognisable by one narrow band of recent Twitch IDs.
+
+On the 14-day graph this removed 681 edges (5%) that existed only because of
+these accounts, most of them between casino streams sharing the farm. Only
+counts are logged; which accounts were excluded is never recorded.
 
 **Edge weight.** `weighting_mode` selects the formula:
 
@@ -140,8 +160,10 @@ model output.
 **Known limitations.** Chatters are deduplicated by login rather than by the
 stable Twitch ID already captured, so a rename counts twice.
 `max_viewer_channel_degree` drops very high-degree chatters entirely instead of
-down-weighting them. Neither the threshold nor the community-size floor has yet
-been calibrated against a full retention window.
+down-weighting them. The concurrency rule can exclude the rare person who chats
+in four or more surveyed channels within five minutes, and a command-driven bot
+missing from the list still passes through. Neither the threshold nor the
+community-size floor has yet been calibrated against a full retention window.
 
 ## Public Data Boundary
 

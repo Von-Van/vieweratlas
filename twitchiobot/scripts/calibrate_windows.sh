@@ -12,10 +12,10 @@
 #   2. The sweep's own defaults are exploratory (resolution 1.2,
 #      min-community-size 3, no author or observation floor). Production builds
 #      the graph with get_rigorous_config: resolution 1.0, min_community_size 10,
-#      min_channel_viewers 10, min_channel_observations 3. Sweeping with the
-#      defaults calibrates against a graph the pipeline never builds, so the
-#      numbers below are pinned to the rigorous preset instead. If you change
-#      that preset, change these to match.
+#      min_channel_viewers 10, min_channel_observations 3,
+#      max_concurrent_channels 3. Sweeping with the defaults calibrates against
+#      a graph the pipeline never builds, so the numbers below are pinned to the
+#      rigorous preset instead. If you change that preset, change these to match.
 #
 # Usage — no arguments needed; the snapshot location is read from
 # infrastructure/aws/.env, the same file the deployment scripts use:
@@ -74,6 +74,7 @@ RESOLUTION="${RESOLUTION:-1.0}"
 MIN_COMMUNITY_SIZE="${MIN_COMMUNITY_SIZE:-10}"
 MIN_AUTHORS="${MIN_AUTHORS:-10}"
 MIN_OBSERVATIONS="${MIN_OBSERVATIONS:-3}"
+MAX_CONCURRENT_CHANNELS="${MAX_CONCURRENT_CHANNELS:-3}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -138,7 +139,8 @@ fi
 echo ""
 info "Sweeping with the rigorous preset's filters:"
 info "  resolution=${RESOLUTION} min_community_size=${MIN_COMMUNITY_SIZE} \
-min_authors=${MIN_AUTHORS} min_observations=${MIN_OBSERVATIONS}"
+min_authors=${MIN_AUTHORS} min_observations=${MIN_OBSERVATIONS} \
+max_concurrent_channels=${MAX_CONCURRENT_CHANNELS}"
 echo ""
 
 RESULTS=""
@@ -157,6 +159,7 @@ for window in $WINDOWS; do
             --min-community-size "$MIN_COMMUNITY_SIZE" \
             --min-authors "$MIN_AUTHORS" \
             --min-observations "$MIN_OBSERVATIONS" \
+            --max-concurrent-channels "$MAX_CONCURRENT_CHANNELS" \
             --mode shared_count 2>&1 | tee "$log_file"; then
         warn "Sweep failed for ${window}d"
         FAILED="${FAILED} ${window}"

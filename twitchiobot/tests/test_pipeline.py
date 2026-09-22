@@ -11,6 +11,7 @@ Tests for:
 
 import json
 import os
+import re
 import sys
 import tempfile
 import shutil
@@ -27,6 +28,7 @@ from unittest.mock import patch, MagicMock
 # Ensure src/ is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from chatter_filter import KNOWN_BOT_LOGINS, remove_automated_chatters
 from data_aggregator import DataAggregator, survey_date_span
 from graph_builder import GraphBuilder
 from community_detector import CommunityDetector, LOUVAIN_AVAILABLE
@@ -725,6 +727,33 @@ class TestConfig:
         assert analysis.min_channel_viewers == 10
         assert analysis.weighting_mode == "shared_count"
         assert analysis.include_isolated_nodes is False
+        assert analysis.exclude_known_bots is True
+        assert analysis.max_concurrent_channels == 3
+
+    def test_automated_chatter_filter_is_on_in_every_preset(self):
+        """A chat bot is never audience, whatever the analysis is for."""
+        for config in (get_default_config(), get_rigorous_config(),
+                       get_exploratory_config(), get_debug_config()):
+            assert config.analysis.exclude_known_bots is True
+            assert config.analysis.max_concurrent_channels == 3
+            assert config.analysis.excluded_chatters == ()
+
+    def test_max_concurrent_channels_bounds(self):
+        assert AnalysisConfig(max_concurrent_channels=None).max_concurrent_channels is None
+        assert AnalysisConfig(max_concurrent_channels=1).max_concurrent_channels == 1
+        for bad in (0, -1, True, 2.5):
+            with pytest.raises(ValueError):
+                AnalysisConfig(max_concurrent_channels=bad)
+
+    def test_excluded_chatters_are_normalised(self):
+        config = AnalysisConfig(excluded_chatters=(" HouseBot ", "housebot", "Other"))
+        assert config.excluded_chatters == ("housebot", "other")
+
+    @pytest.mark.parametrize("bad", ["housebot", ("",), (None,)])
+    def test_excluded_chatters_must_be_a_list_of_logins(self, bad):
+        """A bare string would otherwise be split into one-letter logins."""
+        with pytest.raises(ValueError):
+            AnalysisConfig(excluded_chatters=bad)
 
     def test_rigorous_config_bounds_the_analysis_window(self):
         """Without a window the union grows daily and thresholds drift."""
@@ -913,6 +942,22 @@ class TestConfig:
         config = load_config_from_yaml(str(shipped))
         assert config.analysis.overlap_threshold == 10
         assert config.analysis.min_community_size == 3
+        assert config.analysis.exclude_known_bots is True
+        assert config.analysis.excluded_chatters == ()
+        assert config.analysis.max_concurrent_channels == 3
+
+    def test_yaml_loads_chatter_filter_fields(self, tmp_path):
+        yaml_file = tmp_path / "bots_config.yaml"
+        yaml_file.write_text(
+            "analysis:\n"
+            "  exclude_known_bots: false\n"
+            "  excluded_chatters: [HouseBot, relaybot]\n"
+            "  max_concurrent_channels: null\n"
+        )
+        analysis = load_config_from_yaml(str(yaml_file)).analysis
+        assert analysis.exclude_known_bots is False
+        assert analysis.excluded_chatters == ("housebot", "relaybot")
+        assert analysis.max_concurrent_channels is None
 
     def test_yaml_loading_weighting_mode(self, tmp_path):
         yaml_file = tmp_path / "wm_config.yaml"
@@ -1750,6 +1795,225 @@ class TestObservationFiltering:
     def test_filter_of_one_is_a_no_op(self, tmp_path):
         agg = self._agg_with(tmp_path, {"often": 5, "once": 1})
         assert set(agg.filter_channels_by_observations(1)) == {"often", "once"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Automated-Account Filter Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _v2_window_batch_bytes(session, batch, channels):
+    """One v2 batch file: every channel observed in the same survey window."""
+    import pandas as pd
+    from io import BytesIO
+
+    output = BytesIO()
+    pd.DataFrame(
+        [
+            {
+                "schema_version": 2,
+                "survey_session_id": session,
+                "batch": batch,
+                "channel": channel,
+                "collection_status": "completed",
+                "chatters_json": json.dumps(chatters),
+                "chatter_ids_json": json.dumps([str(i) for i in range(len(chatters))]),
+            }
+            for channel, chatters in channels.items()
+        ]
+    ).to_parquet(output, index=False, engine="pyarrow")
+    return output.getvalue()
+
+
+def _survey_window_storage(channels):
+    """Storage holding one completed survey whose single batch is ``channels``."""
+    prefix = "raw/snapshots/v2/date=2026-08-12/session=s1"
+    storage = MockS3Storage(
+        parquet_data={f"{prefix}/batch=00.parquet": _v2_window_batch_bytes("s1", 0, channels)}
+    )
+    storage._json_uploads[f"{prefix}/manifest.json"] = {"status": "complete"}
+    return storage
+
+
+class TestAutomatedChatterFilter:
+    """A bot shared by N channels adds a false shared chatter to every pair."""
+
+    @staticmethod
+    def _row(channel, chatters, session="s1", batch=0):
+        return {
+            "channel": channel,
+            "chatters": list(chatters),
+            "survey_session_id": session,
+            "batch": batch,
+        }
+
+    @staticmethod
+    def _agg(tmp_path, rows):
+        agg = DataAggregator(str(tmp_path))
+        for row in rows:
+            agg._ingest_snapshot(row)
+        return agg
+
+    def test_known_bot_is_removed_from_every_channel(self, tmp_path):
+        agg = self._agg(tmp_path, [
+            self._row("a", ["alice", "nightbot"], batch=0),
+            self._row("b", ["bob", "nightbot"], batch=1),
+        ])
+        report = agg.exclude_automated_chatters()
+        assert agg.get_channel_viewers() == {"a": {"alice"}, "b": {"bob"}}
+        assert report["accounts"] == report["known_bots"] == 1
+        assert report["memberships"] == 2
+        assert report["channels"] == 2
+        assert report["pair_overlaps"] == 1
+
+    def test_shared_bots_no_longer_link_unrelated_channels(self, tmp_path):
+        """The false connection this filter exists for: two audiences with
+        nobody in common, joined only by the bots both channels run."""
+        bots = ["nightbot", "streamelements", "fossabot"]
+        rows = [
+            self._row("cooking", ["ann", "ben", *bots], batch=0),
+            self._row("speedrun", ["cat", "dan", *bots], batch=1),
+        ]
+        unfiltered = self._agg(tmp_path, rows).get_channel_viewers()
+        assert GraphBuilder(overlap_threshold=3).build_graph(unfiltered).has_edge(
+            "cooking", "speedrun"
+        )
+
+        agg = self._agg(tmp_path, rows)
+        agg.exclude_automated_chatters()
+        graph = GraphBuilder(overlap_threshold=1).build_graph(agg.get_channel_viewers())
+        assert not graph.has_edge("cooking", "speedrun")
+
+    def test_account_in_more_chats_than_the_limit_at_once_is_excluded(self, tmp_path):
+        agg = self._agg(tmp_path, [
+            self._row(f"ch{i}", [f"viewer{i}", "farm"]) for i in range(4)
+        ])
+        report = agg.exclude_automated_chatters(max_concurrent_channels=3)
+        assert all("farm" not in viewers for viewers in agg.get_channel_viewers().values())
+        assert report["concurrent"] == 1
+        # Single-channel accounts are left out of the distribution entirely.
+        assert report["peak_distribution"] == {4: 1}
+
+    def test_account_at_the_limit_is_kept(self, tmp_path):
+        agg = self._agg(tmp_path, [self._row(f"ch{i}", ["fan"]) for i in range(3)])
+        assert agg.exclude_automated_chatters(max_concurrent_channels=3)["accounts"] == 0
+        assert all(viewers == {"fan"} for viewers in agg.get_channel_viewers().values())
+
+    def test_activity_spread_across_windows_is_not_concurrent(self, tmp_path):
+        """Hopping between chats over a fortnight is what people do. The same
+        batch number in another session is a different window."""
+        agg = self._agg(tmp_path, [
+            self._row("ch0", ["hopper"], session="s1", batch=0),
+            self._row("ch1", ["hopper"], session="s1", batch=1),
+            self._row("ch2", ["hopper"], session="s2", batch=0),
+            self._row("ch3", ["hopper"], session="s2", batch=1),
+        ])
+        assert agg.exclude_automated_chatters(max_concurrent_channels=1)["accounts"] == 0
+
+    def test_duplicated_row_counts_as_one_chat(self, tmp_path):
+        agg = self._agg(tmp_path, [
+            self._row("ch0", ["fan"]),
+            self._row("ch0", ["fan"]),
+            self._row("ch1", ["fan"]),
+            self._row("ch2", ["fan"]),
+        ])
+        assert agg.exclude_automated_chatters(max_concurrent_channels=3)["accounts"] == 0
+
+    def test_rows_without_a_survey_window_are_never_concurrent(self, tmp_path):
+        """Legacy, CSV and VOD snapshots carry no shared window to judge."""
+        legacy = [{"channel": f"old{i}", "chatters": ["regular"]} for i in range(3)]
+        sparse = [
+            {"channel": f"new{i}", "chatters": ["regular"],
+             "survey_session_id": "s1", "batch": float("nan")}
+            for i in range(3)
+        ]
+        agg = self._agg(tmp_path, legacy + sparse)
+        assert agg.exclude_automated_chatters(max_concurrent_channels=1)["accounts"] == 0
+
+    def test_listed_chatters_are_normalised_and_removed(self, tmp_path):
+        agg = self._agg(tmp_path, [self._row("a", ["alice", "housebot"])])
+        report = agg.exclude_automated_chatters(excluded_chatters=["  HouseBot "])
+        assert agg.get_channel_viewers() == {"a": {"alice"}}
+        assert report["listed"] == 1
+
+    def test_each_account_is_credited_to_one_rule(self, tmp_path):
+        """A known bot is usually concurrent too. Counting it twice would
+        overstate what the behavioural rule adds beyond the lists."""
+        agg = self._agg(tmp_path, [
+            self._row(f"ch{i}", ["nightbot", "listedbot", "farm"]) for i in range(4)
+        ])
+        report = agg.exclude_automated_chatters(excluded_chatters=["listedbot", "nightbot"])
+        assert (report["known_bots"], report["listed"], report["concurrent"]) == (1, 1, 1)
+        assert report["accounts"] == 3
+
+    def test_rules_can_be_disabled(self, tmp_path):
+        agg = self._agg(tmp_path, [self._row(f"ch{i}", ["nightbot", "farm"]) for i in range(4)])
+        report = agg.exclude_automated_chatters(
+            exclude_known_bots=False, max_concurrent_channels=None
+        )
+        assert report["accounts"] == 0
+        assert report["peak_distribution"] == {}
+        assert all(
+            viewers == {"nightbot", "farm"} for viewers in agg.get_channel_viewers().values()
+        )
+
+    def test_statistics_describe_the_filtered_data(self, tmp_path):
+        agg = self._agg(tmp_path, [self._row("a", ["alice", "nightbot"])])
+        assert agg.get_statistics()["automated_chatters"] is None
+        agg.exclude_automated_chatters()
+        stats = agg.get_statistics()
+        assert stats["total_unique_viewers_across_all"] == 1
+        assert stats["automated_chatters"]["known_bots"] == 1
+
+    def test_invalid_concurrency_limit_rejected(self):
+        with pytest.raises(ValueError):
+            remove_automated_chatters({}, [], max_concurrent_channels=0)
+
+    def test_v2_parquet_rows_carry_their_survey_window(self, tmp_path):
+        """Session and batch must survive the Parquet round trip, including
+        pandas' integer dtype for the batch column."""
+        storage = _survey_window_storage(
+            {f"ch{i}": [f"viewer{i}", "farm"] for i in range(4)}
+        )
+        agg = DataAggregator(str(tmp_path), storage=storage)
+        assert agg.load_parquet_snapshots() == 4
+        assert agg.exclude_automated_chatters()["concurrent"] == 1
+        assert all("farm" not in viewers for viewers in agg.get_channel_viewers().values())
+
+    def test_known_bot_logins_are_matchable(self):
+        """Analysis compares lowercase logins, so an entry in any other form
+        would never match and would fail silently."""
+        login = re.compile(r"[a-z0-9_]{1,25}")
+        assert all(login.fullmatch(entry) for entry in KNOWN_BOT_LOGINS)
+
+    def test_analysis_excludes_automated_accounts_and_logs_counts_only(
+        self, tmp_path, caplog
+    ):
+        """Logs sit outside the private data boundary, and a behavioural rule
+        can misjudge a person, so no excluded account may ever be named."""
+        import main as app_main
+
+        runner = app_main.PipelineRunner.__new__(app_main.PipelineRunner)
+        runner.config = PipelineConfig(
+            analysis=AnalysisConfig(logs_dir=str(tmp_path), output_dir=str(tmp_path / "out"))
+        )
+        runner.logger = logging.getLogger("test")
+        runner.storage = _survey_window_storage(
+            {f"ch{i}": [f"viewer{i}", "farmaccount", "nightbot"] for i in range(4)}
+        )
+        caplog.set_level("INFO")
+
+        aggregator = runner._step_aggregate(None)
+
+        assert aggregator.get_channel_viewers() == {
+            f"ch{i}": {f"viewer{i}"} for i in range(4)
+        }
+        assert (
+            "AUTOMATED_CHATTERS_EXCLUDED accounts=2 known_bots=1 listed=0 concurrent=1"
+            in caplog.text
+        )
+        assert "farmaccount" not in caplog.text
+        assert "nightbot" not in caplog.text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
