@@ -26,12 +26,23 @@ accounts chat in two channels, those channels share part of an audience, and
 groups of channels that share far more with each other than with everyone else
 form a community.
 
-The production preset started from the settings of TwitchAtlas, an earlier
-map of Twitch communities. Measurement showed those settings could not work
-here: TwitchAtlas's edge threshold of 300 shared viewers produces no edges at
-all on five-minute samples. The pipeline was rebuilt around short, equal,
-scheduled samples whose thresholds are measured from the data, and those
-choices are documented and tested.
+ViewerAtlas was inspired by [Twitch Atlas](https://twitchatlas.com/), Kiran
+Gershenfeld's 2020 map of Twitch communities. It linked streamers whose hourly
+viewer lists overlapped by more than 300 people
+([write-up](https://towardsdatascience.com/insights-from-visualizing-public-data-on-twitch-a73304a1b3eb/)).
+ViewerAtlas started from those settings, but on five-minute samples of active
+chatters a 300-person threshold produces no edges at all. Its thresholds are
+therefore measured from its own data.
+
+[twitchmap](https://twitchmap.com/) is a similar and more widely known map,
+also inspired by Twitch Atlas. It listens to chat in the top ~1,000 channels
+around the clock, weights overlap toward loyal chatters, and rebuilds every ~6
+hours from a rolling ~10-day window. ViewerAtlas takes a different approach. It
+samples the top ~1,200 channels in equal five-minute windows three times a day,
+counts every shared chatter equally, and publishes a daily map for each rolling
+window (14, 30, and eventually 90 days). Its code, sampling design, bot
+filtering, threshold calibration, and limitations are all published in this
+repository.
 
 ## What It Measures
 
