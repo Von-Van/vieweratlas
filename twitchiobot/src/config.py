@@ -397,10 +397,8 @@ def get_rigorous_config() -> PipelineConfig:
             # above, 72-90% come from the farm's narrow band of recent account
             # IDs against 12% of everyone. More than three is the crossover.
             #
-            # The overlap thresholds below were calibrated before this filter
-            # existed, on counts the bots had inflated. Re-sweep every window
-            # (scripts/calibrate_windows.sh applies the same filter) before
-            # trusting them again.
+            # The per-window thresholds below were re-swept with this filter
+            # applied on 2026-10-01; the fallback overlap_threshold predates it.
             exclude_known_bots=True,
             max_concurrent_channels=3,
             # Measured: median and p90 overlap are both 1, so a threshold of 1
@@ -445,11 +443,21 @@ def get_rigorous_config() -> PipelineConfig:
             # Also checked: no threshold in 2..10 trips EDGE_CAP_BOUND, because
             # the 1,000-channel cap binds before frontend_max_edges does.
             #
-            # The 90-day entry is absent because no window that long exists yet;
-            # sweep it as it promotes out of PENDING, and weigh coverage against
-            # modularity the same way rather than taking the suggested value
-            # unread.
-            window_overlap_thresholds={14: 3, 30: 4},
+            # Re-swept 2026-10-01, after the automated-account filter, over
+            # 2026-09-18..10-01 (14d), 09-02..10-01 (30d) and 08-13..10-01 (90d,
+            # only 50 days of surveys). The sweep suggested 10 / 9 / 25 at the
+            # modularity peak; each entry is again the window's p90 instead:
+            #   14: 4 -> 55% connected, 0.826 (10 -> 28%, 0.844)
+            #   30: 5 -> 62% connected, 0.808 ( 9 -> 45%, 0.818)
+            #   90: 5 -> 69% connected, 0.793 (25 -> 27%, 0.823)
+            # p90 rose by one in both measured windows despite the bot filter,
+            # which is the history-growth drift described above.
+            #
+            # 90 is a placeholder measured on 50 days: it stays PENDING until the
+            # retained surveys reach back 90 days, and exists only so the window
+            # does not fall back to overlap_threshold when it promotes. Re-sweep
+            # it then.
+            window_overlap_thresholds={14: 4, 30: 5, 90: 5},
             # Normalised modes lose to the raw count while overlaps are this
             # thin (best jaccard 0.699, best overlap_coef 0.726). Revisit once
             # overlaps carry real magnitude.
