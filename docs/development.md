@@ -81,8 +81,14 @@ Open the printed URL and go to **Community Map**. The time filter offers
 14d and 30d, with 90d marked as not having enough history.
 `frontend/public/data/` is gitignored; payloads never belong in the repository.
 
-Running `npm run dev` without `VITE_DATA_URL` shows the bundled demonstration
-dataset under a "Demo data" banner.
+Running `npm run dev` without `VITE_DATA_URL` shows the same synthetic output,
+bundled as `frontend/src/app/data/demoAtlasData.json`, under a "Demo data"
+banner. After changing the exporter or the demo generator, refresh it from
+`twitchiobot/`:
+
+```bash
+python -m json.tool --compact demo_data/data/frontend-data.json ../frontend/src/app/data/demoAtlasData.json
+```
 
 ## Collect real data locally
 
@@ -110,8 +116,8 @@ output goes to `LOGS_DIR`.
 `default` analyses everything collected. `rigorous` publishes only a pending
 payload until 14 days of surveys exist.
 
-*This path was not re-run during the 2026-09-22 documentation pass, because
-it needs live Twitch credentials. The code it uses is covered by
+*This path was last run against live Twitch before 2026-09-22; it needs live
+credentials. The code it uses is covered by
 `tests/test_eventsub_survey.py`.*
 
 ## Analysis presets
@@ -121,7 +127,7 @@ applies the automated-account filter.
 
 | Preset | Window | Overlap threshold | Channel filters | Communities | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `rigorous` (production) | 14/30/90 days, canonical 30 | 14d: 3, 30d: 4, otherwise 2 | ≥ 3 observations, ≥ 10 chatters, isolated dropped | ≥ 10 channels, resolution 1.0 | PNG and HTML renders off |
+| `rigorous` (production) | 14/30/90 days, canonical 30 | 14d: 4, 30d: 5, 90d: 5, otherwise 2 | ≥ 3 observations, ≥ 10 chatters, isolated dropped | ≥ 10 channels, resolution 1.0 | PNG and HTML renders off |
 | `default` | All retained data | 1 | none | ≥ 1, resolution 1.0 | Renders on |
 | `explorer` | All retained data | 1 | none | ≥ 1, resolution 2.0 | Finer communities, DEBUG logging |
 | `debug` | All retained data | 1 | none | ≥ 1, resolution 1.0 | Small collection limits, DEBUG logging |
@@ -202,7 +208,7 @@ the behaviour those decisions depend on.
 
 ## Known technical debt
 
-Found during the 2026-09-22 audit and not yet addressed, most important first.
+Known and not yet addressed, most important first.
 
 1. **Legacy inputs are not windowed.** `DataAggregator` also loads flat JSON
    snapshots under `raw/snapshots/` and VOD presence snapshots under
@@ -212,9 +218,8 @@ Found during the 2026-09-22 audit and not yet addressed, most important first.
    N VOD + N Parquet snapshots` should show 0 for everything except Parquet.
    Each run also downloads every survey `manifest.json` as a JSON candidate,
    and then ignores it.
-2. **Re-measure thresholds.** The 14- and 30-day overlap thresholds predate
-   the automated-account filter. Run `calibrate_windows.sh` once the filter is
-   deployed.
+2. **Provisional 90-day threshold.** It was measured on 50 days of surveys.
+   Re-run `calibrate_windows.sh` once the window fills (about 2026-11-11).
 3. **Identity by login.** Chatter IDs are collected but analysis still keys
    by lowercase login, so renames split one person into two.
 4. **Misleading public field names.** `overallStats.totalViewers` counts
@@ -228,18 +233,16 @@ Found during the 2026-09-22 audit and not yet addressed, most important first.
    (for example ESLint).
 7. **`deploy-preflight.yml` asks for long-lived AWS keys** as secrets but only
    checks their format.
-8. **The demo dataset uses real streamer names** with invented descriptions
-   and figures. It is labelled, but it appears whenever live data fails to
-   load. Fictional channels would be safer.
-9. **Inert configuration.** Settings left over from the retired continuous
-   collector (for example `collection_interval_minutes`) are still accepted
-   from YAML but read by nothing. Removing them is a breaking config change.
-10. **Build and storage hygiene.** There is no `.dockerignore`, so build
-    contexts include logs, outputs, and local `.env` files, although images
-    copy only `src/` and the config. The legacy `raw/snapshots/` lifecycle
-    rule (Standard-IA at 30 days, Glacier IR at 90) also matches the v2
-    survey prefix. `deploy.sh` and `promote.sh` have unused `EFS_ID` code,
-    and `athena-schema.sql` describes the retired VOD tables.
-11. **Frontend leftovers.** The `tw-animate-css` dependency and the
-    `StatCard` component are unused, `@types/react` 19 is paired with
-    React 18, and most of `theme.css` is template defaults.
+8. **Copied shell boilerplate.** Twelve AWS scripts each define their own
+   `load_env_file`. Five let a variable already set in the shell override
+   `.env` and seven do the reverse, so an override such as
+   `IMAGE_TAG=… ./promote.sh` is silently replaced when `.env` sets the same
+   key. The logging helpers and the `ENVIRONMENT` → `SERVICE_PREFIX` block are
+   copied the same way. A shared file needs one precedence rule first, and
+   `S3_BUCKET` means the frontend bucket in `frontend/deploy.sh` but the data
+   lake everywhere else.
+9. **Build and storage hygiene.** There is no `.dockerignore`, so build
+   contexts include logs, outputs, and local `.env` files, although images
+   copy only `src/` and the config. The legacy `raw/snapshots/` lifecycle
+   rule (Standard-IA at 30 days, Glacier IR at 90) also matches the v2
+   survey prefix.

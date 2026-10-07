@@ -20,7 +20,7 @@ import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping
 from urllib.parse import parse_qs, urlencode, urlparse
 
 

@@ -37,57 +37,56 @@ class ClusterTagger:
     """
     Assigns descriptive labels to detected communities based on streamer metadata.
     """
-    
+
     def __init__(self):
-        """Initialize the tagger."""
         self.community_labels: Dict[int, str] = {}
         self.community_reasons: Dict[int, dict] = {}
-        
+
     def tag_communities(self,
                        communities: Dict[int, Set[str]],
                        channel_metadata: Dict[str, dict]) -> Dict[int, str]:
         """
         Generate labels for each community.
-        
+
         Tagging strategy:
         1. Count game categories in each community
         2. Count languages if available
         3. Find dominant attributes
         4. Generate human-readable label
-        
+
         Args:
             communities: Dict mapping community_id -> set of channels
             channel_metadata: Dict mapping channel -> metadata dict
-        
+
         Returns:
             Dict mapping community_id -> label
         """
         self.community_labels = {}
         self.community_reasons = {}
-        
+
         logger.info(f"Tagging {len(communities)} communities")
-        
+
         for comm_id, channels in communities.items():
             label, reason = self._generate_label(comm_id, channels, channel_metadata)
             self.community_labels[comm_id] = label
             self.community_reasons[comm_id] = reason
-            
+
             logger.debug(f"Community {comm_id}: {label} ({reason['reasoning']})")
-        
+
         return dict(self.community_labels)
-    
-    def _generate_label(self, 
+
+    def _generate_label(self,
                        comm_id: int,
                        channels: Set[str],
                        channel_metadata: Dict[str, dict]) -> Tuple[str, dict]:
         """
         Generate a label for a single community.
-        
+
         Args:
             comm_id: Community ID
             channels: Set of channel names in community
             channel_metadata: Metadata dict for all channels
-        
+
         Returns:
             Tuple of (label, reason_dict)
         """
@@ -95,23 +94,22 @@ class ClusterTagger:
         games = []
         languages = []
         viewer_counts = []
-        
+
         for channel in channels:
             if channel in channel_metadata:
                 meta = channel_metadata[channel]
-                game = meta.get("game_name", meta.get("game", "Unknown"))
+                game = meta.get("game_name", "Unknown")
                 if game and game != "Unknown":
                     games.append(game)
-                
+
                 lang = meta.get("language", "Unknown")
                 if lang and lang != "Unknown":
                     languages.append(lang)
-                
+
                 viewers = meta.get("viewer_count", meta.get("viewers", 0))
                 if viewers:
                     viewer_counts.append(viewers)
-        
-        # Find dominant attributes
+
         reason = {"reasoning": ""}
         total = len(channels)
 
@@ -195,105 +193,38 @@ class ClusterTagger:
         reason["reasoning"] = "Uncategorized"
         reason["num_channels"] = num_channels
         return f"Community {comm_id}", reason
-    
-    def get_labels(self) -> Dict[int, str]:
-        """
-        Get all community labels.
-        
-        Returns:
-            Dict mapping community_id -> label
-        """
-        return dict(self.community_labels)
-    
-    def get_label_for_community(self, comm_id: int) -> str:
-        """
-        Get the label for a specific community.
-        
-        Args:
-            comm_id: Community ID
-        
-        Returns:
-            Label string
-        """
-        return self.community_labels.get(comm_id, f"Community {comm_id}")
-    
+
     def get_label_reasoning(self, comm_id: int) -> dict:
         """
         Get the reasoning/metadata for why a community was labeled a certain way.
-        
+
         Args:
             comm_id: Community ID
-        
+
         Returns:
             Dict with reasoning details
         """
         return self.community_reasons.get(comm_id, {})
-    
+
     def get_statistics(self) -> dict:
         """
         Get tagging statistics.
-        
+
         Returns:
             Dict with info about labeled communities
         """
         labeled_count = len(self.community_labels)
-        
+
         # Count how many communities have clear dominant attribute
         clear_game = sum(1 for r in self.community_reasons.values()
                         if r.get("game_percentage", 0) >= DOMINANT_GAME_SHARE)
 
         clear_language = sum(1 for r in self.community_reasons.values()
                            if r.get("language_percentage", 0) >= LANGUAGE_LABEL_MIN_SHARE)
-        
+
         return {
             "total_labeled": labeled_count,
             "with_clear_game": clear_game,
             "with_clear_language": clear_language,
             "uncategorized": labeled_count - clear_game - clear_language
         }
-
-
-if __name__ == "__main__":
-    # Test with sample data
-    from data_aggregator import DataAggregator
-    from graph_builder import GraphBuilder
-    from community_detector import CommunityDetector
-    
-    logging.basicConfig(level=logging.INFO)
-    
-    # Load and process data
-    aggregator = DataAggregator("logs")
-    aggregator.load_all()
-    
-    builder = GraphBuilder(overlap_threshold=1)
-    graph = builder.build_graph(
-        aggregator.get_channel_viewers(),
-        aggregator.get_channel_metadata()
-    )
-    
-    try:
-        detector = CommunityDetector()
-        detector.detect_communities(graph)
-        communities = detector.get_communities()
-        
-        # Tag communities
-        tagger = ClusterTagger()
-        labels = tagger.tag_communities(communities, aggregator.get_channel_metadata())
-        
-        print("\nCommunity Labels:")
-        for comm_id, label in labels.items():
-            channels = communities[comm_id]
-            print(f"  [{comm_id}] {label} ({len(channels)} channels)")
-            
-            # Show reasoning
-            reasoning = tagger.get_label_reasoning(comm_id)
-            print(f"       Reasoning: {reasoning.get('reasoning', 'N/A')}")
-        
-        # Show stats
-        print("\nTagging Statistics:")
-        stats = tagger.get_statistics()
-        for key, value in stats.items():
-            print(f"  {key}: {value}")
-    
-    except ImportError as e:
-        print(f"Cannot test: {e}")

@@ -7,21 +7,25 @@ import {
   type AtlasData,
   type AtlasDataState,
 } from "./useAtlasData";
-import * as mockData from "./mockData";
 import { validateAtlasData } from "./validateAtlasData";
 
 const DATA_URL = import.meta.env.VITE_DATA_URL?.trim();
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const JSON_SUFFIX = /\.json$/i;
 
-const demoData: AtlasData = {
-  communities: mockData.communities,
-  channels: mockData.channels,
-  edges: mockData.edges,
-  overallStats: mockData.overallStats,
-  topCommunitiesBySize: mockData.topCommunitiesBySize,
-  mostConnectedChannels: mockData.mostConnectedChannels,
-};
+/**
+ * The pipeline's own output for synthetic surveys from
+ * twitchiobot/scripts/make_demo_data.py, so every channel in it is invented.
+ * Imported only when live data is not configured or fails to load, which keeps
+ * it out of the main bundle. Its window fields are dropped because the demo is
+ * a single file and cannot serve the other windows.
+ */
+async function loadDemoData(): Promise<AtlasData> {
+  const { default: demo } = await import("./demoAtlasData.json");
+  const { availableWindows: _a, pendingWindows: _p, defaultWindow: _d, ...data } =
+    validateAtlasData(demo);
+  return data;
+}
 
 function resolveSameOriginDataUrl(value: string): string {
   const url = new URL(value, window.location.origin);
@@ -72,7 +76,6 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
   >({
     data: null,
     loading: true,
-    error: null,
     source: "loading",
     notice: null,
   });
@@ -114,13 +117,15 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
 
     async function load() {
       if (!DATA_URL) {
-        setState({
-          data: demoData,
-          loading: false,
-          error: null,
-          source: "demo",
-          notice: "Portfolio preview using a bundled demonstration dataset.",
-        });
+        const data = await loadDemoData();
+        if (!cancelled) {
+          setState({
+            data,
+            loading: false,
+            source: "demo",
+            notice: "Portfolio preview using a synthetic demonstration dataset.",
+          });
+        }
         return;
       }
 
@@ -138,17 +143,18 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
           cache.current.set(opening, data);
           windowRef.current = opening;
           setActiveWindow(opening);
-          setState({ data, loading: false, error: null, source: "live", notice: null });
+          setState({ data, loading: false, source: "live", notice: null });
         }
       } catch (err) {
         if (!cancelled) {
           console.warn("Live atlas data unavailable; using demonstration data.", err);
+          const data = await loadDemoData();
+          if (cancelled) return;
           setState({
-            data: demoData,
+            data,
             loading: false,
-            error: "Live data could not be loaded.",
             source: "demo",
-            notice: "Live data is unavailable; showing the bundled demonstration dataset.",
+            notice: "Live data is unavailable; showing a synthetic demonstration dataset.",
           });
         }
       } finally {
@@ -175,7 +181,7 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
         windowRef.current = days;
         setActiveWindow(days);
         setSwitching(false);
-        setState((prev) => ({ ...prev, error: null, notice: null }));
+        setState((prev) => ({ ...prev, notice: null }));
         return;
       }
 
@@ -183,7 +189,7 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
       if (cached) {
         windowRef.current = days;
         setActiveWindow(days);
-        setState((prev) => ({ ...prev, data: cached, error: null, notice: null }));
+        setState((prev) => ({ ...prev, data: cached, notice: null }));
         return;
       }
 
@@ -210,7 +216,7 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
           if (isStale()) return;
           windowRef.current = days;
           setActiveWindow(days);
-          setState((prev) => ({ ...prev, data, error: null, notice: null }));
+          setState((prev) => ({ ...prev, data, notice: null }));
         })
         .catch((err) => {
           if (isStale()) return;
@@ -219,7 +225,6 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
           console.warn(`The ${days}-day window could not be loaded.`, err);
           setState((prev) => ({
             ...prev,
-            error: `The ${days}-day window could not be loaded.`,
             notice: `The ${days}-day window is unavailable; showing ${windowRef.current} days.`,
           }));
         })

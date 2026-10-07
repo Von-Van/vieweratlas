@@ -113,23 +113,6 @@ for task in collector analysis; do
         -e "s#\${TWITCH_CREDENTIALS_SECRET_ID}#${TWITCH_CREDENTIALS_SECRET_ID}#g" \
         "$task_def_file" > "$temp_file"
 
-    # Strip EFS volume references if EFS_ID not set (prod may not use EFS)
-    if [ -z "${EFS_ID:-}" ]; then
-        python3 -c "
-import json
-with open('$temp_file') as f:
-    td = json.load(f)
-td.pop('volumes', None)
-for container in td.get('containerDefinitions', []):
-    container.pop('mountPoints', None)
-with open('$temp_file', 'w') as f:
-    json.dump(td, f, indent=2)
-" >/dev/null
-    else
-        sed -i.bak "s/\${EFS_ID}/$EFS_ID/g" "$temp_file"
-        rm -f "$temp_file.bak"
-    fi
-
     info "Registering task definition: ${PROD_SERVICE_PREFIX}-${task}"
     aws ecs register-task-definition \
         --cli-input-json "file://$temp_file" \

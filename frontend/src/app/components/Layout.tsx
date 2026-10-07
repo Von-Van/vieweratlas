@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Menu, X, Globe, Github, Info } from "lucide-react";
 import { useAtlasData } from "../data/useAtlasData";
 
-const REPO_URL = "https://github.com/Von-Van/vieweratlas";
+export const REPO_URL = "https://github.com/Von-Van/vieweratlas";
 const DATA_POLICY_URL = `${REPO_URL}/blob/main/twitchiobot/docs/DATA_POLICY.md`;
 
 const navLinks = [
@@ -19,7 +19,6 @@ export function Layout() {
 
   return (
     <div style={{ background: "#0E0E10", minHeight: "100vh", color: "#EFEFF1" }}>
-      {/* Navbar */}
       <nav
         aria-label="Primary navigation"
         className="sticky top-0 z-50"
@@ -30,7 +29,6 @@ export function Layout() {
         }}
       >
         <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center justify-between h-16">
-          {/* Logo */}
           <Link to="/" className="flex items-center gap-2 group" style={{ textDecoration: "none" }}>
             <div
               className="flex items-center justify-center rounded-lg"
@@ -55,7 +53,6 @@ export function Layout() {
             </span>
           </Link>
 
-          {/* Desktop nav */}
           <div className="hidden md:flex items-center gap-1">
             {navLinks.map((link) => {
               const active = location.pathname === link.to;
@@ -87,7 +84,6 @@ export function Layout() {
             })}
           </div>
 
-          {/* Right side */}
           <div className="hidden md:flex items-center gap-3">
             <a
               href={REPO_URL}
@@ -139,7 +135,6 @@ export function Layout() {
             </Link>
           </div>
 
-          {/* Mobile menu btn */}
           <button
             aria-expanded={mobileOpen}
             aria-label={mobileOpen ? "Close navigation menu" : "Open navigation menu"}
@@ -151,7 +146,6 @@ export function Layout() {
           </button>
         </div>
 
-        {/* Mobile menu */}
         {mobileOpen && (
           <div
             className="md:hidden px-4 pb-4 flex flex-col gap-1"
@@ -217,10 +211,8 @@ export function Layout() {
         </div>
       )}
 
-      {/* Main */}
       <main><Outlet /></main>
 
-      {/* Footer */}
       <footer
         className="mt-20 py-12 px-6"
         style={{ borderTop: "1px solid #2A2A2E" }}

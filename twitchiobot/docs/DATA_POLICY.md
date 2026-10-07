@@ -1,6 +1,6 @@
 # ViewerAtlas Data Policy (Operational)
 
-This policy describes the EventSub survey release. It is an operational control,
+This policy covers the EventSub survey pipeline. It is an operational control,
 not a substitute for legal or privacy review.
 
 ## Private survey data
@@ -36,11 +36,11 @@ as pseudonymous analytical identifiers. The bucket must remain private.
 ## Public data
 
 The CloudFront website may receive only aggregated channel/community results in
-`data/frontend-data.json`. It must never contain Twitch author IDs, logins,
+`data/frontend-data.json` and its per-window siblings (`frontend-data-14d.json`
+and so on). They must never contain Twitch author IDs, logins,
 messages, raw author arrays, or the private survey manifest.
 
-The frontend schema stays unchanged in this release. A smoke test enforces this
-private/public boundary after deployment.
+A smoke test enforces this private/public boundary after deployment.
 
 ## Automated-account filtering
 

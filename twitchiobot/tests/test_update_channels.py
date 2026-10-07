@@ -1,13 +1,8 @@
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 import requests
-
-# Ensure src/ is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import update_channels
 from update_channels import ChannelDiscoveryError

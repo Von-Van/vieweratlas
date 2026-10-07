@@ -41,7 +41,7 @@ class GraphBuilder:
     - Edges: Represent shared viewers between channels
     - Edge Weight: Number of shared viewers
     """
-    
+
     #: Weight formulas. ``shared_count`` is the raw intersection size; the others
     #: normalise it so channels sampled at different depths stay comparable.
     WEIGHTING_MODES = ("shared_count", "jaccard", "overlap_coef")
@@ -51,8 +51,6 @@ class GraphBuilder:
                  weighting_mode: str = "shared_count",
                  normalized_overlap_threshold: float = 0.0):
         """
-        Initialize graph builder.
-
         Args:
             overlap_threshold: Minimum shared chatters required for an edge.
                 Applies to the raw intersection in every mode.
@@ -83,7 +81,7 @@ class GraphBuilder:
         self.overlap_data: Dict[Tuple[str, str], int] = {}
         self.skipped_high_degree_viewers = 0
         self.skipped_below_normalized_threshold = 0
-        
+
     def _normalized_score(self, overlap: int, size1: int, size2: int) -> float:
         """Similarity in 0-1 for the configured mode.
 
@@ -104,30 +102,30 @@ class GraphBuilder:
                    channel_metadata: Dict[str, dict] = None) -> nx.Graph:
         """
         Build the overlap graph from viewer data.
-        
+
         Args:
             channel_viewers: Dict mapping channel -> set of viewers
             channel_metadata: Optional dict with channel metadata (game, viewers, etc.)
-        
+
         Returns:
             NetworkX graph with nodes (channels) and weighted edges (overlaps)
         """
         self.graph = nx.Graph()
         self.overlap_data = {}
         self.skipped_high_degree_viewers = 0
-        
+
         channels = list(channel_viewers.keys())
         logger.info(f"Building graph with {len(channels)} channels")
-        
+
         # Add nodes with metadata
         for channel in channels:
             attributes = {"viewers": len(channel_viewers[channel])}
-            
+
             if channel_metadata and channel in channel_metadata:
                 meta = channel_metadata[channel]
                 attributes.update({
                     "viewer_count": meta.get("viewer_count", meta.get("viewers", 0)),
-                    "game_name": meta.get("game_name", meta.get("game", "Unknown")),
+                    "game_name": meta.get("game_name", "Unknown"),
                     "language": meta.get("language", ""),
                     "title": meta.get("title", ""),
                     # One point per collection day. The public export draws the
@@ -136,9 +134,9 @@ class GraphBuilder:
                     "viewer_series": meta.get("viewer_series", []),
                     "peak_viewer_count": meta.get("peak_viewer_count", 0),
                 })
-            
+
             self.graph.add_node(channel, **attributes)
-        
+
         viewer_channels: Dict[str, List[str]] = defaultdict(list)
         for channel, viewers in channel_viewers.items():
             for viewer in viewers:
@@ -179,7 +177,7 @@ class GraphBuilder:
                 channel1, channel2, weight=weight, shared=overlap, similarity=score
             )
             self.overlap_data[(channel1, channel2)] = overlap
-        
+
         if not self.include_isolated_nodes:
             isolated = list(nx.isolates(self.graph))
             if isolated:
@@ -195,16 +193,16 @@ class GraphBuilder:
                 self.skipped_high_degree_viewers,
                 self.max_viewer_channel_degree,
             )
-        
+
         return self.graph
-    
+
     def apply_threshold(self, threshold: int) -> nx.Graph:
         """
         Remove edges below a new threshold and update the graph.
-        
+
         Args:
             threshold: Minimum edge weight to keep
-        
+
         Returns:
             Updated graph with threshold applied
         """
@@ -212,34 +210,25 @@ class GraphBuilder:
         for u, v, data in self.graph.edges(data=True):
             if data['weight'] < threshold:
                 edges_to_remove.append((u, v))
-        
+
         self.graph.remove_edges_from(edges_to_remove)
         self.overlap_threshold = threshold
-        
+
         logger.info(f"Applied threshold {threshold}. "
                    f"Graph now has {self.graph.number_of_edges()} edges")
-        
+
         return self.graph
-    
-    def get_graph(self) -> nx.Graph:
-        """
-        Get the current graph object.
-        
-        Returns:
-            NetworkX graph
-        """
-        return self.graph
-    
+
     def get_statistics(self) -> dict:
         """
         Get graph statistics.
-        
+
         Returns:
             Dict with graph metrics
         """
         nodes = self.graph.number_of_nodes()
         edges = self.graph.number_of_edges()
-        
+
         if edges == 0:
             avg_weight = 0
             max_weight = 0
@@ -247,15 +236,14 @@ class GraphBuilder:
             weights = [data['weight'] for u, v, data in self.graph.edges(data=True)]
             avg_weight = sum(weights) / len(weights)
             max_weight = max(weights)
-        
-        # Identify isolated nodes
+
         isolated = list(nx.isolates(self.graph))
-        
+
         # Get degree centrality (which channels have most connections)
         degree_centrality = nx.degree_centrality(self.graph)
-        top_connected = sorted(degree_centrality.items(), 
+        top_connected = sorted(degree_centrality.items(),
                               key=lambda x: x[1], reverse=True)[:10]
-        
+
         return {
             "num_nodes": nodes,
             "num_edges": edges,
@@ -267,27 +255,27 @@ class GraphBuilder:
             "skipped_high_degree_viewers": self.skipped_high_degree_viewers,
             "max_viewer_channel_degree": self.max_viewer_channel_degree
         }
-    
+
     def get_largest_component(self) -> nx.Graph:
         """
         Get the largest connected component of the graph.
         Useful for focusing analysis on the main network.
-        
+
         Returns:
             Subgraph containing only the largest connected component
         """
         if self.graph.number_of_nodes() == 0:
             return self.graph.copy()
-        
+
         largest_cc = max(nx.connected_components(self.graph), key=len)
         return self.graph.subgraph(largest_cc).copy()
-    
+
     def export_edges_csv(self, filename: str) -> None:
         """
         Export edges to CSV format for external tools (e.g., Gephi).
-        
+
         CSV format: source,target,weight
-        
+
         Args:
             filename: Path to output CSV file
         """
@@ -296,15 +284,15 @@ class GraphBuilder:
             for u, v, data in self.graph.edges(data=True):
                 weight = data['weight']
                 f.write(f"{u},{v},{weight}\n")
-        
+
         logger.info(f"Exported edges to {filename}")
-    
+
     def export_nodes_csv(self, filename: str) -> None:
         """
         Export nodes with attributes to CSV format for external tools.
-        
+
         CSV format: id,viewers,viewer_count,game,title
-        
+
         Args:
             filename: Path to output CSV file
         """
@@ -313,58 +301,29 @@ class GraphBuilder:
             for node, attrs in self.graph.nodes(data=True):
                 viewers = attrs.get('viewers', 0)
                 viewer_count = attrs.get('viewer_count', 0)
-                game = attrs.get('game_name', attrs.get('game', 'Unknown')).replace(',', ';')
+                game = attrs.get('game_name', 'Unknown').replace(',', ';')
                 title = attrs.get('title', '').replace(',', ';')
-                
+
                 f.write(f"{node},{viewers},{viewer_count},{game},{title}\n")
-        
+
         logger.info(f"Exported nodes to {filename}")
-    
+
     def get_channel_neighbors(self, channel: str) -> List[Tuple[str, int]]:
         """
         Get all channels connected to a given channel, sorted by overlap.
-        
+
         Args:
             channel: Channel name
-        
+
         Returns:
             List of (neighbor_channel, overlap_count) tuples, sorted descending
         """
         if channel not in self.graph:
             return []
-        
+
         neighbors = []
         for neighbor in self.graph.neighbors(channel):
             weight = self.graph[channel][neighbor]['weight']
             neighbors.append((neighbor, weight))
-        
+
         return sorted(neighbors, key=lambda x: x[1], reverse=True)
-
-
-if __name__ == "__main__":
-    # Test with sample data
-    from data_aggregator import DataAggregator
-    
-    logging.basicConfig(level=logging.INFO)
-    
-    # Load data
-    aggregator = DataAggregator("logs")
-    aggregator.load_all()
-    
-    channel_viewers = aggregator.get_channel_viewers()
-    channel_metadata = aggregator.get_channel_metadata()
-    
-    # Build graph
-    builder = GraphBuilder(overlap_threshold=1)
-    graph = builder.build_graph(channel_viewers, channel_metadata)
-    
-    # Print stats
-    print("\nGraph Statistics:")
-    stats = builder.get_statistics()
-    for key, value in stats.items():
-        print(f"  {key}: {value}")
-    
-    # Export for external tools
-    builder.export_nodes_csv("nodes.csv")
-    builder.export_edges_csv("edges.csv")
-    print("\nExported nodes.csv and edges.csv")

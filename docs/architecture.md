@@ -87,11 +87,12 @@ nodes are public, and only channel-level aggregates cross into them.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/app/data/AtlasDataProvider.tsx` | Fetches `VITE_DATA_URL` (same origin, with a timeout and size limit) and loads other windows on demand. Falls back to the labelled demo dataset. |
+| `src/app/data/AtlasDataProvider.tsx` | Fetches `VITE_DATA_URL` (same origin, with a timeout and size limit) and loads other windows on demand. Falls back to the labelled synthetic demo dataset. |
 | `src/app/data/validateAtlasData.ts` | Schema and bounds validation of the payload before anything renders |
 | `src/app/components/NetworkGraph.tsx` | Canvas renderer for the precomputed layout. Node radius scales with √viewers and edge width with shared chatters. |
 | `src/app/pages/` | Landing, Community Map, Channel Detail, Stats, and About routes |
-| `src/app/data/mockData.ts` | Demo dataset and shared TypeScript types |
+| `src/app/data/useAtlasData.ts` | Payload types, the data context, and the window constants |
+| `src/app/data/demoAtlasData.json` | Pipeline output for the synthetic surveys from `make_demo_data.py`, loaded only as a fallback |
 
 ### Tooling (`twitchiobot/scripts/`)
 

@@ -56,7 +56,7 @@ def make_survey_session_id(now: datetime | None = None) -> str:
     return value.strftime("%Y%m%dT%H%M%S%fZ")
 
 
-def _safe_error(error: BaseException, secrets: Sequence[str] = ()) -> str:
+def _safe_error(error: BaseException) -> str:
     """Return a credential-safe error category without rendering ``error``.
 
     Twitch API exceptions may embed access and refresh tokens in their message,
@@ -65,11 +65,7 @@ def _safe_error(error: BaseException, secrets: Sequence[str] = ()) -> str:
     privacy boundary is therefore structural: this function never calls
     ``str(error)`` or includes arbitrary exception attributes.  Only a fixed
     category and, when directly available as a number, an HTTP status survive.
-
-    ``secrets`` remains in the signature for backwards compatibility.  It is
-    intentionally unused because no dynamic exception text is emitted.
     """
-    del secrets
 
     if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
         category = "timeout"
@@ -591,7 +587,6 @@ class EventSubSurveyRunner:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         should_stop: Callable[[], bool] = lambda: False,
         on_batch_complete: Callable[[], None] | None = None,
-        secrets: Sequence[str] = (),
         stop_poll_seconds: float = 1.0,
         poll_sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         operation_timeout_seconds: float = 60.0,
@@ -627,7 +622,6 @@ class EventSubSurveyRunner:
         self._sleep = sleep
         self._should_stop = should_stop
         self._on_batch_complete = on_batch_complete
-        self._secrets = tuple(secrets)
         self._stop_poll_seconds = stop_poll_seconds
         self._poll_sleep = poll_sleep
         self._operation_timeout_seconds = operation_timeout_seconds
@@ -742,122 +736,117 @@ class EventSubSurveyRunner:
                 ) from self._close_error
 
     async def _run_within_timeout(self, session_id: str) -> Mapping[str, Any]:
-        try:
-            # Validate/refresh authentication before discovery. The top-streams
-            # provider must never make Helix calls with the potentially stale
-            # access token originally loaded from Secrets Manager.
+        # Validate/refresh authentication before discovery. The top-streams
+        # provider must never make Helix calls with the potentially stale
+        # access token originally loaded from Secrets Manager.
+        await self._await_interruptible(
+            self.client.open(), label="EventSub client startup"
+        )
+        token_setter = getattr(self.target_provider, "set_access_token", None)
+        token_getter = getattr(self.client, "current_access_token", None)
+        if callable(token_setter) and callable(token_getter):
+            token_setter(token_getter())
+
+        targets = list(
             await self._await_interruptible(
-                self.client.open(), label="EventSub client startup"
+                self._call_provider(), label="target discovery"
             )
-            token_setter = getattr(self.target_provider, "set_access_token", None)
-            token_getter = getattr(self.client, "current_access_token", None)
-            if callable(token_setter) and callable(token_getter):
-                token_setter(token_getter())
+        )
+        if not targets:
+            raise SurveyError("Channel discovery returned no live streams")
 
-            targets = list(
-                await self._await_interruptible(
-                    self._call_provider(), label="target discovery"
+        # Providers are replaceable for future opt-ins; enforce the safety
+        # invariants at the orchestration boundary regardless of source.
+        unique_targets: list[StreamTarget] = []
+        seen_ids: set[str] = set()
+        for target in targets:
+            if target.broadcaster_user_id in seen_ids:
+                continue
+            seen_ids.add(target.broadcaster_user_id)
+            unique_targets.append(target)
+            if len(unique_targets) >= self.top_channels_limit:
+                break
+        targets = unique_targets
+
+        batches = [
+            targets[index : index + self.batch_size]
+            for index in range(0, len(targets), self.batch_size)
+        ]
+        self._manifest["planned"] = len(targets)
+        self._manifest["batches_planned"] = len(batches)
+        self._upload_manifest()
+
+        attempted: set[str] = set()
+        for batch_index, batch in enumerate(batches, start=1):
+            if self._should_stop():
+                raise SurveyInterruptedError(
+                    "Shutdown requested before the next survey batch"
                 )
+
+            result = await self._run_batch(batch_index, batch)
+            result.object_key = self._upload_batch(batch_index, result.rows)
+            attempted.update(result.attempted_channel_ids)
+
+            self._manifest["attempted"] = len(attempted)
+            self._manifest["completed"] += result.completed
+            self._manifest["failed"] += result.failed
+            self._manifest["zero_authors"] += result.zero_authors
+            self._manifest["batches_completed"] += 1
+            self._manifest["batches"].append(
+                {
+                    "batch": batch_index,
+                    "status": result.status,
+                    "planned": len(batch),
+                    "completed": result.completed,
+                    "failed": result.failed,
+                    "zero_authors": result.zero_authors,
+                    "object_key": result.object_key,
+                }
             )
-            if not targets:
-                raise SurveyError("Channel discovery returned no live streams")
-
-            # Providers are replaceable for future opt-ins; enforce the safety
-            # invariants at the orchestration boundary regardless of source.
-            unique_targets: list[StreamTarget] = []
-            seen_ids: set[str] = set()
-            for target in targets:
-                if target.broadcaster_user_id in seen_ids:
-                    continue
-                seen_ids.add(target.broadcaster_user_id)
-                unique_targets.append(target)
-                if len(unique_targets) >= self.top_channels_limit:
-                    break
-            targets = unique_targets
-
-            batches = [
-                targets[index : index + self.batch_size]
-                for index in range(0, len(targets), self.batch_size)
-            ]
-            self._manifest["planned"] = len(targets)
-            self._manifest["batches_planned"] = len(batches)
             self._upload_manifest()
-
-            attempted: set[str] = set()
-            for batch_index, batch in enumerate(batches, start=1):
-                if self._should_stop():
-                    raise SurveyInterruptedError(
-                        "Shutdown requested before the next survey batch"
-                    )
-
-                result = await self._run_batch(batch_index, batch)
-                result.object_key = self._upload_batch(batch_index, result.rows)
-                attempted.update(result.attempted_channel_ids)
-
-                self._manifest["attempted"] = len(attempted)
-                self._manifest["completed"] += result.completed
-                self._manifest["failed"] += result.failed
-                self._manifest["zero_authors"] += result.zero_authors
-                self._manifest["batches_completed"] += 1
-                self._manifest["batches"].append(
-                    {
-                        "batch": batch_index,
-                        "status": result.status,
-                        "planned": len(batch),
-                        "completed": result.completed,
-                        "failed": result.failed,
-                        "zero_authors": result.zero_authors,
-                        "object_key": result.object_key,
-                    }
-                )
-                self._upload_manifest()
-                if self._on_batch_complete:
-                    self._on_batch_complete()
-                logger.info(
-                    "BATCH_COMPLETED session=%s batch=%d completed=%d failed=%d",
-                    session_id,
-                    batch_index,
-                    result.completed,
-                    result.failed,
-                )
-
-            status = (
-                "complete"
-                if self._manifest["failed"] == 0
-                and self._manifest["completed"] == self._manifest["planned"]
-                else "complete_with_errors"
-            )
-            await self._flush_tokens_before_completion()
-            self._manifest["status"] = status
-            self._manifest["completed_at"] = _iso_utc(self._now())
-            self._upload_manifest()
-            # A survey that finished every batch but lost individual channels is
-            # still analysable, so it must not share the SURVEY_PARTIAL milestone
-            # used by _mark_partial for timeouts, shutdowns and unexpected errors.
-            event = (
-                "SURVEY_COMPLETED"
-                if status == "complete"
-                else "SURVEY_COMPLETED_WITH_ERRORS"
-            )
+            if self._on_batch_complete:
+                self._on_batch_complete()
             logger.info(
-                "%s session=%s completed=%d failed=%d",
-                event,
+                "BATCH_COMPLETED session=%s batch=%d completed=%d failed=%d",
                 session_id,
-                self._manifest["completed"],
-                self._manifest["failed"],
+                batch_index,
+                result.completed,
+                result.failed,
             )
-            return self._manifest
-        finally:
-            # Final cleanup is owned by ``run`` so a global timeout or SIGTERM
-            # can persist the partial manifest before any network close wait.
-            pass
+
+        status = (
+            "complete"
+            if self._manifest["failed"] == 0
+            and self._manifest["completed"] == self._manifest["planned"]
+            else "complete_with_errors"
+        )
+        await self._flush_tokens_before_completion()
+        self._manifest["status"] = status
+        self._manifest["completed_at"] = _iso_utc(self._now())
+        self._upload_manifest()
+        # A survey that finished every batch but lost individual channels is
+        # still analysable, so it must not share the SURVEY_PARTIAL milestone
+        # used by _mark_partial for timeouts, shutdowns and unexpected errors.
+        event = (
+            "SURVEY_COMPLETED"
+            if status == "complete"
+            else "SURVEY_COMPLETED_WITH_ERRORS"
+        )
+        logger.info(
+            "%s session=%s completed=%d failed=%d",
+            event,
+            session_id,
+            self._manifest["completed"],
+            self._manifest["failed"],
+        )
+        return self._manifest
 
     def _mark_partial(self, reason: str, error: BaseException | None = None) -> None:
         self._manifest["status"] = "partial"
         self._manifest["completed_at"] = _iso_utc(self._now())
         self._manifest["failure_reason"] = reason
         if error is not None:
-            self._manifest["error"] = _safe_error(error, self._secrets)
+            self._manifest["error"] = _safe_error(error)
         try:
             self._upload_manifest()
         finally:
@@ -1111,9 +1100,7 @@ class EventSubSurveyRunner:
                         except Exception as exc:
                             error = exc
                     if error is not None:
-                        subscription_failures[target.broadcaster_user_id] = _safe_error(
-                            error, self._secrets
-                        )
+                        subscription_failures[target.broadcaster_user_id] = _safe_error(error)
 
                     if self.client.connection_lost.is_set():
                         lost = True
@@ -1176,9 +1163,7 @@ class EventSubSurveyRunner:
                     )
                     continue
 
-                reason = _safe_error(
-                    last_loss or RuntimeError("EventSub connection lost"), self._secrets
-                )
+                reason = _safe_error(last_loss or RuntimeError("EventSub connection lost"))
                 rows = [
                     self._row_for_target(
                         target,

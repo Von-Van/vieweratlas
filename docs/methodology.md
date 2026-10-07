@@ -6,8 +6,8 @@ built, why it is built that way, and what the results can and cannot support.
 [metrics.md](metrics.md) defines each published field.
 
 Figures quoted as "the 14-day sample" come from 42 real surveys run
-2026-08-13 to 2026-08-26. They were measured with the current code during the
-2026-09-22 documentation pass, and only aggregates were read. Figures quoted
+2026-08-13 to 2026-08-26. They were measured with the current code on
+2026-09-22, and only aggregates were read. Figures quoted
 from code comments are cited to where they are recorded.
 
 ## Research question
@@ -106,7 +106,7 @@ StreamElements and Nightbot alone chatted in 2,903 and 2,801 channels.
 Without the filter, the production 14-day graph would have 13,736 edges, and
 681 of them (5.0%) exist only because of these accounts. With the production
 node filters, removing them also cuts candidate channel pairs by 27% (104,024
-to 76,291). These figures were re-derived during this pass from the same data
+to 76,291). These figures were re-derived on 2026-09-22 from the same data
 the filter was designed on.
 
 **Rules.** [`chatter_filter.py`](../twitchiobot/src/chatter_filter.py):
@@ -182,25 +182,25 @@ run once per window by
 modularity. The production values deliberately do not follow it, and the
 reasoning is recorded in `get_rigorous_config()`:
 
-- *14-day window.* The sweep suggested 10, where modularity peaks at 0.840.
-  Modularity was nearly flat from 3 to 10 (0.830 → 0.840), while the share of
-  connected channels fell from 64% to 27%. End to end, 10 published 654
-  channels against 899 at 3. **3 was chosen**: the knee, and the p90 of pair
-  overlaps. Re-swept on 2026-09-13 with the same result.
-- *30-day window.* The sweep again suggested 10. **4 was chosen**, the window's
-  p90 of pair overlaps, because the window had just filled and its
-  distribution was still moving.
-- *90-day window.* Not measured yet, because the data doesn't span 90 days.
-  Until it is, the window uses the fallback of 2 and logs `UNCALIBRATED_WINDOW`.
+All three were re-swept on 2026-10-01 with the automated-account filter active.
+
+- *14-day window.* The sweep suggested 10 (modularity 0.844, 28% of channels
+  connected). **4 was chosen**, the p90 of pair overlaps: modularity 0.826
+  with 55% connected. Before the filter the same rule gave 3, and there 10
+  published 654 channels against 899.
+- *30-day window.* The sweep suggested 9 (0.818, 45% connected). **5 was
+  chosen**, the p90: 0.808 with 62% connected.
+- *90-day window.* Surveys only spanned 50 days, so **5** (the p90 on that
+  sample; the sweep suggested 25) is a placeholder. The window stays PENDING
+  until it fills, and should be re-swept then.
 
 Modularity rewards sparsity on its own, so its maximum overshoots what an
 overlap map is for. The chosen value trades a little modularity for coverage,
 and that is a judgment, not an optimum.
 
-**Open item.** All of these values were measured before automated accounts
-were filtered (2026-09-21). Filtering lowers overlap counts, and on the 14-day
-sample it moved the pair-overlap p90 from 3 to 4. Every window should be
-re-swept with the filter active before these thresholds are trusted again.
+**Drift.** The p90 rose by one in both measured windows between sweeps even
+though the bot filter lowers overlap counts, because overlap grows with
+history. Expect every value to keep climbing and re-sweep periodically.
 
 ## Community detection
 
@@ -282,9 +282,9 @@ connected" ranking saturates at the cap.
   credential rotation, and the lease. CI runs them on every push.
 - **Real-data checks** (2026-09-22, aggregates only). The bot-filter figures
   above were reproduced. Three runs with different hash seeds gave identical
-  public payloads and private results. The fixes in this pass left the
-  partition, labels, and modularity of the 14-day graph unchanged; only the
-  layout coordinates moved.
+  public payloads and private results. The determinism fixes made then left
+  the partition, labels, and modularity of the 14-day graph unchanged; only
+  the layout coordinates moved.
 - **Planted-structure recovery.** [`make_demo_data.py`](../twitchiobot/scripts/make_demo_data.py)
   generates synthetic surveys with 8 planted communities of 24 channels,
   plus bots and a coordinated farm. The production preset finds exactly 8
@@ -332,8 +332,8 @@ connected" ranking saturates at the cap.
    command bots.
 8. **Hard degree cap.** Accounts in more than 200 channels are dropped rather
    than down-weighted.
-9. **Thresholds need re-measuring.** The 14- and 30-day values predate the bot
-   filter, and the 90-day window has no measured threshold yet.
+9. **Provisional and drifting thresholds.** The 90-day value was measured on
+   50 days of surveys, and all three drift upward as history grows.
 10. **Louvain limits.** Resolution limit and non-unique optima. Communities
     under 10 channels are discarded.
 11. **Heuristic labels.** They use modal game and the broadcaster's language

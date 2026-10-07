@@ -64,18 +64,11 @@ Two cautions shape how the numbers should be read:
 
 ## How It Works
 
-```text
-Twitch Helix + EventSub
-   │  survey: 3x daily, 12 batches of <=100 channels, one shared 5-minute window per batch
-   ▼
-private Parquet + manifest (S3)
-   │  aggregate each window → remove bots → overlap graph → Louvain → labels
-   ▼
-public JSON: capped, channel-level only (S3 + CloudFront)
-   │
-   ▼
-React map with 14 / 30 / 90-day filter
-```
+A survey runs three times a day: 12 batches of up to 100 channels, each batch
+sharing one five-minute listening window. The daily analysis rebuilds each
+rolling window from the finished surveys, removes bots, builds the overlap
+graph, detects and labels communities, and publishes a capped, channel-level
+payload for the map.
 
 | Stage | Code | Output |
 | --- | --- | --- |
@@ -229,18 +222,9 @@ VITE_DATA_URL=/data/frontend-data.json npm run dev
   distributed. The synthetic path reproduces the pipeline, not the published
   results.
 
-## Data & Methodology
+## Privacy
 
-- [Data pipeline](docs/data-pipeline.md): sources, formats, storage layout,
-  and every transformation, with the code that performs it.
-- [Methodology](docs/methodology.md): sampling design, bot removal, threshold
-  calibration, community detection, labelling, validation, and interpretation.
-- [Metrics reference](docs/metrics.md): what each published field measures
-  and how to read it.
-- [Data policy](twitchiobot/docs/DATA_POLICY.md): what is stored, for how
-  long, and who can see it.
-
-**Privacy.** Raw survey files hold Twitch user IDs and logins, which are
+Raw survey files hold Twitch user IDs and logins, which are
 pseudonymous personal data. They stay in a private bucket and expire after 100
 days. The public site receives only channel-level aggregates, and a
 post-deployment smoke test checks that every public payload contains no chatter
@@ -253,19 +237,25 @@ identities.
 - **A sample, not a census.** Samples are three five-minute windows a day at
   fixed US Eastern times, across the top ~1,200 live channels. Other channels,
   hours, and time zones are under-covered.
+- **Batches are not simultaneous.** Twitch lets one account join about 100
+  chats at a time, so a survey runs 12 batches back to back over roughly 80
+  minutes. Channels in different batches are never observed at the same
+  moment.
 - **Counts depend on sampling effort.** Overlap counts grow faster than
   linearly with surveys and with how often a channel was sampled, so they
   compare pairs within one window only.
 - **Heuristic cleaning.** Bot removal can drop a rare human who chats in four
   or more surveyed chats within five minutes, and can miss unlisted bots.
   Chatters are matched by login, so a rename counts twice.
-- **Calibration is a judgment.** The 14- and 30-day thresholds were measured
-  before the bot filter existed and are due to be re-measured. The 90-day
-  window has no measured threshold yet.
+- **Calibration is a judgment.** Each window's overlap threshold is the p90 of
+  its pair overlaps, not the modularity peak, which would hide about half the
+  map. The 90-day value was measured on 50 days of surveys and is provisional
+  until that window fills.
 - **Observational.** The map shows where audiences overlap, not why: not
   raids, recommendations, or migration.
-- **A projection.** The public map shows the 1,000 most-watched analysed
-  channels, with at most 25 links each.
+- **A projection.** The public map is capped at the 1,000 most-watched
+  analysed channels (about 900 survive the community filters), with at most 25
+  links each.
 
 The complete list, with mitigations, is in
 [methodology.md](docs/methodology.md#limitations-and-known-biases).
@@ -276,7 +266,7 @@ The complete list, with mitigations, is in
 | --- | --- |
 | EventSub survey collection (3× daily on AWS) | Production |
 | Rolling-window analysis and the public map (14- and 30-day windows) | Production. The 90-day window publishes itself once 90 days of surveys exist. |
-| Automated-account filter | Implemented; threshold re-measurement pending |
+| Automated-account filter | Production; thresholds re-swept with it on 2026-10-01 |
 | Normalized edge weights (Jaccard, overlap coefficient) | Experimental: implemented and tested, not used in production |
 | VOD chat preprocessor, PNG and HTML renders | Local development only; disabled in production |
 | CloudFront access analytics (no viewer identifiers) | Optional |
@@ -284,8 +274,8 @@ The complete list, with mitigations, is in
 
 ## Roadmap
 
-1. Re-measure every window's overlap threshold with the bot filter active,
-   and calibrate the 90-day window once it fills.
+1. Re-sweep the 90-day overlap threshold once that window fills (about
+   2026-11-11), and the other two alongside it.
 2. Key chatters by stable Twitch user ID instead of login.
 3. Apply the rolling window to legacy inputs, or confirm none remain.
 4. Revisit normalized edge weights once overlaps carry more magnitude.
@@ -318,14 +308,20 @@ the measurements behind them. See
 
 ## Documentation
 
-- [Architecture](docs/architecture.md), [Data pipeline](docs/data-pipeline.md),
-  [Methodology](docs/methodology.md), [Metrics](docs/metrics.md),
-  [Development](docs/development.md)
+- [Data pipeline](docs/data-pipeline.md): sources, formats, storage layout,
+  and every transformation, with the code that performs it.
+- [Methodology](docs/methodology.md): sampling design, bot removal, threshold
+  calibration, community detection, labelling, validation, and interpretation.
+- [Metrics reference](docs/metrics.md): what each published field measures
+  and how to read it.
+- [Architecture](docs/architecture.md) and [Development](docs/development.md):
+  component map, design decisions, local setup, and known debt.
 - [Frontend guide](frontend/README.md)
-- [Deployment guide](twitchiobot/docs/DEPLOYMENT.md),
+- Operations: [Deployment](twitchiobot/docs/DEPLOYMENT.md),
   [Daily operations](twitchiobot/docs/DAILY_OPERATIONS.md),
   [Developer contracts](twitchiobot/docs/DEVELOPER.md),
-  [Data policy](twitchiobot/docs/DATA_POLICY.md)
+  [Data policy](twitchiobot/docs/DATA_POLICY.md): what is stored, for how
+  long, and who can see it.
 - [Security policy](SECURITY.md)
 
 ## License

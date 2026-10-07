@@ -626,23 +626,6 @@ register_task_definitions() {
             -e "s#role/vieweratlas-#role/${SERVICE_PREFIX}-#g" \
             "$task_def_file" > "$temp_file"
 
-        # Handle optional EFS_ID: replace if set, otherwise strip volumes/mountPoints
-        if [ -n "${EFS_ID:-}" ]; then
-            sed -i.bak "s/\${EFS_ID}/$EFS_ID/g" "$temp_file"
-            rm -f "$temp_file.bak"
-        else
-            python3 -c "
-import json
-with open('$temp_file') as f:
-    td = json.load(f)
-td.pop('volumes', None)
-for container in td.get('containerDefinitions', []):
-    container.pop('mountPoints', None)
-with open('$temp_file', 'w') as f:
-    json.dump(td, f, indent=2)
-" >/dev/null
-        fi
-
         log_info "Registering task definition: ${SERVICE_PREFIX}-$task"
         aws ecs register-task-definition \
             --cli-input-json "file://$temp_file" \

@@ -99,12 +99,10 @@ def main() -> int:
     # The aggregator expects keys relative to the storage root, so point it at
     # whichever ancestor actually contains raw/snapshots.
     base = root
-    while base != base.parent and not (base / "raw" / "snapshots").exists():
+    if not (base / "raw" / "snapshots").exists():
         found = list(base.rglob("raw/snapshots"))
         if found:
             base = found[0].parent.parent
-            break
-        break
 
     agg = DataAggregator(str(base), storage=FileStorage(base_dir=str(base)),
                          window_days=args.window_days)

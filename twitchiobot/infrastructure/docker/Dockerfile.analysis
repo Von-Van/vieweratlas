@@ -29,7 +29,6 @@ RUN mkdir -p /app/community_analysis /app/logs && chown -R app:app /app
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
-ENV OUTPUT_DIR=/app/community_analysis
 
 USER app
 

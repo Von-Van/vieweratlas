@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import type { Channel, Edge, Community } from "../data/mockData";
+import type { Channel, Edge, Community } from "../data/useAtlasData";
+import { hexToRgb } from "../lib/color";
 
 interface NodeState {
   id: string;
   communityId: string;
   x: number;
   y: number;
-  vx: number;
-  vy: number;
   r: number;
   color: string;
   label: string;
@@ -19,7 +18,6 @@ interface NetworkGraphProps {
   edges: Edge[];
   communities: Community[];
   className?: string;
-  interactive?: boolean;
   onNodeClick?: (channelId: string) => void;
   highlightedNode?: string | null;
 }
@@ -27,35 +25,11 @@ interface NetworkGraphProps {
 // Pointer travel, in screen pixels, past which a press-and-release is a pan.
 const DRAG_CLICK_SLOP = 4;
 
-function seededRandom(seed: number) {
-  let s = seed;
-  return () => {
-    s = (Math.imul(1664525, s) + 1013904223) >>> 0;
-    return s / 4294967296;
-  };
-}
-
-function hexToRgb(hex: string) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result
-    ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) }
-    : { r: 145, g: 71, b: 255 };
-}
-
-function hashString(value: string) {
-  let hash = 0;
-  for (let i = 0; i < value.length; i++) {
-    hash = Math.imul(31, hash) + value.charCodeAt(i);
-  }
-  return Math.abs(hash);
-}
-
 export function NetworkGraph({
   channels,
   edges,
   communities,
   className = "",
-  interactive = true,
   onNodeClick,
   highlightedNode,
 }: NetworkGraphProps) {
@@ -72,8 +46,6 @@ export function NetworkGraph({
   const lastMouseRef = useRef({ x: 0, y: 0 });
   const hoveredNodeRef = useRef<string | null>(null);
   const [tooltip, setTooltip] = useState<{ x: number; y: number; node: NodeState } | null>(null);
-  const tickRef = useRef(0);
-  const shouldSimulateRef = useRef(true);
   const needsFitRef = useRef(true);
   const communityNameMap = useMemo(
     () => new Map(communities.map((community) => [community.id, community.label])),
@@ -83,60 +55,25 @@ export function NetworkGraph({
     () => new Map(communities.map((community) => [community.id, community.color])),
     [communities],
   );
-  const communityOrder = useMemo(
-    () => communities.map((community) => community.id),
-    [communities],
-  );
 
-  // Build nodes from channels
   useEffect(() => {
-    if (channels.length === 0) {
-      nodesRef.current = [];
-      tickRef.current = 0;
-      shouldSimulateRef.current = false;
-      return;
-    }
-
-    const rng = seededRandom(42);
     const maxViewers = Math.max(1, ...channels.map((c) => c.viewers));
-    // Sized for the ~1000-node precomputed graph. The old 6-26 was calibrated
-    // for the simulated path below (<=350 nodes) and guarantees overlap here.
+    // Sized for the ~1000-node graph the pipeline publishes.
     const minR = 4;
     const maxR = 16;
-    const orderLength = Math.max(communityOrder.length, 1);
-    const hasPrecomputedLayout = channels.every((ch) => ch.layout);
 
-    nodesRef.current = channels.map((ch) => {
-      const knownCommunityIndex = communityOrder.indexOf(ch.communityId);
-      const commIdx = knownCommunityIndex >= 0
-        ? knownCommunityIndex
-        : hashString(ch.communityId) % orderLength;
-      const commAngle = (commIdx / orderLength) * Math.PI * 2;
-      const radius = 180 + rng() * 60;
-      const spread = 0.4 + rng() * 0.4;
-      const angle = commAngle + (rng() - 0.5) * spread * 2;
-
-      const r = minR + ((ch.viewers / maxViewers) ** 0.5) * (maxR - minR);
-      const color = communityColorMap.get(ch.communityId) || "#9147FF";
-
-      return {
-        id: ch.id,
-        communityId: ch.communityId,
-        x: ch.layout?.x ?? Math.cos(angle) * radius,
-        y: ch.layout?.y ?? Math.sin(angle) * radius,
-        vx: 0,
-        vy: 0,
-        r,
-        color,
-        label: ch.displayName,
-        viewers: ch.viewers,
-      };
-    });
-
-    tickRef.current = 0;
-    shouldSimulateRef.current = !hasPrecomputedLayout && channels.length <= 350;
+    nodesRef.current = channels.map((ch) => ({
+      id: ch.id,
+      communityId: ch.communityId,
+      x: ch.layout.x,
+      y: ch.layout.y,
+      r: minR + ((ch.viewers / maxViewers) ** 0.5) * (maxR - minR),
+      color: communityColorMap.get(ch.communityId) || "#9147FF",
+      label: ch.displayName,
+      viewers: ch.viewers,
+    }));
     needsFitRef.current = true;
-  }, [channels, communityColorMap, communityOrder]);
+  }, [channels, communityColorMap]);
 
   // Frame the graph on load. Without this the view sits at scale 1 around the
   // origin, so whether the graph fills the canvas depends on the coordinate
@@ -164,62 +101,6 @@ export function NetworkGraph({
     };
     needsFitRef.current = false;
   }, []);
-
-  const runSimulationStep = useCallback((alpha: number) => {
-    const nodes = nodesRef.current;
-    const repulsion = 800;
-    const attraction = 0.04;
-    const gravity = 0.008;
-
-    // Repulsion between all pairs
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const dx = nodes[j].x - nodes[i].x;
-        const dy = nodes[j].y - nodes[i].y;
-        const distSq = dx * dx + dy * dy || 0.01;
-        const dist = Math.sqrt(distSq);
-        const force = (repulsion / distSq) * alpha;
-        const fx = (dx / dist) * force;
-        const fy = (dy / dist) * force;
-        nodes[i].vx -= fx;
-        nodes[i].vy -= fy;
-        nodes[j].vx += fx;
-        nodes[j].vy += fy;
-      }
-    }
-
-    // Attraction along edges
-    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
-    for (const edge of edges) {
-      const src = nodeMap.get(edge.source);
-      const tgt = nodeMap.get(edge.target);
-      if (!src || !tgt) continue;
-      const dx = tgt.x - src.x;
-      const dy = tgt.y - src.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const force = dist * attraction * alpha;
-      const fx = (dx / dist) * force;
-      const fy = (dy / dist) * force;
-      src.vx += fx;
-      src.vy += fy;
-      tgt.vx -= fx;
-      tgt.vy -= fy;
-    }
-
-    // Center gravity
-    for (const node of nodes) {
-      node.vx -= node.x * gravity * alpha;
-      node.vy -= node.y * gravity * alpha;
-    }
-
-    // Apply velocity with damping
-    for (const node of nodes) {
-      node.x += node.vx;
-      node.y += node.vy;
-      node.vx *= 0.85;
-      node.vy *= 0.85;
-    }
-  }, [edges]);
 
   const drawGraph = useCallback(() => {
     const canvas = canvasRef.current;
@@ -366,14 +247,8 @@ export function NetworkGraph({
     const loop = () => {
       if (!running) return;
 
-      if (shouldSimulateRef.current && tickRef.current < 300) {
-        const alpha = Math.max(0.01, 1 - tickRef.current / 250);
-        for (let i = 0; i < 3; i++) runSimulationStep(alpha);
-        tickRef.current += 3;
-      }
-
       // Refit once the canvas has real dimensions, and again after a resize.
-      if (needsFitRef.current && !shouldSimulateRef.current) fitToContent();
+      if (needsFitRef.current) fitToContent();
 
       drawGraph();
       animFrameRef.current = requestAnimationFrame(loop);
@@ -384,7 +259,7 @@ export function NetworkGraph({
       running = false;
       cancelAnimationFrame(animFrameRef.current);
     };
-  }, [drawGraph, runSimulationStep, fitToContent]);
+  }, [drawGraph, fitToContent]);
 
   // Resize observer
   useEffect(() => {
@@ -422,7 +297,6 @@ export function NetworkGraph({
   }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!interactive) return;
     const rect = canvasRef.current!.getBoundingClientRect();
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
@@ -453,19 +327,17 @@ export function NetworkGraph({
       setTooltip(null);
       canvasRef.current!.style.cursor = "grab";
     }
-  }, [interactive, getWorldPos, findNodeAtPos]);
+  }, [getWorldPos, findNodeAtPos]);
 
   const handleMouseDown = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!interactive) return;
     isDraggingRef.current = true;
     dragMovedRef.current = false;
     const rect = canvasRef.current!.getBoundingClientRect();
     lastMouseRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
     canvasRef.current!.style.cursor = "grabbing";
-  }, [interactive]);
+  }, []);
 
   const handleMouseUp = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!interactive) return;
     isDraggingRef.current = false;
     const rect = canvasRef.current!.getBoundingClientRect();
     const cx = e.clientX - rect.left;
@@ -474,14 +346,21 @@ export function NetworkGraph({
     const node = findNodeAtPos(wx, wy);
     if (node && onNodeClick && !dragMovedRef.current) onNodeClick(node.id);
     canvasRef.current!.style.cursor = node ? "pointer" : "grab";
-  }, [interactive, getWorldPos, findNodeAtPos, onNodeClick]);
+  }, [getWorldPos, findNodeAtPos, onNodeClick]);
 
-  const handleWheel = useCallback((e: React.WheelEvent<HTMLCanvasElement>) => {
-    if (!interactive) return;
-    e.preventDefault();
-    const factor = e.deltaY > 0 ? 0.9 : 1.1;
-    transformRef.current.scale = Math.min(4, Math.max(0.3, transformRef.current.scale * factor));
-  }, [interactive]);
+  // React registers wheel listeners as passive, so preventDefault inside an
+  // onWheel prop is ignored and zooming the map also scrolls the page.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
+      transformRef.current.scale = Math.min(4, Math.max(0.3, transformRef.current.scale * factor));
+    };
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", onWheel);
+  }, []);
 
   const handleMouseLeave = useCallback(() => {
     isDraggingRef.current = false;
@@ -494,14 +373,13 @@ export function NetworkGraph({
       <canvas
         ref={canvasRef}
         className="block w-full h-full"
-        style={{ cursor: interactive ? "grab" : "default" }}
+        style={{ cursor: "grab" }}
         onMouseMove={handleMouseMove}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        onWheel={handleWheel}
       />
-      {tooltip && interactive && (
+      {tooltip && (
         <div
           className="pointer-events-none absolute z-20 px-3 py-2 rounded-lg text-sm shadow-xl"
           style={{

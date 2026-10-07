@@ -56,9 +56,6 @@ twitchiobot/docs/*.md
 !twitchiobot/docs/DEPLOYMENT.md
 !twitchiobot/docs/DAILY_OPERATIONS.md
 
-# Security review artifacts
-security_best_practices_report.md
-
 # Frontend
 frontend/node_modules/
 frontend/dist/

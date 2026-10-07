@@ -1,5 +1,35 @@
 import { createContext, useContext } from "react";
-import type { Community, Channel, Edge } from "./mockData";
+
+export type Community = {
+  id: string;
+  label: string;
+  color: string;
+  nodeCount: number;
+  description: string;
+};
+
+export type Channel = {
+  id: string;
+  name: string;
+  displayName: string;
+  game: string;
+  viewers: number;
+  communityId: string;
+  description: string;
+  language: string;
+  topOverlaps: { channelId: string; channelName: string; shared: number }[];
+  viewerHistory: { date: string; viewers: number }[];
+  edgeCount: number;
+  modularityScore: number;
+  /** Precomputed by the pipeline; the browser never runs a layout. */
+  layout: { x: number; y: number };
+};
+
+export type Edge = {
+  source: string;
+  target: string;
+  weight: number;
+};
 
 export interface OverallStats {
   totalChannels: number;
@@ -54,7 +84,6 @@ export const DEFAULT_WINDOW: AnalysisWindow = 30;
 export interface AtlasDataState {
   data: AtlasData | null;
   loading: boolean;
-  error: string | null;
   source: "loading" | "live" | "demo";
   notice: string | null;
   /** Active rolling window. Global, so every page describes the same dataset. */
@@ -82,7 +111,6 @@ export interface AtlasDataState {
 export const AtlasDataContext = createContext<AtlasDataState>({
   data: null,
   loading: true,
-  error: null,
   source: "loading",
   notice: null,
   window: DEFAULT_WINDOW,

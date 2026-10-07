@@ -81,7 +81,6 @@ export function CommunityMap() {
         fontFamily: "'Space Grotesk', sans-serif",
       }}
     >
-      {/* Sidebar */}
       {sidebarOpen && (
         <div
           className="flex-shrink-0 flex flex-col overflow-hidden"
@@ -92,7 +91,6 @@ export function CommunityMap() {
             overflowY: "auto",
           }}
         >
-          {/* Header */}
           <div
             className="px-4 py-4 flex items-center justify-between flex-shrink-0"
             style={{ borderBottom: "1px solid #2A2A2E" }}
@@ -106,6 +104,7 @@ export function CommunityMap() {
               </div>
             </div>
             <button
+              aria-label="Close filters"
               onClick={() => setSidebarOpen(false)}
               style={{
                 background: "transparent",
@@ -120,7 +119,6 @@ export function CommunityMap() {
             </button>
           </div>
 
-          {/* Search */}
           <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: "1px solid #2A2A2E" }}>
             <div className="relative">
               <Search
@@ -412,6 +410,7 @@ export function CommunityMap() {
                     <div style={{ color: "#848494", fontSize: 12 }}>{selectedChannel.game}</div>
                   </div>
                   <button
+                    aria-label="Clear selection"
                     onClick={() => setSelectedNode(null)}
                     style={{ background: "transparent", border: "none", color: "#848494", cursor: "pointer", padding: 2 }}
                   >
@@ -486,7 +485,6 @@ export function CommunityMap() {
             </div>
           )}
 
-          {/* Instructions */}
           <div className="px-4 py-4 mt-auto">
             <div
               className="flex items-start gap-2 p-3 rounded-lg"
@@ -503,9 +501,7 @@ export function CommunityMap() {
         </div>
       )}
 
-      {/* Graph area */}
       <div className="flex-1 relative">
-        {/* Toggle sidebar btn */}
         {!sidebarOpen && (
           <button
             onClick={() => setSidebarOpen(true)}
@@ -524,7 +520,6 @@ export function CommunityMap() {
           </button>
         )}
 
-        {/* Controls overlay */}
         <div
           className="absolute top-4 right-4 z-10 flex flex-col gap-2 items-end"
           style={{ pointerEvents: "none" }}
@@ -623,7 +618,6 @@ export function CommunityMap() {
           edges={windowPending ? [] : filteredEdges}
           communities={communities}
           className="w-full h-full"
-          interactive={true}
           onNodeClick={(id) =>
             // Selecting dims the rest of the map, which reads as a filter, so
             // clicking the selected channel again is the obvious way out of it.

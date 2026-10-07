@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { hexToRgb } from "../lib/color";
 
 interface Particle {
   x: number;
@@ -103,14 +104,6 @@ export function HeroGraph({ className = "" }: { className?: string }) {
     <canvas
       ref={canvasRef}
       className={`block ${className}`}
-      style={{ display: "block" }}
     />
   );
-}
-
-function hexToRgb(hex: string) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result
-    ? { r: parseInt(result[1], 16), g: parseInt(result[2], 16), b: parseInt(result[3], 16) }
-    : { r: 145, g: 71, b: 255 };
 }

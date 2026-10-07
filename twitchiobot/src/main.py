@@ -19,12 +19,12 @@ from dotenv import load_dotenv
 
 from data_aggregator import DataAggregator, survey_date_span
 from graph_builder import GraphBuilder, ordered_subgraph
-from community_detector import CommunityDetector
+from community_detector import LOUVAIN_AVAILABLE, CommunityDetector
 from cluster_tagger import ClusterTagger
 from visualizer import Visualizer
 from config import (
-    PipelineConfig, 
-    get_default_config, 
+    PipelineConfig,
+    get_default_config,
     get_rigorous_config,
     get_exploratory_config,
     get_debug_config,
@@ -78,31 +78,29 @@ def load_channels(path: Optional[str] = None) -> list[str]:
 def setup_logging(config: PipelineConfig):
     """
     Configure logging with both console and file handlers.
-    
+
     Args:
         config: PipelineConfig with log settings
     """
     log_level = getattr(logging, config.log_level)
     log_format = logging.Formatter(config.log_format)
-    
+
     # Create logs directory if it doesn't exist
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
-    
-    # Root logger
+
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    
+
     # Remove existing handlers to avoid duplicates
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-    
-    # Console handler
+
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
-    
+
     # File handler with rotation (max 10MB per file, keep 5 backups)
     file_handler = RotatingFileHandler(
         logs_dir / "pipeline.log",
@@ -118,19 +116,12 @@ class PipelineRunner:
     """
     Orchestrates the complete pipeline: collection → analysis → visualization.
     """
-    
+
     def __init__(self, config: PipelineConfig):
-        """
-        Initialize runner with configuration.
-        
-        Args:
-            config: PipelineConfig object with all settings
-        """
         self.config = config
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"PipelineRunner initialized with log level {config.log_level}")
-        
-        # Initialize storage backend
+
         self.storage = get_storage(
             storage_type=config.storage_type,
             bucket=config.s3_bucket,
@@ -147,32 +138,26 @@ class PipelineRunner:
                     config.vod.bucket_len_s,
                     config.collection.duration_per_batch
                 )
-    
+
     def _validate_prerequisites(self, mode: str) -> bool:
         """
         Validate that all prerequisites are met.
-        
+
         Args:
             mode: Pipeline mode. Only analysis requires dataset validation.
-        
+
         Returns:
             True if valid, False otherwise
         """
         self.logger.info("Validating prerequisites...")
-        
+
         if mode == 'analyze':
             if not self._validate_analysis_inputs():
                 return False
-        
-        # Check for required libraries
-        try:
-            import community
-            self.logger.info("✓ python-louvain available")
-        except ImportError:
-            self.logger.warning("⚠ python-louvain not installed. Community detection will fail.")
-            self.logger.info("   Install with: pip install python-louvain")
-        
-        self.logger.info("Prerequisites validation complete ✓\n")
+
+        if not LOUVAIN_AVAILABLE:
+            self.logger.warning("python-louvain is not installed; community detection will fail")
+
         return True
 
     def _validate_analysis_inputs(self, require_data: bool = True) -> bool:
@@ -221,15 +206,15 @@ class PipelineRunner:
                 "('raw/snapshots' or 'curated/presence_snapshots/source=vod')"
             )
             if require_data:
-                self.logger.error(f"❌ {msg}")
+                self.logger.error(msg)
                 return False
-            self.logger.warning(f"⚠ {msg}. Continuing because data was not required.")
+            self.logger.warning(f"{msg}. Continuing because data was not required.")
             return True
 
         summary = ", ".join(f"{count} {name}" for name, count in counts.items() if count)
-        self.logger.info(f"✓ Found analysis inputs: {summary}")
+        self.logger.info(f"Found analysis inputs: {summary}")
         return True
-    
+
     def window_plan(self) -> dict:
         """Decide which configured windows the retained data can actually support.
 
@@ -329,7 +314,7 @@ class PipelineRunner:
                     canonical_result = result
 
             self.logger.info("\n" + "=" * 70)
-            self.logger.info("✅ ANALYSIS PIPELINE COMPLETE")
+            self.logger.info("ANALYSIS PIPELINE COMPLETE")
             self.logger.info("=" * 70 + "\n")
             return {
                 **canonical_result,
@@ -408,10 +393,10 @@ class PipelineRunner:
             and window_days not in analysis.window_overlap_thresholds
         ):
             self.logger.warning(
-                "UNCALIBRATED_WINDOW days=%s using overlap_threshold=%d borrowed "
-                "from the %sd calibration. Measure it with "
-                "`scripts/calibrate_windows.sh` and set window_overlap_thresholds.",
-                window_days, overlap_threshold, analysis.analysis_window_days,
+                "UNCALIBRATED_WINDOW days=%s using the base overlap_threshold=%d. "
+                "Measure it with `scripts/calibrate_windows.sh` and set "
+                "window_overlap_thresholds.",
+                window_days, overlap_threshold,
             )
         total = 6 if is_canonical else 5
         self.logger.info("\n" + "#" * 70)
@@ -529,7 +514,7 @@ class PipelineRunner:
         if window_days is None:
             return "data/frontend-data.json"
         return f"data/frontend-data-{window_days}d.json"
-    
+
     def _step_aggregate(self, window_days=None) -> Optional[DataAggregator]:
         """Aggregation step for one window.
 
@@ -569,27 +554,27 @@ class PipelineRunner:
         self.logger.info(
             f"Viewer set memory estimate: {aggregator.get_viewer_memory_estimate_mb():.1f} MB"
         )
-        
+
         stats = aggregator.get_statistics()
         self.logger.info(f"Total channels: {stats['total_channels']}")
         self.logger.info(f"Total unique viewers: {stats['total_unique_viewers_across_all']}")
         if stats['top_channels_by_viewers']:
             top = stats['top_channels_by_viewers'][0]
             self.logger.info(f"Top channel: {top[0]} ({top[1]} viewers)")
-        
+
         # Print data quality report
         quality = aggregator.get_data_quality_report()
-        self.logger.info(f"\nData Quality Report:")
+        self.logger.info("\nData Quality Report:")
         self.logger.info(f"  Avg viewers/channel: {quality['avg_viewers_per_channel']:.1f}")
         self.logger.info(f"  Repeat viewers (2+): {quality['repeat_viewers_2plus']}")
         self.logger.info(f"  One-off viewers: {quality['one_off_viewers']} ({quality['one_off_percentage']:.1f}%)")
-        
+
         if not aggregator.get_channel_viewers():
             self.logger.error("No viewer data found")
             return None
-        
+
         return aggregator
-    
+
     def _step_build_graph(
         self,
         aggregator: DataAggregator,
@@ -607,7 +592,7 @@ class PipelineRunner:
             overlap_threshold = self.config.analysis.overlap_threshold
         channel_viewers = aggregator.get_channel_viewers()
         channel_metadata = aggregator.get_channel_metadata()
-        
+
         # Drop one-off viewers before sizing channels, so the size filter sees the
         # same viewer sets the graph will be built from.
         if self.config.analysis.min_user_appearances > 1:
@@ -651,19 +636,19 @@ class PipelineRunner:
             normalized_overlap_threshold=self.config.analysis.normalized_overlap_threshold,
         )
         graph = builder.build_graph(channel_viewers, channel_metadata)
-        
+
         stats = builder.get_statistics()
-        self.logger.info(f"Graph created:")
+        self.logger.info("Graph created:")
         self.logger.info(f"  Nodes: {stats['num_nodes']}")
         self.logger.info(f"  Edges: {stats['num_edges']}")
         self.logger.info(f"  Avg edge weight: {stats['avg_edge_weight']:.2f}")
         self.logger.info(f"  Max edge weight: {stats['max_edge_weight']}")
         self.logger.info(f"  Density: {stats['density']:.4f}")
-        
+
         if graph.number_of_edges() == 0:
             self.logger.error("Graph has no edges. Try lowering overlap_threshold.")
             return None
-        
+
         if self.config.analysis.export_graph_csv and export_csv:
             nodes_path = f"{self.config.analysis.output_dir}/graph_nodes.csv"
             edges_path = f"{self.config.analysis.output_dir}/graph_edges.csv"
@@ -676,9 +661,9 @@ class PipelineRunner:
                 self.storage.upload_file(f"curated/analysis/{date_str}/graph_nodes.csv", nodes_path)
                 self.storage.upload_file(f"curated/analysis/{date_str}/graph_edges.csv", edges_path)
                 self.logger.info(f"Uploaded graph CSVs to S3 curated/analysis/{date_str}/")
-        
+
         return graph
-    
+
     def _step_detect_communities(self, graph) -> tuple:
         """Community detection step.
 
@@ -707,36 +692,36 @@ class PipelineRunner:
         communities = detector.get_communities()
         stats = detector.get_statistics()
 
-        self.logger.info(f"Communities detected:")
+        self.logger.info("Communities detected:")
         self.logger.info(f"  Count: {stats['num_communities']}")
         self.logger.info(f"  Modularity: {stats['modularity']:.4f}")
         self.logger.info(f"  Largest: {stats['largest_community_size']} channels")
         self.logger.info(f"  Smallest: {stats['smallest_community_size']} channels")
 
         return partition, communities, stats, graph
-    
+
     def _step_tag_communities(self, communities, channel_metadata) -> tuple:
         """Tagging step."""
         tagger = ClusterTagger()
         labels = tagger.tag_communities(communities, channel_metadata)
         stats = tagger.get_statistics()
-        
-        self.logger.info(f"Communities tagged:")
+
+        self.logger.info("Communities tagged:")
         self.logger.info(f"  With clear game: {stats['with_clear_game']}")
         self.logger.info(f"  With clear language: {stats['with_clear_language']}")
         self.logger.info(f"  Uncategorized: {stats['uncategorized']}")
-        
-        self.logger.info(f"\nCommunity Labels:")
+
+        self.logger.info("\nCommunity Labels:")
         for comm_id, label in sorted(labels.items()):
             size = len(communities[comm_id])
             self.logger.info(f"  [{comm_id}] {label} ({size} channels)")
-        
+
         return labels, stats
-    
+
     def _step_visualize(self, graph, partition, labels):
         """Visualization step."""
         viz = Visualizer(figsize=self.config.analysis.static_viz_figsize)
-        
+
         if self.config.analysis.enable_static_viz:
             # Guarded like the interactive render below: both artifacts are
             # developer conveniences written to the task's ephemeral disk, so
@@ -754,10 +739,10 @@ class PipelineRunner:
                     label_top_n=self.config.analysis.label_top_n_nodes,
                     dpi=self.config.analysis.static_viz_dpi,
                 )
-                self.logger.info("✓ Static visualization saved")
+                self.logger.info("Static visualization saved")
             except Exception as e:
                 self.logger.warning(f"Static visualization failed: {e}")
-        
+
         if self.config.analysis.enable_interactive_viz:
             try:
                 viz.visualize_interactive(
@@ -766,10 +751,10 @@ class PipelineRunner:
                     labels,
                     output_file=f"{self.config.analysis.output_dir}/community_graph.html"
                 )
-                self.logger.info("✓ Interactive visualization saved")
+                self.logger.info("Interactive visualization saved")
             except Exception as e:
                 self.logger.warning(f"Interactive visualization failed: {e}")
-    
+
     def _step_save_results(self, partition, labels, graph, aggregator,
                           detection_stats, tagging_stats, communities=None,
                           output_key: str = "data/frontend-data.json",
@@ -819,12 +804,12 @@ class PipelineRunner:
                 "aggregator": aggregator.get_statistics()
             }
         }
-        
+
         if self.config.analysis.save_analysis_json and publish_private:
             results_key = "processed/analysis_results.json"
             if not self.storage.upload_json(results_key, results):
                 raise IOError("Could not persist private analysis results")
-            self.logger.info(f"✓ Results saved to {self.storage.get_uri(results_key)}")
+            self.logger.info(f"Results saved to {self.storage.get_uri(results_key)}")
 
         # Export frontend-ready JSON for S3/CloudFront serving
         if communities is not None:
@@ -851,8 +836,8 @@ class PipelineRunner:
             )
             if not exported:
                 raise IOError("Could not persist public frontend data")
-            self.logger.info("✓ Frontend data exported")
-    
+            self.logger.info("Frontend data exported")
+
 # Entry point modes
 
 
@@ -887,11 +872,6 @@ async def mode_survey(config: PipelineConfig):
             batch_retries=config.collection.batch_retries,
             should_stop=lambda: _shutdown_requested,
             on_batch_complete=lambda: lease.renew(session_id),
-            secrets=(
-                credentials.client_secret,
-                credentials.access_token,
-                credentials.refresh_token,
-            ),
         )
         result = await survey.run(session_id=session_id)
         Path(os.getenv("LOGS_DIR", "logs"), ".heartbeat").touch()
@@ -910,7 +890,7 @@ async def mode_analyze(config: PipelineConfig) -> bool:
     if not runner._validate_prerequisites('analyze'):
         logger.error("ANALYSIS_FAILED reason=prerequisites")
         return False
-    
+
     result = runner.run_analysis_pipeline()
     if result.get("status") != "success":
         logger.error("ANALYSIS_FAILED reason=pipeline")
@@ -954,7 +934,7 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
     # Cost protection: limit VODs to process
     effective_max = max_vods or config.vod.max_vods_per_run
     if effective_max:
-        logger.warning(f"⚠️  Cost Protection: Max {effective_max} VODs will be processed this run")
+        logger.warning(f"Cost protection: max {effective_max} VODs will be processed this run")
 
     if config.vod.auto_discover:
         channels = load_channels()
@@ -969,7 +949,6 @@ async def mode_preprocess_vods(config: PipelineConfig, max_vods: Optional[int] =
 
 def main() -> int:
     """Main entry point. Supports preset configs or YAML file."""
-    # Parse arguments
     if len(sys.argv) < 2:
         mode = "analyze"
         config_arg = "default"
@@ -982,47 +961,44 @@ def main() -> int:
             max_vods = int(sys.argv[3])
         except ValueError:
             print("Warning: max_vods argument must be an integer; ignoring")
-    
+
     # Check if it's a YAML file
     if config_arg.endswith(".yaml") or config_arg.endswith(".yml"):
         try:
             config = load_config_from_yaml(config_arg)
             logger_msg = f"Loaded config from {config_arg}"
         except FileNotFoundError:
-            print(f"✗ Config file not found: {config_arg}")
+            print(f"Config file not found: {config_arg}")
             return 1
         except ImportError as e:
-            print(f"✗ {e}")
+            print(e)
             return 1
         except Exception as e:
-            print(f"✗ Error loading config: {e}")
+            print(f"Error loading config: {e}")
             return 1
     else:
-        # Use preset config
         config_map = {
             "default": get_default_config,
             "rigorous": get_rigorous_config,
             "explorer": get_exploratory_config,
             "debug": get_debug_config
         }
-        
+
         if config_arg not in config_map:
             print(f"Unknown config: {config_arg}")
             print(f"Available: {', '.join(config_map.keys())}")
             return 1
-        
+
         config = config_map[config_arg]()
         logger_msg = f"Using '{config_arg}' config"
-    
-    # Setup logging
+
     setup_logging(config)
-    
+
     logger = logging.getLogger(__name__)
     logger.info(f"Starting in '{mode}' mode")
     logger.info(logger_msg)
     logger.info(f"Output directory: {config.analysis.output_dir}\n")
-    
-    # Run mode
+
     if mode == "survey":
         try:
             asyncio.run(mode_survey(config))
@@ -1043,15 +1019,15 @@ def main() -> int:
     elif mode == "preprocess_vods":
         asyncio.run(mode_preprocess_vods(config, max_vods=max_vods))
     else:
-        print(f"Usage: python main.py [survey|analyze|preprocess_vods] [config_name_or_yaml_file]")
-        print(f"\nModes: survey, analyze, preprocess_vods")
-        print(f"\nPreset Configs: default, rigorous, explorer, debug")
-        print(f"\nExamples:")
-        print(f"  python main.py analyze                    # Default config")
-        print(f"  python main.py survey config.yaml         # One EventSub survey")
-        print(f"  python main.py analyze rigorous           # Production preset")
-        print(f"  python main.py analyze config.yaml        # Custom YAML config")
-        print(f"  python main.py preprocess_vods config.yaml 5  # Process up to 5 queued VODs")
+        print("Usage: python main.py [survey|analyze|preprocess_vods] [config_name_or_yaml_file]")
+        print("\nModes: survey, analyze, preprocess_vods")
+        print("\nPreset Configs: default, rigorous, explorer, debug")
+        print("\nExamples:")
+        print("  python main.py analyze                    # Default config")
+        print("  python main.py survey config.yaml         # One EventSub survey")
+        print("  python main.py analyze rigorous           # Production preset")
+        print("  python main.py analyze config.yaml        # Custom YAML config")
+        print("  python main.py preprocess_vods config.yaml 5  # Process up to 5 queued VODs")
         return 2
 
     return 0

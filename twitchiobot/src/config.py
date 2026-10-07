@@ -1,15 +1,6 @@
-"""
-Configuration Module
+"""Pipeline configuration: dataclasses, the four presets, and the YAML loader."""
 
-Centralized configuration for the streaming community detection pipeline.
-Separates collection config from analysis config for flexibility.
-
-Supports:
-- Dataclass-based config with validation
-- Four preset configurations (default, rigorous, explorer, debug)
-- YAML file loading with environment variable overrides
-"""
-
+import logging
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -23,36 +14,20 @@ try:
 except ImportError:
     HAS_YAML = False
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class CollectionConfig:
     """Configuration for data collection phase."""
-    
-    # Unused: survey credentials come from twitch_credentials.py (Secrets
-    # Manager in production, TWITCH_* variables locally). Kept, like the
-    # retired settings below, so older YAML files that set them still load.
-    oauth_token: Optional[str] = None
-    client_id: Optional[str] = None
-    
-    # Channel discovery
+
     top_channels_limit: int = 1200  # Freeze the approximate top N streams per survey
     batch_size: int = 100  # Twitch chat rooms concurrently joined by the bot
     duration_per_batch: int = 300  # Equal active-listening window per batch
     survey_timeout_seconds: int = 7200  # Hard safety limit for a one-shot survey
     subscription_retries: int = 2  # Retries after an individual subscription failure
     batch_retries: int = 2  # Full restarts after an unrecoverable websocket loss
-    
-    # Retired continuous-collector settings. Nothing reads them: EventBridge
-    # Scheduler owns timing and survey_timeout_seconds bounds a run. They are
-    # still accepted because the YAML loader rejects unknown keys.
-    wait_for_hour_alignment: bool = True
-    collection_interval_minutes: int = 60
-    max_runtime_hours: Optional[int] = 24
-    max_collection_cycles: Optional[int] = 100
-    
-    # File settings
     logs_dir: str = "logs"
-    
+
     def __post_init__(self):
         """Apply survey canary overrides and validate configuration."""
         integer_overrides = {
@@ -85,23 +60,18 @@ class CollectionConfig:
             raise ValueError("batch_retries cannot be negative")
         if self.top_channels_limit <= 0:
             raise ValueError("top_channels_limit must be positive")
-        if self.max_runtime_hours is not None and self.max_runtime_hours <= 0:
-            raise ValueError("max_runtime_hours must be positive or None")
-        if self.max_collection_cycles is not None and self.max_collection_cycles <= 0:
-            raise ValueError("max_collection_cycles must be positive or None")
-        
-        # Create logs directory if it doesn't exist
+
         Path(self.logs_dir).mkdir(exist_ok=True)
 
 
 @dataclass
 class AnalysisConfig:
     """Configuration for analysis phase (aggregation, graph, detection, visualization)."""
-    
+
     # Input/output
     logs_dir: str = "logs"
     output_dir: str = "community_analysis"
-    
+
     # Data filtering
     min_channel_viewers: int = 1  # Minimum unique viewers for a channel to be included
     min_user_appearances: int = 1  # Minimum channels a user must appear in
@@ -135,7 +105,7 @@ class AnalysisConfig:
     # `scripts/sweep_threshold.py --window-days N` and record it here. Windows
     # absent from this map fall back to overlap_threshold.
     window_overlap_thresholds: dict = field(default_factory=dict)
-    
+
     # Graph building
     overlap_threshold: int = 1  # Minimum shared viewers for an edge (TwitchAtlas used 300)
     # 'shared_count' (raw intersection), 'jaccard' (|A n B| / |A u B|) or
@@ -145,14 +115,11 @@ class AnalysisConfig:
     # Minimum normalised score (0-1) for an edge. Ignored by 'shared_count'.
     normalized_overlap_threshold: float = 0.0
     include_isolated_nodes: bool = True  # Include channels with no overlaps
-    
+
     # Community detection
     resolution: float = 1.0  # Louvain resolution (higher = more communities)
     min_community_size: int = 1  # Minimum channels in a community to include
-    
-    # Retired with the continuous collector; accepted from YAML, never read.
-    analysis_interval_cycles: int = 24
-    
+
     # Visualization
     enable_static_viz: bool = True  # Generate PNG
     enable_interactive_viz: bool = True  # Generate HTML
@@ -160,7 +127,7 @@ class AnalysisConfig:
     static_viz_figsize: tuple = (20, 16)  # Figure size (width, height) in inches
     show_node_labels: bool = True  # Label large nodes on PNG
     label_top_n_nodes: int = 15  # Number of largest nodes to label
-    
+
     # Export
     export_graph_csv: bool = True  # Export nodes/edges CSV
     save_analysis_json: bool = True  # Save full results JSON
@@ -171,7 +138,7 @@ class AnalysisConfig:
     # rather than structure, and each one costs the map a legend entry and a
     # colour. Applied only while some community still clears it.
     frontend_min_community_size: int = 4
-    
+
     def __post_init__(self):
         """Validate configuration."""
         if self.overlap_threshold < 0:
@@ -229,7 +196,7 @@ class AnalysisConfig:
             raise ValueError("frontend_top_edges_per_channel must be at least 1")
         if self.frontend_min_community_size < 1:
             raise ValueError("frontend_min_community_size must be at least 1")
-        
+
         # Create output directory if it doesn't exist
         Path(self.output_dir).mkdir(exist_ok=True)
 
@@ -237,35 +204,35 @@ class AnalysisConfig:
 @dataclass
 class VODConfig:
     """Configuration for VOD (Video On Demand) chatter collection."""
-    
+
     # Enable/disable VOD collection
     enabled: bool = False
-    
+
     # Time bucketing
     bucket_len_s: int = 60  # Bucket window size in seconds (must match live collection)
-    
+
     # Storage
     raw_dir: str = "vod_raw"  # Directory for raw VOD chat JSON
     queue_file: str = "vod_queue.json"  # VOD processing queue
     persist_raw_chat: bool = False  # Opt-in: retain downloaded VOD chat JSON
-    
+
     # TwitchDownloaderCLI
     cli_path: str = "TwitchDownloaderCLI"  # Path to executable
-    
+
     # Auto-discovery
     auto_discover: bool = False  # Automatically discover recent VODs
     vod_limit_per_channel: int = 5  # Number of recent VODs to queue per channel
-    
+
     # Filtering
     max_age_hours: int = 24  # Maximum VOD age in hours (default 24)
     max_age_days: int = 14  # Maximum VOD age in days (default 14)
     min_views: int = 0  # Minimum view count to process (default 0)
-    
+
     # Cost Protection
     max_vods_per_run: Optional[int] = 50  # Max VODs to process per execution (None = unlimited)
     max_processing_hours: Optional[int] = 4  # Auto-stop after N hours (None = unlimited)
     rate_limit_delay_s: int = 2  # Delay between API calls to avoid rate limits
-    
+
     def __post_init__(self):
         """Validate configuration."""
         if self.bucket_len_s <= 0:
@@ -284,7 +251,7 @@ class VODConfig:
             raise ValueError("max_processing_hours must be positive or None")
         if self.rate_limit_delay_s < 0:
             raise ValueError("rate_limit_delay_s cannot be negative")
-        
+
         # Create directories if they don't exist
         if self.enabled:
             Path(self.raw_dir).mkdir(exist_ok=True)
@@ -303,16 +270,11 @@ class PipelineConfig:
     s3_bucket: Optional[str] = None  # Required if storage_type='s3'
     s3_prefix: str = "vieweratlas/"  # S3 key prefix
     s3_region: str = "us-east-1"  # AWS region
-    
+
     # Logging
     log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
     log_format: str = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    
-    # Accepted from YAML and set by the presets, but nothing reads them: a
-    # "dry run" still writes every artifact.
-    dry_run: bool = False
-    verbose: bool = False
-    
+
     def __post_init__(self):
         """Initialize defaults if not provided."""
         if self.collection is None:
@@ -338,7 +300,7 @@ class PipelineConfig:
         env_s3_region = os.getenv("S3_REGION")
         if env_s3_region:
             self.s3_region = env_s3_region
-        
+
         # Validate S3 config
         if self.storage_type == 's3' and not self.s3_bucket:
             raise ValueError("s3_bucket required when storage_type='s3'")
@@ -355,7 +317,6 @@ def get_default_config() -> PipelineConfig:
             resolution=1.0
         ),
         log_level="INFO",
-        verbose=False
     )
 
 
@@ -479,7 +440,6 @@ def get_rigorous_config() -> PipelineConfig:
             enable_interactive_viz=False,
         ),
         log_level="INFO",
-        verbose=False
     )
 
 
@@ -500,12 +460,11 @@ def get_exploratory_config() -> PipelineConfig:
             label_top_n_nodes=30
         ),
         log_level="DEBUG",
-        verbose=True
     )
 
 
 def get_debug_config() -> PipelineConfig:
-    """Get configuration for debugging (small dataset, verbose output)."""
+    """Get configuration for debugging (small dataset, debug logging)."""
     return PipelineConfig(
         collection=CollectionConfig(
             top_channels_limit=100,  # Just 100 channels
@@ -517,8 +476,6 @@ def get_debug_config() -> PipelineConfig:
             resolution=1.0
         ),
         log_level="DEBUG",
-        verbose=True,
-        dry_run=False
     )
 
 
@@ -527,6 +484,27 @@ _SECTION_CLASSES = {
     "analysis": AnalysisConfig,
     "vod": VODConfig,
 }
+
+# Settings of the retired continuous collector, and options that never did
+# anything. Older YAML files that set them still load, with a warning.
+_RETIRED_KEYS = {
+    "collection": {
+        "oauth_token", "client_id", "wait_for_hour_alignment",
+        "collection_interval_minutes", "max_runtime_hours", "max_collection_cycles",
+    },
+    "analysis": {"analysis_interval_cycles"},
+    "": {"dry_run", "verbose"},
+}
+
+
+def _drop_retired(section_name: str, values: dict) -> dict:
+    retired = _RETIRED_KEYS.get(section_name, set()) & set(values)
+    if retired:
+        logger.warning(
+            "Ignoring retired config key(s) %s", ", ".join(sorted(retired))
+        )
+    return {k: v for k, v in values.items() if k not in retired}
+
 
 # Fields declared as tuples but naturally expressed as YAML lists.
 _TUPLE_FIELDS = {"static_viz_figsize", "analysis_windows", "excluded_chatters"}
@@ -541,6 +519,7 @@ def _build_section(section_name: str, config_class, values: dict):
     if not isinstance(values, dict):
         raise ValueError(f"Config section '{section_name}' must be a mapping, got {type(values).__name__}")
 
+    values = _drop_retired(section_name, values)
     known = {f.name for f in fields(config_class)}
     unknown = set(values) - known
     if unknown:
@@ -579,34 +558,34 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
             "PyYAML required for YAML config loading. "
             "Install with: pip install pyyaml"
         )
-    
+
     yaml_file = Path(yaml_path)
     if not yaml_file.exists():
         raise FileNotFoundError(f"Config file not found: {yaml_path}")
-    
+
     # Load YAML
     with open(yaml_file) as f:
         config_dict = yaml.safe_load(f) or {}
-    
+
     # Override with environment variables
     if os.getenv("OVERLAP_THRESHOLD"):
         if "analysis" not in config_dict:
             config_dict["analysis"] = {}
         config_dict["analysis"]["overlap_threshold"] = int(os.getenv("OVERLAP_THRESHOLD"))
-    
+
     if os.getenv("MIN_COMMUNITY_SIZE"):
         if "analysis" not in config_dict:
             config_dict["analysis"] = {}
         config_dict["analysis"]["min_community_size"] = int(os.getenv("MIN_COMMUNITY_SIZE"))
-    
+
     if os.getenv("RESOLUTION"):
         if "analysis" not in config_dict:
             config_dict["analysis"] = {}
         config_dict["analysis"]["resolution"] = float(os.getenv("RESOLUTION"))
-    
+
     if os.getenv("LOG_LEVEL"):
         config_dict["log_level"] = os.getenv("LOG_LEVEL")
-    
+
     if not isinstance(config_dict, dict):
         raise ValueError(f"Config file {yaml_path} must contain a top-level mapping")
 
@@ -624,7 +603,9 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
     }
 
     # Whatever is not a section is a top-level PipelineConfig field.
-    top_level = {k: v for k, v in config_dict.items() if k not in _SECTION_CLASSES}
+    top_level = _drop_retired(
+        "", {k: v for k, v in config_dict.items() if k not in _SECTION_CLASSES}
+    )
     pipeline_fields = {f.name for f in fields(PipelineConfig)} - set(_SECTION_CLASSES)
     unknown = set(top_level) - pipeline_fields
     if unknown:
@@ -634,25 +615,3 @@ def load_config_from_yaml(yaml_path: str) -> PipelineConfig:
         )
 
     return PipelineConfig(**sections, **top_level)
-
-
-if __name__ == "__main__":
-    # Test configuration loading and validation
-    print("Default Config:")
-    default = get_default_config()
-    print(f"  Logs dir: {default.analysis.logs_dir}")
-    print(f"  Output dir: {default.analysis.output_dir}")
-    print(f"  Overlap threshold: {default.analysis.overlap_threshold}")
-    
-    print("\nRigorous Config (production preset):")
-    rigorous = get_rigorous_config()
-    print(f"  Min channel viewers: {rigorous.analysis.min_channel_viewers}")
-    print(f"  Overlap threshold: {rigorous.analysis.overlap_threshold}")
-    print(f"  Min community size: {rigorous.analysis.min_community_size}")
-    
-    print("\nExplorer Config:")
-    explorer = get_exploratory_config()
-    print(f"  Resolution: {explorer.analysis.resolution}")
-    print(f"  Overlap threshold: {explorer.analysis.overlap_threshold}")
-    
-    print("\nAll configs loaded successfully!")

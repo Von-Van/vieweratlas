@@ -1,12 +1,7 @@
-import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Ensure src/ is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from daily_collection_state import DailyCollectionState
 from storage import FileStorage

@@ -12,6 +12,8 @@ import {
 import { HeroGraph } from "../components/HeroGraph";
 import { useAtlasData } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
+import { compactNumber } from "../lib/format";
+import { REPO_URL } from "../components/Layout";
 
 const FEATURES = [
   {
@@ -40,47 +42,24 @@ const FEATURES = [
   },
 ];
 
-const compactNumber = new Intl.NumberFormat("en", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
-function StatCard({
+function StripStat({
   value,
   label,
   accent,
+  divider,
 }: {
   value: string;
   label: string;
   accent: string;
+  divider: boolean;
 }) {
   return (
     <div
-      className="flex flex-col items-center justify-center p-6 rounded-xl"
-      style={{
-        background: "#18181B",
-        border: "1px solid #2A2A2E",
-      }}
+      className="text-center px-4"
+      style={divider ? { borderRight: "1px solid #2A2A2E" } : undefined}
     >
-      <div
-        className="text-3xl font-bold mb-1"
-        style={{
-          color: accent,
-          fontFamily: "'Space Grotesk', sans-serif",
-          fontWeight: 700,
-        }}
-      >
-        {value}
-      </div>
-      <div
-        style={{
-          color: "#848494",
-          fontSize: 13,
-          textAlign: "center",
-        }}
-      >
-        {label}
-      </div>
+      <div style={{ color: accent, fontWeight: 700, fontSize: 28 }}>{value}</div>
+      <div style={{ color: "#848494", fontSize: 12, marginTop: 2 }}>{label}</div>
     </div>
   );
 }
@@ -108,7 +87,6 @@ export function Landing() {
         className="relative overflow-hidden"
         style={{ minHeight: "calc(100vh - 64px)" }}
       >
-        {/* Background graph */}
         <div className="absolute inset-0 z-0">
           <HeroGraph className="w-full h-full" />
           <div
@@ -120,12 +98,10 @@ export function Landing() {
           />
         </div>
 
-        {/* Hero content */}
         <div
           className="relative z-10 flex flex-col items-center justify-center text-center px-4 py-24"
           style={{ minHeight: "calc(100vh - 64px)" }}
         >
-          {/* Badge */}
           <div
             className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs mb-6"
             style={{
@@ -152,7 +128,7 @@ export function Landing() {
             className="mb-4"
             style={{
               fontSize: "clamp(2.5rem, 6vw, 5rem)",
-              fontWeight: 800,
+              fontWeight: 700,
               lineHeight: 1.1,
               letterSpacing: "-0.03em",
               color: "#EFEFF1",
@@ -180,10 +156,10 @@ export function Landing() {
               lineHeight: 1.7,
             }}
           >
-            ViewerAtlas discovers hidden communities by tracking
-            shared chat participants between channels. Powered by
-            live chat sampling, graph theory, and the Louvain
-            algorithm.
+            ViewerAtlas samples chat in the ~1,200 most-watched Twitch
+            channels three times a day, links channels by the chatters
+            they share, and groups them into communities with the
+            Louvain algorithm.
           </p>
 
           <div className="flex flex-wrap items-center justify-center gap-4">
@@ -208,7 +184,7 @@ export function Landing() {
               <ArrowRight size={16} />
             </Link>
             <a
-              href="https://github.com/Von-Van/vieweratlas"
+              href={REPO_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-6 py-3 rounded-xl transition-all"
@@ -240,7 +216,6 @@ export function Landing() {
             </a>
           </div>
 
-          {/* Scroll indicator */}
           <div
             className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-1"
             style={{ color: "#848494" }}
@@ -272,95 +247,14 @@ export function Landing() {
         }}
       >
         <div className="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div
-            className="text-center px-4"
-            style={{ borderRight: "1px solid #2A2A2E" }}
-          >
-            <div
-              style={{
-                color: "#9147FF",
-                fontWeight: 700,
-                fontSize: 28,
-              }}
-            >
-              {overallStats.totalChannels.toLocaleString()}
-            </div>
-            <div
-              style={{
-                color: "#848494",
-                fontSize: 12,
-                marginTop: 2,
-              }}
-            >
-              Channels Analyzed
-            </div>
-          </div>
-          <div
-            className="text-center px-4"
-            style={{ borderRight: "1px solid #2A2A2E" }}
-          >
-            <div
-              style={{
-                color: "#00E5CC",
-                fontWeight: 700,
-                fontSize: 28,
-              }}
-            >
-              {compactNumber.format(overallStats.totalViewers)}
-            </div>
-            <div
-              style={{
-                color: "#848494",
-                fontSize: 12,
-                marginTop: 2,
-              }}
-            >
-              Unique Chatters
-            </div>
-          </div>
-          <div
-            className="text-center px-4"
-            style={{ borderRight: "1px solid #2A2A2E" }}
-          >
-            <div
-              style={{
-                color: "#FF7B00",
-                fontWeight: 700,
-                fontSize: 28,
-              }}
-            >
-              {overallStats.communitiesDetected}
-            </div>
-            <div
-              style={{
-                color: "#848494",
-                fontSize: 12,
-                marginTop: 2,
-              }}
-            >
-              Communities Found
-            </div>
-          </div>
-          <div className="text-center px-4">
-            <div
-              style={{
-                color: "#1DB954",
-                fontWeight: 700,
-                fontSize: 28,
-              }}
-            >
-              {overallStats.modularityScore}
-            </div>
-            <div
-              style={{
-                color: "#848494",
-                fontSize: 12,
-                marginTop: 2,
-              }}
-            >
-              Modularity Score
-            </div>
-          </div>
+          {[
+            { value: overallStats.totalChannels.toLocaleString(), label: "Channels Analyzed", accent: "#9147FF" },
+            { value: compactNumber.format(overallStats.totalViewers), label: "Unique Chatters", accent: "#00E5CC" },
+            { value: String(overallStats.communitiesDetected), label: "Communities Found", accent: "#FF7B00" },
+            { value: String(overallStats.modularityScore), label: "Modularity Score", accent: "#1DB954" },
+          ].map((stat, i, all) => (
+            <StripStat key={stat.label} {...stat} divider={i < all.length - 1} />
+          ))}
         </div>
       </section>
 
@@ -395,7 +289,6 @@ export function Landing() {
               style={{
                 color: "#848494",
                 fontSize: 15,
-                marginTop: 8,
                 maxWidth: 500,
                 margin: "8px auto 0",
               }}
@@ -649,7 +542,7 @@ export function Landing() {
             style={{
               color: "#EFEFF1",
               fontSize: "clamp(1.75rem, 4vw, 3rem)",
-              fontWeight: 800,
+              fontWeight: 700,
               letterSpacing: "-0.03em",
               lineHeight: 1.2,
               marginBottom: 16,
@@ -665,8 +558,7 @@ export function Landing() {
               marginBottom: 32,
             }}
           >
-            Dive into the interactive community graph, discover
-            overlapping audiences, and see which channels share
+            Explore the community graph and see which channels share
             the most chatters.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-4">

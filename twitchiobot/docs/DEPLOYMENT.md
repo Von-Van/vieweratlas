@@ -158,7 +158,8 @@ either token into a document, terminal command, GitHub, or `.env`.
    ./create-schedules.sh
    ```
 
-3. Apply the 100-day private-data retention rules and monitoring:
+3. Apply monitoring (the 100-day retention rules were written by
+   `safe-deploy.sh`; this checks them):
 
    ```bash
    ./apply-monitoring.sh
@@ -224,8 +225,8 @@ the final rollout gate and normally takes roughly 80 minutes:
 ```
 
 Enable both schedules only after the five-channel, 100-channel, and complete
-1,200-channel tests all pass. Do not enable them after a `partial` or
-`complete_with_errors` result:
+1,200-channel tests all pass. Do not enable them after a `partial` result or a
+`complete_with_errors` result over the failure limit:
 
 ```bash
 SURVEY_SCHEDULE_STATE=ENABLED \
@@ -283,20 +284,13 @@ promote themselves as history accumulates — no redeploy and no config edit.
 Before day 14, all three choices are PENDING and the stable frontend-data URL
 contains a schema-valid status payload rather than a mislabeled short graph.
 
-The 14 and 30-day thresholds are measured and set (14 on 2026-08-28,
-re-confirmed 2026-09-13; 30 on 2026-09-13, when that window promoted). The
-90-day entry is not: the value it falls back to (`overlap_threshold=2`) was
-swept over a four-day, 15-survey sample, so it is a placeholder rather than a
-calibration. Overlap grows super-linearly with survey count, and the fallback is
-loose rather than strict once a window holds real history — the same sweep that
-returned 2 over four days returns 10 over fourteen. A window running on the
-fallback therefore admits far more edges than it should. Re-run the calibration
-each time a window promotes out of PENDING, and expect the measured value to
-climb.
-
-All of these were also measured before automated-account filtering existed
-(2026-09-21). Removing bots lowers overlap counts, so re-sweep every window once
-the filter is deployed rather than trusting the earlier values.
+All three thresholds were last swept on 2026-10-01, with automated-account
+filtering active: `{14: 4, 30: 5, 90: 5}`. The 90-day value was measured on 50
+days of surveys, so it is a placeholder until that window fills. Overlap grows
+super-linearly with survey count, so the base `overlap_threshold=2` that an
+unlisted window falls back to admits far more edges than it should once a
+window holds real history. Re-run the calibration each time a window promotes
+out of PENDING, and expect the measured value to climb.
 
 Note that `UNCALIBRATED_WINDOW` does not cover the window named by
 `analysis_window_days`: that check skips when the two match, so the default
@@ -326,7 +320,7 @@ The scheduled task runs `main.py analyze rigorous`, so `config/config.yaml` is
 is baked into the analysis image, so rebuild and redeploy after the edit:
 
 ```bash
-cd infrastructure/aws && ./safe-deploy.sh
+./safe-deploy.sh
 ```
 
 The script suggests the threshold whose modularity is highest. Do not paste it

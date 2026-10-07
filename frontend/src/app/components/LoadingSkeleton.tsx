@@ -1,4 +1,4 @@
-export function LoadingSkeleton({ lines = 3 }: { lines?: number }) {
+export function LoadingSkeleton() {
   return (
     <div
       className="flex flex-col items-center justify-center py-40"
@@ -22,7 +22,7 @@ export function LoadingSkeleton({ lines = 3 }: { lines?: number }) {
         Loading data...
       </div>
       <div className="flex flex-col gap-3 w-64">
-        {Array.from({ length: lines }).map((_, i) => (
+        {[0, 1, 2].map((i) => (
           <div
             key={i}
             className="rounded"
@@ -36,13 +36,6 @@ export function LoadingSkeleton({ lines = 3 }: { lines?: number }) {
           />
         ))}
       </div>
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse {
-          0%, 100% { opacity: 0.4; }
-          50% { opacity: 1; }
-        }
-      `}</style>
     </div>
   );
 }

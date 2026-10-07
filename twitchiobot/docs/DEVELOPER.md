@@ -1,9 +1,7 @@
 # ViewerAtlas Developer Guide
 
-This guide describes the current EventSub survey release. The old Twitch IRC
-collector, continuously running collector mode, discovery/SQS workers, and
-their deployment assets have been removed. The VOD preprocessor remains a local
-development command only; do not deploy or schedule it.
+This guide describes the EventSub survey pipeline. The VOD preprocessor is a
+local development command only; do not deploy or schedule it.
 
 For operator-facing instructions, use [DEPLOYMENT.md](DEPLOYMENT.md) and
 [DAILY_OPERATIONS.md](DAILY_OPERATIONS.md). This page focuses on the current
@@ -108,8 +106,8 @@ of accounts at each peak concurrency, are kept under
 against. Which accounts were excluded is never logged or persisted. The public
 schema is unchanged; its chatter total simply excludes these accounts.
 
-Filtering lowers overlap counts, so thresholds calibrated before it existed must
-be re-swept. `calibrate_windows.sh` pins `max_concurrent_channels` to the
+The thresholds in `get_rigorous_config()` were re-swept with the filter active on
+2026-10-01. `calibrate_windows.sh` pins `max_concurrent_channels` to the
 rigorous preset alongside the other filters.
 
 ## Graph weighting
@@ -154,7 +152,7 @@ expire after 100 days and noncurrent versions after seven days. The retention
 must stay ahead of the widest entry in `analysis_windows`, or that window reads
 a tail that is expiring underneath it.
 
-The public `data/frontend-data.json` schema is unchanged. It contains aggregate
+The public `data/frontend-data*.json` payloads contain aggregate
 channel and graph results only; it must never receive author IDs, logins, raw
 arrays, or survey manifests.
 
@@ -233,7 +231,7 @@ pytest -q
 Infrastructure scripts can be checked without changing AWS:
 
 ```bash
-bash -n infrastructure/aws/*.sh
+for script in infrastructure/aws/*.sh; do bash -n "$script"; done
 python -m json.tool infrastructure/aws/ecs-task-collector.json >/dev/null
 python -m json.tool infrastructure/aws/ecs-task-analysis.json >/dev/null
 ```
@@ -246,14 +244,14 @@ activation.
 
 - The map's time filter offers 14/30/90-day windows. Each run publishes only
   the windows the retained surveys can fill and marks the rest PENDING in the
-  payload, so windows promote themselves without a redeploy. Their per-window
-  overlap thresholds are not yet measured: until `window_overlap_thresholds` is
-  filled in, a promoted window borrows the 30-day value and the run logs
-  `UNCALIBRATED_WINDOW`. See `scripts/calibrate_windows.sh`.
+  payload, so windows promote themselves without a redeploy. The 90-day entry
+  in `window_overlap_thresholds` was measured on 50 days and is provisional; a
+  window with no entry falls back to the base `overlap_threshold` and the run
+  logs `UNCALIBRATED_WINDOW`. See `scripts/calibrate_windows.sh`.
 - The graph mathematics refactor onto the stable author IDs already captured is
   still a separate follow-up.
 - Website channel opt-in is reserved by `selection_source` values `opt_in` and
-  `both`, but is not implemented in this release.
+  `both`, but is not implemented yet.
 - The cost estimate is calculated after the first complete production survey
   from measured Fargate runtime, public IPv4 time, Parquet size, storage,
   requests, logs, and Secrets Manager usage.

@@ -20,7 +20,6 @@ from datetime import datetime, date, timedelta
 
 from chatter_filter import DEFAULT_MAX_CONCURRENT_CHANNELS, remove_automated_chatters
 
-# Import storage abstraction
 try:
     from storage import get_storage, BaseStorage
     HAS_STORAGE = True
@@ -145,13 +144,13 @@ def survey_date_span(storage, logs_dir: str = "logs") -> Tuple[Optional[date], O
 class DataAggregator:
     """
     Aggregates viewer data from JSON/CSV log files.
-    
+
     Maintains:
     - channel_viewers: Dict[channel_name -> Set[username]]
     - channel_metadata: Dict[channel_name -> metadata dict]
     - snapshots: List of raw snapshot data with timestamps
     """
-    
+
     def __init__(
         self,
         logs_dir: str = "logs",
@@ -159,8 +158,6 @@ class DataAggregator:
         window_days: Optional[int] = None,
     ):
         """
-        Initialize aggregator with logs directory path or storage backend.
-
         Args:
             logs_dir: Path to directory containing log files (used for FileStorage)
             storage: Optional storage backend (auto-detects if None)
@@ -197,7 +194,6 @@ class DataAggregator:
         # Count-only report from exclude_automated_chatters(); None until run.
         self.automated_chatters: Optional[dict] = None
 
-        # Initialize storage backend
         if storage is not None:
             self.storage = storage
         elif HAS_STORAGE:
@@ -369,11 +365,11 @@ class DataAggregator:
                     manifest_key,
                 )
         return manifest_cache[manifest_key]
-        
+
     def load_json_snapshots(self) -> int:
         """
         Load all JSON snapshot files from storage backend.
-        
+
         JSON format: {
             "channel": str,
             "timestamp": str,
@@ -383,7 +379,7 @@ class DataAggregator:
             "started_at": str,
             "chatters": [str, str, ...]
         }
-        
+
         Returns:
             Number of JSON files loaded
         """
@@ -391,86 +387,86 @@ class DataAggregator:
             # Load from storage backend (supports S3)
             json_files = self.storage.list_files(prefix="raw/snapshots", suffix=".json")
             count = 0
-            
+
             for json_key in json_files:
                 try:
                     data = self.storage.download_json(json_key)
                     if not data:
                         continue
-                    
+
                     # Handle both single snapshot and array of snapshots
                     if isinstance(data, list):
                         snapshots = data
                     else:
                         snapshots = [data]
-                    
+
                     for snapshot in snapshots:
                         if self._ingest_snapshot(snapshot, default_source="live"):
                             count += 1
-                
+
                 except Exception as e:
                     logger.error("Error loading %s: %s", json_key, e)
-            
+
             return count
         else:
             # Legacy local filesystem loading
             if not self.logs_dir.exists():
                 logger.warning("Logs directory %s does not exist", self.logs_dir)
                 return 0
-            
+
             json_files = list(self.logs_dir.glob("*.json"))
             count = 0
-            
+
             for json_file in json_files:
                 try:
                     with open(json_file, 'r') as f:
                         data = json.load(f)
-                    
+
                     # Handle both single snapshot and array of snapshots
                     if isinstance(data, list):
                         snapshots = data
                     else:
                         snapshots = [data]
-                    
+
                     for snapshot in snapshots:
                         if self._ingest_snapshot(snapshot, default_source="live"):
                             count += 1
-                
+
                 except (json.JSONDecodeError, IOError) as e:
                     logger.error("Error loading %s: %s", json_file, e)
-            
+
             return count
-    
+
     def load_csv_snapshots(self) -> int:
         """
         Load all CSV snapshot files from logs directory.
-        
+
         CSV format: channel,chatter,viewers,game,title,timestamp
-        
+
         Returns:
             Number of CSV files loaded
         """
         if not self.logs_dir.exists():
             return 0
-        
+
         csv_files = list(self.logs_dir.glob("*.csv"))
         count = 0
-        
+
         for csv_file in csv_files:
             try:
                 with open(csv_file, 'r') as f:
                     reader = csv.DictReader(f)
-                    
+
                     for row in reader:
                         channel = row.get("channel", "").lower()
                         chatter = row.get("username", row.get("chatter", "")).lower()
-                        
+
                         if not channel or not chatter:
                             continue
-                        
+
                         # Add chatter to channel's viewer set
                         self.channel_viewers[channel].add(chatter)
-                        
+
                         # Store metadata if not already present
                         # Use canonical keys matching _ingest_snapshot
                         if channel not in self.channel_metadata:
@@ -481,12 +477,12 @@ class DataAggregator:
                                 "title": row.get("title", ""),
                                 "timestamp": row.get("timestamp", "")
                             }
-                        
+
                         count += 1
-            
+
             except (csv.Error, IOError) as e:
                 logger.error("Error loading %s: %s", csv_file, e)
-        
+
         return count
 
     def load_vod_snapshots(self) -> int:
@@ -528,7 +524,7 @@ class DataAggregator:
                                 df = pd.read_parquet(tmp.name)
                                 import os
                                 os.unlink(tmp.name)
-                        
+
                         for record in df.to_dict(orient="records"):
                             if self._ingest_snapshot(record, default_source="vod"):
                                 count += 1
@@ -580,7 +576,7 @@ class DataAggregator:
                     logger.error("Error loading %s: %s", vod_file, e)
 
         return count
-    
+
     def load_parquet_snapshots(self) -> int:
         """
         Load Parquet snapshot files (consolidated cycle format).
@@ -722,12 +718,12 @@ class DataAggregator:
     def get_channel_viewers(self) -> Dict[str, Set[str]]:
         """
         Get the accumulated viewer data.
-        
+
         Returns:
             Dict mapping channel name to set of unique viewers
         """
         return dict(self.channel_viewers)
-    
+
     def get_channel_observations(self) -> Dict[str, int]:
         """Observation count per channel (how many snapshots mentioned it)."""
         return dict(self.channel_observations)
@@ -788,26 +784,26 @@ class DataAggregator:
 
             resolved[channel] = entry
         return resolved
-    
+
     def get_statistics(self) -> dict:
         """
         Get aggregation statistics.
-        
+
         Returns:
             Dict with stats like total channels, total unique viewers, etc.
         """
         total_snapshots = len(self.snapshots)
         total_channels = len(self.channel_viewers)
         total_unique_viewers = sum(len(viewers) for viewers in self.channel_viewers.values())
-        
+
         # Unique viewers across all channels (not counting duplicates)
         all_viewers = set()
         for viewers in self.channel_viewers.values():
             all_viewers.update(viewers)
-        
+
         channel_sizes = [(ch, len(viewers)) for ch, viewers in self.channel_viewers.items()]
         channel_sizes.sort(key=lambda x: x[1], reverse=True)
-        
+
         return {
             "total_snapshots": total_snapshots,
             "total_channels": total_channels,
@@ -826,14 +822,14 @@ class DataAggregator:
                 else f"as of {datetime.now():%b %d, %Y}"
             ),
         }
-    
+
     def filter_channels_by_size(self, min_viewers: int = 1) -> Dict[str, Set[str]]:
         """
         Get channel viewers filtered by minimum audience size.
-        
+
         Args:
             min_viewers: Minimum number of unique viewers required
-        
+
         Returns:
             Filtered dict mapping channel name to viewer set
         """
@@ -841,50 +837,13 @@ class DataAggregator:
             ch: viewers for ch, viewers in self.channel_viewers.items()
             if len(viewers) >= min_viewers
         }
-    
-    def filter_channels_by_metadata(self, 
-                                   min_viewer_count: int = 0,
-                                   exclude_games: list = None) -> Dict[str, Set[str]]:
-        """
-        Filter channels by metadata attributes.
-        
-        Args:
-            min_viewer_count: Minimum stream viewer count from Twitch
-            exclude_games: List of games/categories to exclude (e.g., bots, inactive)
-        
-        Returns:
-            Filtered channel viewers dict
-        """
-        exclude_games = exclude_games or []
-        
-        filtered = {}
-        for ch, viewers in self.channel_viewers.items():
-            if ch not in self.channel_metadata:
-                # Include if no metadata (safer)
-                filtered[ch] = viewers
-                continue
-            
-            meta = self.channel_metadata[ch]
-            
-            # Check viewer count threshold
-            if meta.get("viewer_count", meta.get("viewers", 0)) < min_viewer_count:
-                continue
-            
-            # Check excluded games
-            game = meta.get("game_name", meta.get("game", "Unknown")).lower()
-            if any(excl.lower() in game for excl in exclude_games):
-                continue
-            
-            filtered[ch] = viewers
-        
-        return filtered
-    
+
     def get_user_channel_map(self) -> Dict[str, Set[str]]:
         """
         Build user-centric view: each user mapped to channels they appear in.
-        
+
         Useful for analyzing user behavior across channels.
-        
+
         Returns:
             Dict mapping username -> set of channels
         """
@@ -894,43 +853,42 @@ class DataAggregator:
                 if viewer not in user_channels:
                     user_channels[viewer] = set()
                 user_channels[viewer].add(channel)
-        
+
         return user_channels
-    
+
     def filter_by_repeat_viewers(self, min_appearances: int = 1) -> Dict[str, Set[str]]:
         """
         Filter to only include viewers who appear in multiple channels.
-        
+
         This helps identify genuinely engaged viewers vs one-time visitors.
-        
+
         Args:
             min_appearances: Minimum number of different channels user must appear in
-        
+
         Returns:
             Filtered channel viewers dict (with reduced viewer sets)
         """
         # Get user-to-channels mapping
         user_channels = self.get_user_channel_map()
-        
-        # Find repeat viewers
+
         repeat_viewers = {
             user for user, channels in user_channels.items()
             if len(channels) >= min_appearances
         }
-        
+
         # Filter channels to only include repeat viewers
         filtered = {}
         for channel, viewers in self.channel_viewers.items():
             filtered_viewers = viewers & repeat_viewers
             if filtered_viewers:  # Only include if has repeat viewers
                 filtered[channel] = filtered_viewers
-        
+
         return filtered
-    
+
     def get_data_quality_report(self) -> dict:
         """
         Generate a data quality report for diagnostics.
-        
+
         Returns:
             Dict with quality metrics
         """
@@ -938,11 +896,10 @@ class DataAggregator:
         all_viewers = set()
         for viewers in self.channel_viewers.values():
             all_viewers.update(viewers)
-        
-        # Calculate distribution stats
+
         channel_sizes = [len(viewers) for viewers in self.channel_viewers.values()]
         user_appearances = [len(channels) for channels in user_channels.values()]
-        
+
         return {
             "total_channels": len(self.channel_viewers),
             "total_unique_viewers": len(all_viewers),
@@ -957,18 +914,3 @@ class DataAggregator:
             "one_off_viewers": sum(1 for c in user_appearances if c == 1),
             "one_off_percentage": (sum(1 for c in user_appearances if c == 1) / len(user_appearances) * 100) if user_appearances else 0
         }
-
-
-if __name__ == "__main__":
-    # Test the aggregator
-    aggregator = DataAggregator("logs")
-    json_count, csv_count, vod_count, parquet_count = aggregator.load_all()
-
-    print(
-        f"Loaded {json_count} JSON snapshots, {csv_count} CSV rows, "
-        f"{vod_count} VOD snapshots, and {parquet_count} Parquet snapshots"
-    )
-    print("\nStatistics:")
-    stats = aggregator.get_statistics()
-    for key, value in stats.items():
-        print(f"  {key}: {value}")

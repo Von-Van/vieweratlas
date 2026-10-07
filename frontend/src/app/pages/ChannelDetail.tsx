@@ -13,17 +13,7 @@ import {
 import { ArrowLeft, Users, GitBranch, TrendingUp, Globe, ExternalLink } from "lucide-react";
 import { useAtlasData, ANALYSIS_WINDOWS } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
-
-// Viewer counts range from tens to hundreds of thousands; "12.5K" reads
-// correctly at both ends where a fixed thousands suffix showed "0k".
-const compactNumber = new Intl.NumberFormat("en", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
-
-function getInitials(name: string) {
-  return name.slice(0, 2).toUpperCase();
-}
+import { compactNumber, initials } from "../lib/format";
 
 const CustomTooltipBar = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
@@ -91,7 +81,6 @@ export function ChannelDetail() {
         className="flex flex-col items-center justify-center py-40"
         style={{ color: "#848494", fontFamily: "'Space Grotesk', sans-serif" }}
       >
-        <div style={{ fontSize: 48, marginBottom: 16 }}>😕</div>
         <div style={{ color: "#EFEFF1", fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
           {canWiden ? "Not in this window" : "Channel not found"}
         </div>
@@ -136,7 +125,7 @@ export function ChannelDetail() {
     );
   }
 
-  // Related channels (same community, different)
+  // Other channels in the same community.
   const relatedChannels = channels
     .filter((c) => c.communityId === channel.communityId && c.id !== channel.id)
     .slice(0, 4);
@@ -156,7 +145,6 @@ export function ChannelDetail() {
         paddingBottom: 80,
       }}
     >
-      {/* Header banner */}
       <div
         className="relative py-12 px-6"
         style={{
@@ -164,7 +152,6 @@ export function ChannelDetail() {
           borderBottom: "1px solid #2A2A2E",
         }}
       >
-        {/* Glow */}
         <div
           className="absolute top-0 left-0 w-80 h-40 rounded-full blur-3xl opacity-20 pointer-events-none"
           style={{ background: color }}
@@ -183,7 +170,6 @@ export function ChannelDetail() {
           </Link>
 
           <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6">
-            {/* Avatar */}
             <div
               className="flex items-center justify-center rounded-2xl flex-shrink-0"
               style={{
@@ -191,12 +177,12 @@ export function ChannelDetail() {
                 height: 80,
                 background: `linear-gradient(135deg, ${color}, ${color}88)`,
                 fontSize: 28,
-                fontWeight: 800,
+                fontWeight: 700,
                 color: "#fff",
                 boxShadow: `0 0 30px ${color}55`,
               }}
             >
-              {getInitials(channel.displayName)}
+              {initials(channel.displayName)}
             </div>
 
             <div className="flex-1">
@@ -205,7 +191,7 @@ export function ChannelDetail() {
                   style={{
                     color: "#EFEFF1",
                     fontSize: "clamp(1.5rem, 3vw, 2rem)",
-                    fontWeight: 800,
+                    fontWeight: 700,
                     letterSpacing: "-0.02em",
                     lineHeight: 1.2,
                   }}
@@ -304,7 +290,7 @@ export function ChannelDetail() {
                 <div
                   style={{
                     color: stat.accentColor,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     fontSize: 22,
                     lineHeight: 1.1,
                   }}
@@ -518,11 +504,11 @@ export function ChannelDetail() {
                           height: 40,
                           background: color + "20",
                           color,
-                          fontWeight: 800,
+                          fontWeight: 700,
                           fontSize: 14,
                         }}
                       >
-                        {getInitials(ch.displayName)}
+                        {initials(ch.displayName)}
                       </div>
                       <div>
                         <div style={{ color: "#EFEFF1", fontWeight: 600, fontSize: 14 }}>

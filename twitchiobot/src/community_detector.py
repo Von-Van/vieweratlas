@@ -24,11 +24,9 @@ class CommunityDetector:
     """
     Detects communities in the overlap graph using modularity optimization.
     """
-    
+
     def __init__(self, resolution: float = 1.0, min_community_size: int = 1):
         """
-        Initialize community detector.
-
         Args:
             resolution: Resolution parameter for modularity optimization.
                        Higher values produce more fine-grained communities.
@@ -50,23 +48,23 @@ class CommunityDetector:
     def detect_communities(self, graph: nx.Graph) -> Dict[str, int]:
         """
         Detect communities in the graph using Louvain algorithm.
-        
+
         Args:
             graph: NetworkX graph with weighted edges
-        
+
         Returns:
             Dict mapping channel -> community_id
         """
         if not LOUVAIN_AVAILABLE:
             raise ImportError("python-louvain is not installed. "
                             "Install with: pip install python-louvain")
-        
+
         if graph.number_of_nodes() == 0:
             logger.warning("Graph has no nodes. Returning empty partition.")
             return {}
-        
+
         logger.info(f"Detecting communities with resolution={self.resolution}")
-        
+
         # Use Louvain algorithm for community detection
         # random_state pins the node ordering Louvain uses. Without it an
         # identical graph yields a different community count per run, and
@@ -78,7 +76,7 @@ class CommunityDetector:
             resolution=self.resolution,
             random_state=42
         )
-        
+
         # Build communities dict from partition
         self.communities = {}
         for node, comm_id in self.partition.items():
@@ -115,59 +113,58 @@ class CommunityDetector:
             self.modularity = 0.0
             return self.partition
 
-        # Calculate modularity
         self.modularity = community.modularity(self.partition, scored_graph, weight='weight')
 
         logger.info(f"Detected {len(self.communities)} communities. "
                    f"Modularity: {self.modularity:.4f}")
 
         return self.partition
-    
+
     def get_partition(self) -> Dict[str, int]:
         """
         Get the community assignment for each channel.
-        
+
         Returns:
             Dict mapping channel -> community_id
         """
         return dict(self.partition)
-    
+
     def get_communities(self) -> Dict[int, Set[str]]:
         """
         Get communities as sets of channels.
-        
+
         Returns:
             Dict mapping community_id -> set of channels
         """
         return {k: v.copy() for k, v in self.communities.items()}
-    
+
     def get_modularity(self) -> float:
         """
         Get the modularity score of the current partition.
-        
+
         Higher modularity (closer to 1.0) indicates stronger community structure.
-        
+
         Returns:
             Modularity score
         """
         return self.modularity
-    
+
     def get_community_for_channel(self, channel: str) -> int:
         """
         Get the community ID for a specific channel.
-        
+
         Args:
             channel: Channel name
-        
+
         Returns:
             Community ID, or -1 if channel not found
         """
         return self.partition.get(channel, -1)
-    
+
     def get_statistics(self) -> dict:
         """
         Get community detection statistics.
-        
+
         Returns:
             Dict with community stats
         """
@@ -177,11 +174,11 @@ class CommunityDetector:
                 "modularity": 0.0,
                 "community_sizes": []
             }
-        
-        community_sizes = [(cid, len(channels)) 
+
+        community_sizes = [(cid, len(channels))
                           for cid, channels in self.communities.items()]
         community_sizes.sort(key=lambda x: x[1], reverse=True)
-        
+
         return {
             "num_communities": len(self.communities),
             "modularity": self.modularity,
@@ -189,62 +186,32 @@ class CommunityDetector:
             "largest_community_size": community_sizes[0][1] if community_sizes else 0,
             "smallest_community_size": community_sizes[-1][1] if community_sizes else 0,
         }
-    
+
     def set_resolution(self, resolution: float) -> None:
         """
         Set the resolution parameter for next detection.
-        
+
         Lower resolution (e.g., 0.5): Larger, fewer communities
         Higher resolution (e.g., 2.0): Smaller, more communities
-        
+
         Args:
             resolution: New resolution value
         """
         self.resolution = resolution
         logger.info(f"Resolution set to {self.resolution}")
-    
+
     def add_community_attribute_to_graph(self, graph: nx.Graph) -> nx.Graph:
         """
         Add community assignment as node attribute in the graph.
-        
+
         Args:
             graph: NetworkX graph
-        
+
         Returns:
             Updated graph with 'community' attribute on each node
         """
         for node, comm_id in self.partition.items():
             if node in graph:
                 graph.nodes[node]['community'] = comm_id
-        
+
         return graph
-
-
-if __name__ == "__main__":
-    # Test with sample data
-    from data_aggregator import DataAggregator
-    from graph_builder import GraphBuilder
-    
-    logging.basicConfig(level=logging.INFO)
-    
-    # Load data and build graph
-    aggregator = DataAggregator("logs")
-    aggregator.load_all()
-    
-    builder = GraphBuilder(overlap_threshold=1)
-    graph = builder.build_graph(
-        aggregator.get_channel_viewers(),
-        aggregator.get_channel_metadata()
-    )
-    
-    # Detect communities
-    if LOUVAIN_AVAILABLE:
-        detector = CommunityDetector(resolution=1.0)
-        partition = detector.detect_communities(graph)
-        
-        print("\nCommunity Detection Statistics:")
-        stats = detector.get_statistics()
-        for key, value in stats.items():
-            print(f"  {key}: {value}")
-    else:
-        print("\npython-louvain not available. Install with: pip install python-louvain")

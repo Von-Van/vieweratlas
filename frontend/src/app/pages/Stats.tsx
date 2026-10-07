@@ -11,15 +11,7 @@ import { Database, Users, Network, Activity, Clock, TrendingUp } from "lucide-re
 import { useAtlasData } from "../data/useAtlasData";
 import { LoadingSkeleton } from "../components/LoadingSkeleton";
 import { Link } from "react-router";
-
-const COMMUNITY_COLORS = [
-  "#FF7B00", "#9147FF", "#1DB954", "#00E5CC", "#848494", "#FF4D6D", "#FFD700", "#4299E1",
-];
-
-const compactNumber = new Intl.NumberFormat("en", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
+import { compactNumber, initials } from "../lib/format";
 
 const CustomTooltipBar = ({ active, payload, label }: any) => {
   if (active && payload && payload.length) {
@@ -37,11 +29,6 @@ const CustomTooltipBar = ({ active, payload, label }: any) => {
         <div style={{ color: "#9147FF", fontSize: 12 }}>
           {payload[0].value.toLocaleString()} channels
         </div>
-        {payload[1] && (
-          <div style={{ color: "#00E5CC", fontSize: 12 }}>
-            {(payload[1].value / 1000).toFixed(0)}k viewers
-          </div>
-        )}
       </div>
     );
   }
@@ -75,7 +62,7 @@ function MetricCard({
       <div
         style={{
           color: accent,
-          fontWeight: 800,
+          fontWeight: 700,
           fontSize: 32,
           letterSpacing: "-0.03em",
           lineHeight: 1,
@@ -97,6 +84,9 @@ export function Stats() {
   if (loading || !data) return <LoadingSkeleton />;
 
   const { overallStats, topCommunitiesBySize, mostConnectedChannels } = data;
+  // Same color as on the map. Display labels are unique per export.
+  const colorByLabel = new Map(data.communities.map((c) => [c.label, c.color]));
+  const communityColor = (label: string) => colorByLabel.get(label) ?? "#848494";
 
   return (
     <div
@@ -108,7 +98,6 @@ export function Stats() {
         paddingBottom: 80,
       }}
     >
-      {/* Page header */}
       <div
         className="py-12 px-6"
         style={{
@@ -133,7 +122,7 @@ export function Stats() {
             style={{
               color: "#EFEFF1",
               fontSize: "clamp(1.75rem, 4vw, 2.5rem)",
-              fontWeight: 800,
+              fontWeight: 700,
               letterSpacing: "-0.03em",
               marginBottom: 8,
             }}
@@ -230,8 +219,8 @@ export function Stats() {
                 />
                 <Tooltip content={<CustomTooltipBar />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
                 <Bar dataKey="channels" radius={[0, 4, 4, 0]}>
-                  {topCommunitiesBySize.map((_, index) => (
-                    <Cell key={index} fill={COMMUNITY_COLORS[index % COMMUNITY_COLORS.length]} />
+                  {topCommunitiesBySize.map((comm, index) => (
+                    <Cell key={index} fill={communityColor(comm.community)} />
                   ))}
                 </Bar>
               </BarChart>
@@ -257,7 +246,7 @@ export function Stats() {
                 // largest value can sit anywhere in it.
                 const max = Math.max(1, ...topCommunitiesBySize.map((c) => c.viewers));
                 const pct = (comm.viewers / max) * 100;
-                const color = COMMUNITY_COLORS[i % COMMUNITY_COLORS.length];
+                const color = communityColor(comm.community);
                 return (
                   // Rank position, not name: two communities can share a
                   // display label, and a duplicate key silently drops a row.
@@ -352,11 +341,11 @@ export function Stats() {
                     height: 36,
                     background: ch.color + "20",
                     color: ch.color,
-                    fontWeight: 800,
+                    fontWeight: 700,
                     fontSize: 13,
                   }}
                 >
-                  {ch.name.slice(0, 2).toUpperCase()}
+                  {initials(ch.name)}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div
@@ -383,7 +372,7 @@ export function Stats() {
                   </div>
                 </div>
                 <div className="text-right flex-shrink-0">
-                  <div style={{ color: ch.color, fontWeight: 800, fontSize: 18 }}>
+                  <div style={{ color: ch.color, fontWeight: 700, fontSize: 18 }}>
                     {ch.edges}
                   </div>
                   <div style={{ color: "#848494", fontSize: 11 }}>edges</div>

@@ -200,9 +200,10 @@ through the same steps. Values are the production `rigorous` preset in
 2. **Overlap graph.** For every channel pair, the weight is the number of
    shared chatters `|A ∩ B|`. An account seen in more than 200 channels is
    skipped entirely. A pair becomes an edge only at or above the window's
-   overlap threshold: 3 for 14 days, 4 for 30 days, and a fallback of 2 for
-   windows not yet measured, which logs `UNCALIBRATED_WINDOW`. Channels with no
-   edge are dropped.
+   overlap threshold: 4 for 14 days and 5 for 30 and 90 days (the 90-day value
+   is provisional). A window without a measured value falls back to the base
+   threshold of 2 and logs `UNCALIBRATED_WINDOW`. Channels with no edge are
+   dropped.
 3. **Communities.** Louvain (`python-louvain`, resolution 1.0,
    `random_state=42`). Communities under 10 channels are discarded, and
    modularity is recomputed on what remains.
@@ -294,8 +295,9 @@ fetches `VITE_DATA_URL` from the same origin. It enforces a 10-second timeout
 and a size limit, and validates the schema in
 [`validateAtlasData.ts`](../frontend/src/app/data/validateAtlasData.ts). Other
 windows' files load only when selected. If no URL is configured, or loading or
-validation fails, the site falls back to a bundled demonstration dataset and
-shows a banner saying so.
+validation fails, the site falls back to a synthetic demonstration dataset (the
+pipeline's own output for `make_demo_data.py` surveys) and shows a banner
+saying so.
 
 The Python `Visualizer` can also render a PNG and a PyVis HTML file. Both are
 off in production, where they cost memory and are never uploaded.

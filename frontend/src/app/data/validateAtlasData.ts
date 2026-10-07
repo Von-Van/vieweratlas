@@ -80,7 +80,7 @@ function isChannel(value: unknown): boolean {
     return false;
   }
 
-  if ("layout" in value && value.layout !== undefined && !isLayout(value.layout)) {
+  if (!isLayout(value.layout)) {
     return false;
   }
 

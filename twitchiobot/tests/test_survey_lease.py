@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
-
-import pytest
 from botocore.exceptions import ClientError
-
-SRC = Path(__file__).resolve().parents[1] / "src"
-sys.path.insert(0, str(SRC))
 
 from survey_lease import DynamoDBSurveyLease, NullSurveyLease, get_survey_lease
 

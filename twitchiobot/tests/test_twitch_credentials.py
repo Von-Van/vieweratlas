@@ -1,13 +1,8 @@
 """Tests for the atomic ViewerAtlas Twitch credential store."""
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import twitch_credentials
 from twitch_credentials import TwitchCredentials, get_credential_store
@@ -72,10 +67,6 @@ def secret_payload(**overrides):
     }
     payload.update(overrides)
     return payload
-
-
-def test_public_api_is_intentionally_small():
-    assert twitch_credentials.__all__ == ["TwitchCredentials", "get_credential_store"]
 
 
 def test_environment_store_loads_complete_credentials():

@@ -1,5 +1,6 @@
 import { Github, ArrowRight, MessageSquare, GitMerge, Map, Shield, Code2, Cpu, BarChart2, Database } from "lucide-react";
 import { Link } from "react-router";
+import { REPO_URL } from "../components/Layout";
 
 const PIPELINE = [
   {
@@ -37,7 +38,7 @@ const PIPELINE = [
     title: "Visualize",
     subtitle: "Explore the Twitch Community Map",
     color: "#FF7B00",
-    desc: "The pipeline precomputes the map layout: each community is placed in its own disc, and its channels are arranged inside it with a force-directed (spring) layout. The browser draws that layout, with node size reflecting average viewer count and edge thickness representing shared chatters. Communities are color-coded, enabling intuitive exploration of the Twitch ecosystem.",
+    desc: "The pipeline precomputes the map layout: each community is placed in its own disc, and its channels are arranged inside it with a force-directed (spring) layout. The browser draws that layout, with node size reflecting average viewer count and edge thickness representing shared chatters. Communities are color-coded.",
     details: [
       "Layout precomputed by the pipeline (NetworkX spring layout)",
       "Node radius scales with viewer count",
@@ -90,7 +91,6 @@ export function About() {
         paddingBottom: 80,
       }}
     >
-      {/* Page header */}
       <div
         className="py-16 px-6 text-center"
         style={{
@@ -115,7 +115,7 @@ export function About() {
             style={{
               color: "#EFEFF1",
               fontSize: "clamp(1.75rem, 4vw, 3rem)",
-              fontWeight: 800,
+              fontWeight: 700,
               letterSpacing: "-0.03em",
               lineHeight: 1.2,
               marginBottom: 12,
@@ -132,7 +132,6 @@ export function About() {
       <div className="max-w-5xl mx-auto px-4 sm:px-6 mt-16">
         {/* Pipeline steps */}
         <div className="relative">
-          {/* Vertical line */}
           <div
             className="absolute left-8 top-8 bottom-8 w-px hidden md:block"
             style={{ background: "linear-gradient(to bottom, #9147FF, #00E5CC, #FF7B00)" }}
@@ -141,7 +140,6 @@ export function About() {
           <div className="flex flex-col gap-12">
             {PIPELINE.map((step) => (
               <div key={step.step} className="relative flex gap-8">
-                {/* Step circle */}
                 <div
                   className="hidden md:flex flex-shrink-0 items-center justify-center rounded-full z-10"
                   style={{
@@ -155,13 +153,12 @@ export function About() {
                   {step.icon}
                 </div>
 
-                {/* Content */}
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-1">
                     <span
                       style={{
                         color: step.color,
-                        fontWeight: 800,
+                        fontWeight: 700,
                         fontSize: 12,
                         letterSpacing: "0.08em",
                       }}
@@ -353,7 +350,7 @@ export function About() {
           <h2
             style={{
               color: "#EFEFF1",
-              fontWeight: 800,
+              fontWeight: 700,
               fontSize: 22,
               letterSpacing: "-0.02em",
               marginBottom: 8,
@@ -361,12 +358,12 @@ export function About() {
           >
             It's fully open source
           </h2>
-          <p style={{ color: "#848494", fontSize: 15, lineHeight: 1.7, marginBottom: 24, maxWidth: 480, margin: "0 auto 24px" }}>
+          <p style={{ color: "#848494", fontSize: 15, lineHeight: 1.7, maxWidth: 480, margin: "0 auto 24px" }}>
             Fork it, deploy it, run it on your own channel list. All data pipeline code, graph processing, and this frontend are MIT-licensed.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-4">
             <a
-              href="https://github.com/Von-Van/vieweratlas"
+              href={REPO_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 px-6 py-3 rounded-xl transition-all"

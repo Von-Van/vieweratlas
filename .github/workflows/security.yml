@@ -151,35 +151,8 @@ jobs:
           print("pip-audit policy check passed (no high/critical vulnerabilities).")
           PY
 
-      - name: Run bandit
-        run: |
-          bandit -r twitchiobot/src -f json -o bandit.json || true
-
-      - name: Enforce bandit high/critical policy
-        run: |
-          python - <<'PY'
-          import json
-
-          with open("bandit.json", "r", encoding="utf-8") as file_handle:
-              report = json.load(file_handle)
-
-          findings = [
-              item
-              for item in report.get("results", [])
-              if item.get("issue_severity", "").upper() in {"HIGH", "CRITICAL"}
-          ]
-
-          if findings:
-              print("Bandit high/critical findings detected:")
-              for finding in findings:
-                  print(
-                      f"- {finding.get('filename')}:{finding.get('line_number')} "
-                      f"{finding.get('test_id')} {finding.get('issue_text')}"
-                  )
-              raise SystemExit(1)
-
-          print("Bandit policy check passed (no high/critical findings).")
-          PY
+      - name: Run bandit (fails on high-severity findings)
+        run: bandit -r twitchiobot/src -lll
 
       - name: Setup Node
         uses: actions/setup-node@v4

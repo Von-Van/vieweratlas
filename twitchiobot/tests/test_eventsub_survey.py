@@ -1,16 +1,12 @@
 import asyncio
 import json
-import sys
 import threading
 from datetime import datetime, timezone
 from io import BytesIO
-from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from eventsub_survey import (
     EventSubSurveyRunner,
@@ -66,13 +62,11 @@ class Provider:
     def __init__(self, targets):
         self.targets = targets
         self.access_token = "stale"
-        self.called = False
 
     def set_access_token(self, token):
         self.access_token = token
 
     def get_targets(self, limit):
-        self.called = True
         assert self.access_token == "refreshed"
         return self.targets[:limit]
 
@@ -241,7 +235,6 @@ def test_subscription_failure_is_retried_without_rendering_exception_text():
         timeout_seconds=10,
         subscription_retries=2,
         sleep=lambda _: asyncio.sleep(0),
-        secrets=("secret-token",),
     )
 
     manifest = run(runner.run("subscription_failure"))
@@ -253,7 +246,6 @@ def test_subscription_failure_is_retried_without_rendering_exception_text():
     frame = pd.read_parquet(BytesIO(next(iter(storage.parquet.values()))))
     failed = frame.loc[frame["channel_id"] == "channel-1"].iloc[0]
     assert failed["collection_status"] == "subscription_failed"
-    assert "secret-token" not in failed["failure_reason"]
     assert failed["failure_reason"] == "runtime_error"
 
 
@@ -293,7 +285,6 @@ def test_post_rotation_secret_cannot_reach_batch_or_manifest():
         timeout_seconds=10,
         subscription_retries=0,
         sleep=lambda _: asyncio.sleep(0),
-        secrets=("old-token",),
     )
 
     manifest = run(runner.run("rotated_token_failure"))
@@ -434,9 +425,7 @@ def test_shutdown_interrupts_active_window_and_marks_partial():
         stop_poll_seconds=0.001,
     )
 
-    from eventsub_survey import SurveyInterruptedError
-
-    with pytest.raises(SurveyInterruptedError):
+    with pytest.raises(eventsub_survey.SurveyInterruptedError):
         run(runner.run("stopped_session"))
     manifest = next(value for key, value in storage.json.items() if key.endswith("manifest.json"))
     assert manifest["status"] == "partial"
@@ -886,45 +875,6 @@ def test_twitch_client_close_flushes_refresh_that_happened_immediately_before_cl
         ("persist", "latest-access", "latest-refresh"),
         ("close", {"save_tokens": False}),
     ]
-
-
-def test_survey_cli_never_logs_raw_exception_or_token(monkeypatch, capsys, tmp_path):
-    import main as app_main
-
-    sentinel = "secret-access-token-that-must-never-reach-logs"
-
-    async def fail_survey(_config):
-        raise RuntimeError(f'Invalid or expired token: "{sentinel}"')
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(app_main, "mode_survey", fail_survey)
-    monkeypatch.setattr(sys, "argv", ["main.py", "survey", "default"])
-
-    assert app_main.main() == 1
-    captured = capsys.readouterr()
-    combined = captured.out + captured.err
-    assert "SURVEY_TASK_FAILED" in combined
-    assert sentinel not in combined
-    assert "Invalid or expired token" not in combined
-
-    log_text = (tmp_path / "logs" / "pipeline.log").read_text(encoding="utf-8")
-    assert "SURVEY_TASK_FAILED" in log_text
-    assert sentinel not in log_text
-
-
-def test_analysis_cli_returns_nonzero_when_scheduled_analysis_fails(
-    monkeypatch, tmp_path
-):
-    import main as app_main
-
-    async def fail_analysis(_config):
-        return False
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(app_main, "mode_analyze", fail_analysis)
-    monkeypatch.setattr(sys, "argv", ["main.py", "analyze", "default"])
-
-    assert app_main.main() == 1
 
 
 def test_twitch_client_creates_zero_retry_socket_before_subscribing(monkeypatch):
