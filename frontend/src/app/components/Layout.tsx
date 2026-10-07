@@ -16,25 +16,23 @@ export function Layout() {
   return (
     <div className="page">
       <header className="site-head">
-        <div className="site-head__top">
-          <Link to="/" className="site-title">
-            ViewerAtlas
-          </Link>
-          <nav className="site-nav" aria-label="Site">
-            {NAV.map((item) =>
-              pathname === item.to ? (
-                <span key={item.to} aria-current="page">
-                  {item.label}
-                </span>
-              ) : (
-                <Link key={item.to} to={item.to}>
-                  {item.label}
-                </Link>
-              ),
-            )}
-            <a href={REPO_URL}>code</a>
-          </nav>
-        </div>
+        <Link to="/" className="site-title">
+          ViewerAtlas
+        </Link>
+        <nav className="site-nav" aria-label="Site">
+          {NAV.map((item) =>
+            pathname === item.to ? (
+              <span key={item.to} aria-current="page">
+                {item.label}
+              </span>
+            ) : (
+              <Link key={item.to} to={item.to}>
+                {item.label}
+              </Link>
+            ),
+          )}
+          <a href={REPO_URL}>code</a>
+        </nav>
         <p className="site-sub">
           Which Twitch channels share an audience? Made by <a href={AUTHOR_URL}>Von-Van</a>.
           Inspired by Kiran Gershenfeld's <a href={TWITCH_ATLAS_URL}>Twitch Atlas</a> (2020).

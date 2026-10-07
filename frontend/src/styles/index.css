@@ -93,18 +93,21 @@ strong {
   padding: 52px 72px 44px;
 }
 
+/* Title and nav share the top row, with the nav pinned to the top-right
+   corner rather than sitting on the title's baseline, where it crowded the
+   subtitle. The subtitle spans the full width underneath. The title column
+   is sized to the title, so on a phone the nav wraps inside the corner
+   instead of pushing the title over. */
 .site-head {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 24px;
+  row-gap: 2px;
+  align-items: start;
 }
 
-.site-head__top {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 24px;
-  flex-wrap: wrap;
+.site-head .site-sub {
+  grid-column: 1 / -1;
 }
 
 .site-title {
@@ -124,7 +127,9 @@ strong {
 .site-nav {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 20px;
+  justify-content: flex-end;
+  gap: 0 20px;
+  margin-top: -4px;
   font: 400 14px/1.6 var(--mono);
 }
 
@@ -682,6 +687,15 @@ ol.list {
 
   .site-title {
     font-size: 26px;
+  }
+
+  .site-head {
+    column-gap: 16px;
+  }
+
+  .site-nav {
+    gap: 0 12px;
+    font-size: 13px;
   }
 
   .lede {
