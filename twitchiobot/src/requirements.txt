@@ -1,14 +1,14 @@
 twitchio==3.2.2
-networkx==3.2
+networkx==3.6.1
 python-louvain==0.16
 pyvis==0.3.2
 python-dotenv==1.2.2
 requests==2.33.0
 pyyaml==6.0.1
-pandas==2.1.4
+pandas==3.0.3
 boto3==1.34.0
 # Parquet engine for pandas (surveys and analysis); never imported by name.
-pyarrow==23.0.1
+pyarrow==24.0.0
 matplotlib>=3.8.0
 # networkx.spring_layout needs scipy once a graph reaches 500 nodes.
 scipy>=1.11.0
