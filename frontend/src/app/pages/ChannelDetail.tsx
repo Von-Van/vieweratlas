@@ -1,535 +1,267 @@
-import { useParams, Link } from "react-router";
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  CartesianGrid,
-} from "recharts";
-import { ArrowLeft, Users, GitBranch, TrendingUp, Globe, ExternalLink } from "lucide-react";
-import { useAtlasData, ANALYSIS_WINDOWS } from "../data/useAtlasData";
-import { LoadingSkeleton } from "../components/LoadingSkeleton";
-import { compactNumber, initials } from "../lib/format";
-
-const CustomTooltipBar = ({ active, payload, label }: any) => {
-  if (active && payload && payload.length) {
-    return (
-      <div
-        style={{
-          background: "#18181B",
-          border: "1px solid #2A2A2E",
-          borderRadius: 8,
-          padding: "8px 12px",
-          fontFamily: "'Space Grotesk', sans-serif",
-        }}
-      >
-        <div style={{ color: "#EFEFF1", fontWeight: 600, fontSize: 13 }}>{label}</div>
-        <div style={{ color: "#00E5CC", fontSize: 12 }}>
-          {payload[0].value.toLocaleString()} shared chatters
-        </div>
-      </div>
-    );
-  }
-  return null;
-};
-
-const CustomTooltipLine = ({ active, payload, label }: any) => {
-  if (active && payload && payload.length) {
-    return (
-      <div
-        style={{
-          background: "#18181B",
-          border: "1px solid #2A2A2E",
-          borderRadius: 8,
-          padding: "8px 12px",
-          fontFamily: "'Space Grotesk', sans-serif",
-        }}
-      >
-        <div style={{ color: "#848494", fontSize: 11 }}>{label}</div>
-        <div style={{ color: "#9147FF", fontWeight: 700, fontSize: 14 }}>
-          {payload[0].value.toLocaleString()} viewers
-        </div>
-      </div>
-    );
-  }
-  return null;
-};
+import { Link, useParams } from "react-router";
+import { Loading } from "../components/Loading";
+import { PageFooter, Row, usePageTitle } from "../components/Page";
+import { ViewerChart } from "../components/ViewerChart";
+import { useAtlasData } from "../data/useAtlasData";
+import { atlasIndex, communityName } from "../lib/atlas";
+import { fmt, formatPeriod, languageName, periodDays } from "../lib/format";
+import { isSmall } from "../lib/palette";
+import { LINK_CAP } from "../lib/snapshot";
 
 export function ChannelDetail() {
   const { id } = useParams<{ id: string }>();
-  const { data, loading, window: activeWindow, setWindow, windowAvailable, switching } = useAtlasData();
+  const {
+    data,
+    loading,
+    source,
+    dataWindow,
+    setWindow,
+    windowAvailable,
+    availableWindows,
+    switching,
+  } = useAtlasData();
+  const index = data ? atlasIndex(data) : null;
+  const channel = id && index ? index.channel.get(id.toLowerCase()) : undefined;
+  const otherWindows = windowAvailable ? availableWindows.filter((days) => days !== dataWindow) : [];
+  usePageTitle(
+    channel?.displayName ?? (data ? (otherWindows.length ? "Not in this window" : "Channel not found") : null),
+  );
 
-  if (loading || !data) return <LoadingSkeleton />;
+  if (loading || !data || !index) return <Loading />;
 
-  const { channels, communities } = data;
-  const channel = channels.find((c) => c.id === id);
-  const community = channel ? communities.find((c) => c.id === channel.communityId) : null;
-  const color = community?.color ?? "#9147FF";
+  const live = source === "live";
+  const name = live ? `${dataWindow}-day window` : "demo dataset";
+  const windowLinks = otherWindows.map((days, i) => (
+    <span key={days}>
+      {i > 0 && (i === otherWindows.length - 1 ? " or the " : ", the ")}
+      <button type="button" className="linklike" disabled={switching} onClick={() => setWindow(days)}>
+        {days}-day window
+      </button>
+    </span>
+  ));
 
+  const community = channel ? index.community.get(channel.communityId) : undefined;
   if (!channel || !community) {
-    // A narrow window samples fewer channels, so a link that worked at 90 days
-    // can miss at 14. Offer the wider window instead of a dead end.
-    const widestWindow = ANALYSIS_WINDOWS[ANALYSIS_WINDOWS.length - 1];
-    const canWiden = windowAvailable && activeWindow !== widestWindow;
-
     return (
-      <div
-        className="flex flex-col items-center justify-center py-40"
-        style={{ color: "#848494", fontFamily: "'Space Grotesk', sans-serif" }}
-      >
-        <div style={{ color: "#EFEFF1", fontSize: 20, fontWeight: 700, marginBottom: 8 }}>
-          {canWiden ? "Not in this window" : "Channel not found"}
-        </div>
-        <p style={{ marginBottom: 24, maxWidth: 420, textAlign: "center", lineHeight: 1.6 }}>
-          {canWiden
-            ? `This channel wasn't sampled often enough to appear in the last ${activeWindow} days. A wider window may include it.`
-            : "This channel isn't in the current dataset."}
+      <div className="body body--tight">
+        <p className="mono-line">
+          <Link to="/map">map</Link> / {id}
         </p>
-        <div className="flex items-center gap-3">
-          {canWiden && (
-            <button
-              onClick={() => setWindow(widestWindow)}
-              disabled={switching}
-              className="px-5 py-2.5 rounded-xl"
-              style={{
-                background: "#9147FF",
-                color: "#fff",
-                border: "none",
-                cursor: switching ? "wait" : "pointer",
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontWeight: 600,
-              }}
-            >
-              {switching ? "Loading…" : `Try ${widestWindow} days`}
-            </button>
-          )}
-          <Link
-            to="/map"
-            className="px-5 py-2.5 rounded-xl"
-            style={{
-              background: canWiden ? "transparent" : "#9147FF",
-              border: canWiden ? "1px solid #2A2A2E" : "none",
-              color: canWiden ? "#848494" : "#fff",
-              textDecoration: "none",
-              fontWeight: 600,
-            }}
-          >
-            Back to Map
-          </Link>
-        </div>
+        <Row top={14} gap={16}>
+          <h1 style={{ fontWeight: 700, fontSize: 34, lineHeight: 1.2 }}>
+            {otherWindows.length ? "Not in this window" : "Channel not found"}
+          </h1>
+          <p className="pretty">
+            {otherWindows.length ? (
+              <>
+                “{id}” isn't on the map for the {name}. Each window keeps only the channels seen often
+                enough in it, so try the {windowLinks}.
+              </>
+            ) : (
+              <>“{id}” isn't on the map. The map only holds the most-watched channels that share chatters with others.</>
+            )}
+          </p>
+          <p style={{ fontSize: 16 }}>
+            <Link to="/map">Back to the map</Link>
+          </p>
+        </Row>
       </div>
     );
   }
 
-  // Other channels in the same community.
-  const relatedChannels = channels
-    .filter((c) => c.communityId === channel.communityId && c.id !== channel.id)
-    .slice(0, 4);
-
-  const overlapData = channel.topOverlaps.map((ov) => ({
-    name: ov.channelName,
-    shared: ov.shared,
-  }));
+  const color = index.color.get(community.id) ?? "#1f77b4";
+  const neighbours = index.neighbours.get(channel.id) ?? [];
+  const inside = index.inside.get(channel.id) ?? 0;
+  // Days in the window, when the history is dated in step with it. Payloads
+  // from before per-day history carry one undated point and skip this.
+  const windowDays = periodDays(data.overallStats.collectionPeriod);
+  const days =
+    windowDays && channel.viewerHistory.every((p) => windowDays.includes(p.date)) ? windowDays : null;
+  const seenDays = channel.viewerHistory.length;
+  const others = (index.members.get(community.id) ?? []).filter((c) => c.id !== channel.id);
+  const topShared = neighbours[0]?.weight ?? 1;
 
   return (
-    <div
-      style={{
-        background: "#0E0E10",
-        color: "#EFEFF1",
-        minHeight: "100vh",
-        fontFamily: "'Space Grotesk', sans-serif",
-        paddingBottom: 80,
-      }}
-    >
-      <div
-        className="relative py-12 px-6"
-        style={{
-          background: `linear-gradient(135deg, ${color}18 0%, #0E0E10 60%)`,
-          borderBottom: "1px solid #2A2A2E",
-        }}
+    <div className="body body--tight">
+      <p className="mono-line" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Link to="/map">map</Link>
+        <span>/</span>
+        <Link to={`/map?community=${encodeURIComponent(community.id)}`}>{communityName(community)}</Link>
+        <span>/</span>
+        <span style={{ color: "var(--ink)" }}>{channel.name}</span>
+      </p>
+
+      <Row
+        top={14}
+        gap={16}
+        asideTop={62}
+        aside={
+          <>
+            <p>Viewer counts come from Twitch's own API at the start of each survey. They don't come from chat.</p>
+            {otherWindows.length > 0 && (
+              <p>
+                Other windows can tell a different story. Try the {windowLinks}.
+              </p>
+            )}
+          </>
+        }
       >
-        <div
-          className="absolute top-0 left-0 w-80 h-40 rounded-full blur-3xl opacity-20 pointer-events-none"
-          style={{ background: color }}
-        />
-
-        <div className="max-w-6xl mx-auto relative z-10">
-          <Link
-            to="/map"
-            className="inline-flex items-center gap-2 mb-6 text-sm transition-all"
-            style={{ color: "#848494", textDecoration: "none", fontWeight: 500 }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = "#EFEFF1")}
-            onMouseLeave={(e) => (e.currentTarget.style.color = "#848494")}
-          >
-            <ArrowLeft size={14} />
-            Back to Community Map
-          </Link>
-
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6">
-            <div
-              className="flex items-center justify-center rounded-2xl flex-shrink-0"
-              style={{
-                width: 80,
-                height: 80,
-                background: `linear-gradient(135deg, ${color}, ${color}88)`,
-                fontSize: 28,
-                fontWeight: 700,
-                color: "#fff",
-                boxShadow: `0 0 30px ${color}55`,
-              }}
-            >
-              {initials(channel.displayName)}
-            </div>
-
-            <div className="flex-1">
-              <div className="flex flex-wrap items-center gap-3 mb-2">
-                <h1
-                  style={{
-                    color: "#EFEFF1",
-                    fontSize: "clamp(1.5rem, 3vw, 2rem)",
-                    fontWeight: 700,
-                    letterSpacing: "-0.02em",
-                    lineHeight: 1.2,
-                  }}
-                >
-                  {channel.displayName}
-                </h1>
-                <div
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs"
-                  style={{
-                    background: color + "18",
-                    border: `1px solid ${color}44`,
-                    color,
-                    fontWeight: 600,
-                  }}
-                >
-                  <div className="w-1.5 h-1.5 rounded-full" style={{ background: color }} />
-                  {community.label}
-                </div>
-                <div
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs"
-                  style={{
-                    background: "rgba(0, 229, 204, 0.1)",
-                    border: "1px solid rgba(0, 229, 204, 0.25)",
-                    color: "#00E5CC",
-                    fontWeight: 600,
-                  }}
-                >
-                  <Globe size={11} />
-                  {channel.language}
-                </div>
-              </div>
-
-              <p style={{ color: "#848494", fontSize: 14, lineHeight: 1.6, marginBottom: 12, maxWidth: 600 }}>
-                {channel.description}
-              </p>
-
-              <div style={{ color: "#9147FF", fontSize: 13, fontWeight: 600 }}>
-                Most-streamed category: {channel.game}
-              </div>
-            </div>
-
-            <a
-              href={`https://twitch.tv/${channel.name}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl flex-shrink-0 transition-all"
-              style={{
-                background: color,
-                color: "#fff",
-                textDecoration: "none",
-                fontWeight: 600,
-                fontSize: 14,
-              }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.opacity = "0.85")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.opacity = "1")}
-            >
-              <ExternalLink size={14} />
-              Twitch.tv
-            </a>
-          </div>
-
-          {/* Stats row */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-8">
-            {[
-              {
-                icon: <Users size={16} style={{ color }} />,
-                value: channel.viewers.toLocaleString(),
-                label: "Avg Viewers",
-                accentColor: color,
-              },
-              {
-                icon: <GitBranch size={16} style={{ color: "#00E5CC" }} />,
-                value: channel.edgeCount,
-                label: "Connections",
-                accentColor: "#00E5CC",
-              },
-              {
-                icon: <TrendingUp size={16} style={{ color: "#1DB954" }} />,
-                value: channel.modularityScore,
-                label: "In-Community Link Share",
-                accentColor: "#1DB954",
-              },
-              {
-                icon: <Globe size={16} style={{ color: "#FF7B00" }} />,
-                value: channel.topOverlaps.length,
-                label: "Top Overlaps",
-                accentColor: "#FF7B00",
-              },
-            ].map((stat, i) => (
-              <div
-                key={i}
-                className="px-4 py-3 rounded-xl"
-                style={{ background: "#18181B", border: "1px solid #2A2A2E" }}
-              >
-                <div className="flex items-center gap-2 mb-1">{stat.icon}</div>
-                <div
-                  style={{
-                    color: stat.accentColor,
-                    fontWeight: 700,
-                    fontSize: 22,
-                    lineHeight: 1.1,
-                  }}
-                >
-                  {stat.value}
-                </div>
-                <div style={{ color: "#848494", fontSize: 12, marginTop: 2 }}>{stat.label}</div>
-              </div>
-            ))}
-          </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 16, flexWrap: "wrap" }}>
+          <h1 style={{ fontWeight: 700, fontSize: 34, lineHeight: 1.2 }}>{channel.displayName}</h1>
+          <a className="mono" style={{ fontSize: 14 }} href={`https://twitch.tv/${channel.name}`}>
+            twitch.tv/{channel.name}
+          </a>
         </div>
-      </div>
+        <dl className="facts facts--ruled">
+          <dt>community</dt>
+          <dd>
+            {communityName(community)}{" "}
+            <span className="muted">({community.nodeCount} channels on the map)</span>
+          </dd>
+          <dt>language</dt>
+          <dd>{languageName(channel.language)}</dd>
+          <dt>most-streamed category</dt>
+          <dd>{channel.game}</dd>
+          <dt>mean concurrent viewers</dt>
+          <dd className="num">{fmt(channel.viewers)}</dd>
+          {days && (
+            <>
+              <dt>seen live on</dt>
+              <dd className="num">
+                {seenDays} of {days.length} days
+              </dd>
+            </>
+          )}
+          <dt>links on the map</dt>
+          <dd className="num">
+            {neighbours.length}
+            {neighbours.length >= LINK_CAP && <span className="aside-text"> (the cap)</span>}
+          </dd>
+          <dt>in-community link share</dt>
+          <dd className="num">
+            {(inside / Math.max(1, neighbours.length)).toFixed(2)}{" "}
+            <span className="aside-text">
+              ({inside} of {neighbours.length} links stay inside its community)
+            </span>
+          </dd>
+        </dl>
+      </Row>
 
-      {/* Charts section */}
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 mt-8">
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Overlap bar chart */}
-          <div
-            className="p-6 rounded-2xl"
-            style={{ background: "#18181B", border: "1px solid #2A2A2E" }}
-          >
-            <div className="mb-4">
-              <h3 style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 16, marginBottom: 4 }}>
-                Top Audience Overlaps
-              </h3>
-              <p style={{ color: "#848494", fontSize: 13 }}>
-                Channels sharing the most chatters with {channel.displayName}
-              </p>
-            </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={overlapData} layout="vertical" margin={{ left: 10, right: 20 }}>
-                <XAxis
-                  type="number"
-                  tick={{ fill: "#848494", fontSize: 11, fontFamily: "'Space Grotesk', sans-serif" }}
-                  axisLine={{ stroke: "#2A2A2E" }}
-                  tickLine={false}
-                  // Shared-chatter counts are small integers, not viewer
-                  // totals: the thousands formatter used elsewhere on this page
-                  // rendered every tick on this axis as "0k".
-                  tickFormatter={(v) => v.toLocaleString()}
-                />
-                <YAxis
-                  type="category"
-                  dataKey="name"
-                  tick={{ fill: "#EFEFF1", fontSize: 12, fontFamily: "'Space Grotesk', sans-serif" }}
-                  axisLine={false}
-                  tickLine={false}
-                  width={100}
-                />
-                <Tooltip content={<CustomTooltipBar />} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
-                <Bar dataKey="shared" fill="#00E5CC" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+      <Row
+        top={36}
+        asideTop={4}
+        aside={
+          <p>
+            Each point averages that day's surveys at 06:00, 14:00 and 22:00 ET. A channel that streams
+            at other hours looks smaller here than it is.
+          </p>
+        }
+      >
+        <figure className="figure">
+          <ViewerChart
+            history={channel.viewerHistory}
+            days={days}
+            color={color}
+            label={`Daily mean concurrent viewers for ${channel.displayName}.`}
+          />
+          <figcaption className="caption">
+            <strong>Figure 6.</strong> Mean concurrent viewers on each day of the {name} (
+            {formatPeriod(data.overallStats.collectionPeriod)}).
+            {days && seenDays < days.length && " Hollow markers are days the channel wasn't seen live in any survey."}
+          </figcaption>
+        </figure>
+      </Row>
 
-          {/* Viewer timeline */}
-          <div
-            className="p-6 rounded-2xl"
-            style={{ background: "#18181B", border: "1px solid #2A2A2E" }}
-          >
-            <div className="mb-4">
-              <h3 style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 16, marginBottom: 4 }}>
-                Viewer Count Trend
-              </h3>
-              <p style={{ color: "#848494", fontSize: 13 }}>
-                Average concurrent viewers over the collection period
-              </p>
-            </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={channel.viewerHistory} margin={{ left: 5, right: 20 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#2A2A2E" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fill: "#848494", fontSize: 11, fontFamily: "'Space Grotesk', sans-serif" }}
-                  axisLine={{ stroke: "#2A2A2E" }}
-                  tickLine={false}
-                />
-                <YAxis
-                  tick={{ fill: "#848494", fontSize: 11, fontFamily: "'Space Grotesk', sans-serif" }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(v) => compactNumber.format(v)}
-                />
-                <Tooltip content={<CustomTooltipLine />} />
-                <Line
-                  type="monotone"
-                  dataKey="viewers"
-                  stroke={color}
-                  strokeWidth={2}
-                  dot={{ fill: color, r: 3, strokeWidth: 0 }}
-                  activeDot={{ r: 5, fill: color }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Community membership */}
-        <div
-          className="mt-6 p-6 rounded-2xl"
-          style={{
-            background: "#18181B",
-            border: `1px solid ${color}33`,
-          }}
-        >
-          <h3 style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 16, marginBottom: 12 }}>
-            Community Membership
-          </h3>
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-6">
-            <div className="flex items-center gap-3">
-              <div
-                className="rounded-xl flex items-center justify-center"
-                style={{
-                  width: 48,
-                  height: 48,
-                  background: color + "20",
-                  border: `1px solid ${color}44`,
-                }}
-              >
-                <div
-                  className="rounded-full"
-                  style={{ width: 16, height: 16, background: color, boxShadow: `0 0 10px ${color}` }}
-                />
-              </div>
-              <div>
-                <div style={{ color, fontWeight: 700, fontSize: 18 }}>
-                  {community.label}
-                </div>
-                <div style={{ color: "#848494", fontSize: 13 }}>
-                  {community.nodeCount} channels in this community
-                </div>
-              </div>
-            </div>
-            <div className="flex-1 grid grid-cols-2 sm:grid-cols-3 gap-4">
-              <div>
-                <div style={{ color: "#848494", fontSize: 11, marginBottom: 3, letterSpacing: "0.04em" }}>
-                  IN-COMMUNITY LINK SHARE
-                </div>
-                <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 20 }}>
-                  {channel.modularityScore}
-                </div>
-                <div
-                  className="mt-1.5 h-1.5 rounded-full overflow-hidden"
-                  style={{ background: "#2A2A2E" }}
-                >
-                  <div
-                    className="h-full rounded-full"
-                    style={{
-                      width: `${channel.modularityScore * 100}%`,
-                      background: color,
-                    }}
-                  />
-                </div>
-              </div>
-              <div>
-                <div style={{ color: "#848494", fontSize: 11, marginBottom: 3, letterSpacing: "0.04em" }}>
-                  CONNECTIONS
-                </div>
-                <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 20 }}>
-                  {channel.edgeCount}
-                </div>
-              </div>
-              <div>
-                <div style={{ color: "#848494", fontSize: 11, marginBottom: 3, letterSpacing: "0.04em" }}>
-                  DESCRIPTION
-                </div>
-                <div style={{ color: "#848494", fontSize: 13, lineHeight: 1.5 }}>
-                  {community.description}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Related channels */}
-        {relatedChannels.length > 0 && (
-          <div className="mt-8">
-            <h3
-              style={{
-                color: "#EFEFF1",
-                fontWeight: 700,
-                fontSize: 18,
-                marginBottom: 16,
-                letterSpacing: "-0.01em",
-              }}
-            >
-              More from {community.label}
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {relatedChannels.map((ch) => (
-                <Link
-                  key={ch.id}
-                  to={`/channel/${ch.id}`}
-                  style={{ textDecoration: "none" }}
-                >
-                  <div
-                    className="p-4 rounded-xl transition-all"
-                    style={{ background: "#18181B", border: "1px solid #2A2A2E" }}
-                    onMouseEnter={(e) => {
-                      (e.currentTarget as HTMLElement).style.borderColor = color + "55";
-                    }}
-                    onMouseLeave={(e) => {
-                      (e.currentTarget as HTMLElement).style.borderColor = "#2A2A2E";
-                    }}
-                  >
-                    <div className="flex items-center gap-3 mb-3">
+      <Row top={40}>
+        <h2 className="section">Shares the most chatters with</h2>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Channel</th>
+                <th>Community</th>
+                <th className="num" style={{ paddingRight: 14 }}>
+                  Shared
+                </th>
+                <th className="meter" aria-hidden="true" />
+              </tr>
+            </thead>
+            <tbody>
+              {neighbours.slice(0, 8).map((n) => {
+                const other = index.channel.get(n.id);
+                if (!other) return null;
+                return (
+                  <tr key={n.id}>
+                    <td>
+                      <Link to={`/channel/${n.id}`}>{other.displayName}</Link>
+                    </td>
+                    <td className="sub">
+                      {other.communityId === channel.communityId
+                        ? "same"
+                        : communityName(index.community.get(other.communityId))}
+                    </td>
+                    <td className="num" style={{ paddingRight: 14, fontSize: 14 }}>
+                      {fmt(n.weight)}
+                    </td>
+                    <td className="meter" aria-hidden="true">
                       <div
-                        className="flex items-center justify-center rounded-xl flex-shrink-0"
                         style={{
-                          width: 40,
-                          height: 40,
-                          background: color + "20",
-                          color,
-                          fontWeight: 700,
-                          fontSize: 14,
+                          width: `${(n.weight / topShared) * 100}%`,
+                          background: index.color.get(other.communityId),
                         }}
-                      >
-                        {initials(ch.displayName)}
-                      </div>
-                      <div>
-                        <div style={{ color: "#EFEFF1", fontWeight: 600, fontSize: 14 }}>
-                          {ch.displayName}
-                        </div>
-                        <div style={{ color: "#848494", fontSize: 12 }}>{ch.game}</div>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <div style={{ color: color, fontWeight: 700, fontSize: 15 }}>
-                        {ch.viewers.toLocaleString()}
-                      </div>
-                      <div style={{ color: "#848494", fontSize: 12 }}>viewers</div>
-                    </div>
-                  </div>
+                      />
+                    </td>
+                  </tr>
+                );
+              })}
+              {neighbours.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="sub">
+                    No links on the map.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        <p className="pretty" style={{ fontSize: 16, color: "var(--caption)" }}>
+          These counts are lower bounds that grow with the number of surveys. Compare rows in this table
+          with each other. Don't compare them with this channel's page in another window.
+        </p>
+      </Row>
+
+      {others.length > 0 && (
+        <Row top={36} gap={8}>
+          <h2 className="section">Others in this community</h2>
+          <p className="pretty">
+            {others.slice(0, 8).map((c, i, shown) => (
+              <span key={c.id}>
+                {i > 0 && (i === shown.length - 1 && others.length === shown.length ? " and " : ", ")}
+                <Link to={`/channel/${c.id}`}>{c.displayName}</Link>
+              </span>
+            ))}
+            {others.length > 8 && (
+              <>
+                {" "}
+                and{" "}
+                <Link to={`/map?community=${encodeURIComponent(community.id)}`}>
+                  {others.length - 8} more on the map
                 </Link>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+              </>
+            )}
+            .
+            {isSmall(community) && " This community is grey on the map: it's too small there to name."}
+          </p>
+        </Row>
+      )}
+
+      <PageFooter>
+        <span>
+          {name} · {formatPeriod(data.overallStats.collectionPeriod)}
+        </span>
+        <span>channel-level aggregates only</span>
+        <span>not affiliated with Twitch Interactive, Inc.</span>
+      </PageFooter>
     </div>
   );
 }

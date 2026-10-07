@@ -83,14 +83,16 @@ nodes are public, and only channel-level aggregates cross into them.
 | [`visualizer.py`](../twitchiobot/src/visualizer.py) | Optional PNG (matplotlib) and HTML (PyVis) renders. Off in production. |
 | [`vod_collector.py`](../twitchiobot/src/vod_collector.py), [`daily_collection_state.py`](../twitchiobot/src/daily_collection_state.py) | Legacy VOD chat preprocessor. Local development only. |
 
-### Frontend (`frontend/`, React 18 + TypeScript + Vite + Tailwind 4)
+### Frontend (`frontend/`, React 18 + TypeScript + Vite)
 
 | Path | Responsibility |
 | --- | --- |
 | `src/app/data/AtlasDataProvider.tsx` | Fetches `VITE_DATA_URL` (same origin, with a timeout and size limit) and loads other windows on demand. Falls back to the labelled synthetic demo dataset. |
 | `src/app/data/validateAtlasData.ts` | Schema and bounds validation of the payload before anything renders |
-| `src/app/components/NetworkGraph.tsx` | Canvas renderer for the precomputed layout. Node radius scales with √viewers and edge width with shared chatters. |
-| `src/app/pages/` | Landing, Community Map, Channel Detail, Stats, and About routes |
+| `src/app/components/CommunityFigure.tsx` | Canvas renderer for the precomputed layout, as a static figure on the overview and interactive on the map. Dot size is log-scaled viewers, capped at the radius the exporter spaced nodes for. Edge width follows shared chatters. |
+| `src/app/lib/atlas.ts` | Lookups derived once per payload: neighbours, link totals, the most-connected ranking, display colours |
+| `src/app/lib/snapshot.ts` | Findings quoted from the fixed 14-day run that the public payload doesn't carry. Shown with a snapshot label. |
+| `src/app/pages/` | Overview, Map, Results, Methods, and Channel routes |
 | `src/app/data/useAtlasData.ts` | Payload types, the data context, and the window constants |
 | `src/app/data/demoAtlasData.json` | Pipeline output for the synthetic surveys from `make_demo_data.py`, loaded only as a fallback |
 
@@ -131,7 +133,7 @@ operator runbooks.
 | Collection | Twitch Helix REST (`requests`), EventSub WebSocket via TwitchIO 3.2.2 |
 | Storage | Parquet (pandas + PyArrow), JSON manifests, S3 (boto3) or the local filesystem |
 | Analysis | NetworkX 3.2, python-louvain 0.16, NumPy, SciPy (large spring layouts) |
-| Frontend | React 18, React Router 7, Recharts, Tailwind CSS 4, Vite 6, TypeScript |
+| Frontend | React 18, React Router 7, Vite 6, TypeScript, canvas |
 | Cloud | ECS Fargate, EventBridge Scheduler, S3, CloudFront, DynamoDB, Secrets Manager, CloudWatch, SNS, AWS Budgets |
 | Quality | pytest, GitHub Actions CI, pip-audit, Bandit, npm audit, Dependabot |
 

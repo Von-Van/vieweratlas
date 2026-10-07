@@ -145,6 +145,9 @@ export function validateAtlasData(value: unknown): AtlasData {
   }
 
   if (!isOverallStats(overallStats)) throw new Error("Atlas summary statistics are invalid");
+  if (value.generatedAt !== undefined && !isString(value.generatedAt, 64)) {
+    throw new Error("Atlas export timestamp is invalid");
+  }
 
   // Optional: absent in single-window exports and in any payload predating the
   // time filter, both of which must keep loading.

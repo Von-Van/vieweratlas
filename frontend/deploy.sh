@@ -20,11 +20,13 @@ DISTRIBUTION_ID="${DISTRIBUTION_ID:-}"
 echo "==> Building frontend..."
 cd "$SCRIPT_DIR"
 npm ci
+npm run typecheck
 npm run build
 
 echo "==> Syncing dist/ to s3://${S3_BUCKET}/"
+# Existing tabs can still request a previous build's lazy-loaded chunks.
+# Retain older hashed assets so publishing a new build doesn't break them.
 aws s3 sync dist/ "s3://${S3_BUCKET}/" \
-  --delete \
   --cache-control "public, max-age=31536000, immutable" \
   --exclude "index.html" \
   --exclude "data/*"
@@ -40,7 +42,7 @@ if [ -n "$DISTRIBUTION_ID" ]; then
   echo "==> Invalidating CloudFront distribution ${DISTRIBUTION_ID}..."
   aws cloudfront create-invalidation \
     --distribution-id "$DISTRIBUTION_ID" \
-    --paths "/index.html" "/assets/*"
+    --paths "/*"
   echo "==> Invalidation requested."
 fi
 

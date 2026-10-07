@@ -27,7 +27,7 @@ state what each field actually holds.
 | Field | Definition | Read it as |
 | --- | --- | --- |
 | `totalChannels` | Channels in the analysed graph after every filter: at least 3 observations, at least 10 chatters, at least one edge, and membership in a community of at least 10 channels | The analysed population, not the rendered map (see `renderedChannels`) |
-| `totalViewers` | Distinct **chatters** seen in the window across all loaded channels, after automated accounts are removed and before channel filters | A count of message authors, not an audience size. The UI calls it "Unique Chatters". |
+| `totalViewers` | Distinct **chatters** seen in the window across all loaded channels, after automated accounts are removed and before channel filters | A count of message authors, not an audience size. The site calls it "distinct chatters, bots removed". |
 | `communitiesDetected` | Louvain communities with at least `min_community_size` (10) channels in the analysed graph | Can exceed the number of communities on the map |
 | `modularityScore` | Weighted Newman modularity of the retained partition, rounded to 2 decimals | Strength of community structure, range −0.5 to 1. It rises with sparsity, so don't compare it across different thresholds. |
 | `edgesTotal` | Edges in the analysed graph: channel pairs at or above the window's overlap threshold | Full graph, not the map |
@@ -49,7 +49,7 @@ state what each field actually holds.
 | `communityId` | Slug of the channel's community, matched across windows | Stable across the time filter |
 | `topOverlaps[]` | Up to 5 rendered neighbours by shared-chatter count: `{channelId, channelName, shared}` | Only neighbours that survived the public cap |
 | `edgeCount` | Degree in the rendered graph | At most 25 (the per-channel edge cap) |
-| `modularityScore` | Share of the channel's rendered links that stay inside its own community (0–1) | **Not** modularity. The UI calls it "In-Community Link Share". |
+| `modularityScore` | Share of the channel's rendered links that stay inside its own community (0–1) | **Not** modularity. The site calls it "in-community link share". |
 | `description` | Template text: `{Name} — {game} streamer in the {community} community.` | Generated, not editorial |
 | `layout` | `{x, y}` from the server-side layout | Position only. Distance is not a metric. |
 

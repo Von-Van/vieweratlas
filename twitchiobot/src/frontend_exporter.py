@@ -86,9 +86,9 @@ def _unique_slug(label: str, cid: int, used: set[str]) -> str:
     return slug
 
 
-# Mirrors the node radius formula in NetworkGraph.tsx. Slot sizing depends on
-# how large the browser actually draws a node, so these must stay in step with
-# the frontend's minR/maxR.
+# Node radius the layout makes room for. CommunityFigure.tsx mirrors this as
+# layoutRadius() and never draws a dot larger, so nodes spaced by it can't
+# overlap on the map. Change both together.
 NODE_MIN_R = 4.0
 NODE_MAX_R = 16.0
 

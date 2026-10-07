@@ -78,6 +78,8 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
     loading: true,
     source: "loading",
     notice: null,
+    dataWindow: DEFAULT_WINDOW,
+    dataUrl: null,
   });
 
   // Windows already fetched and validated this session. Switching back to one
@@ -123,7 +125,9 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
             data,
             loading: false,
             source: "demo",
-            notice: "Portfolio preview using a synthetic demonstration dataset.",
+            notice: "Live data isn't configured, so this is a synthetic demonstration dataset.",
+            dataWindow: DEFAULT_WINDOW,
+            dataUrl: null,
           });
         }
         return;
@@ -143,7 +147,12 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
           cache.current.set(opening, data);
           windowRef.current = opening;
           setActiveWindow(opening);
-          setState({ data, loading: false, source: "live", notice: null });
+          // Link the window's own file when one was published, so the footer
+          // names the window rather than the unsuffixed alias.
+          const dataUrl = data.availableWindows?.includes(opening)
+            ? windowedDataUrl(DATA_URL, opening) ?? DATA_URL
+            : DATA_URL;
+          setState({ data, loading: false, source: "live", notice: null, dataWindow: opening, dataUrl });
         }
       } catch (err) {
         if (!cancelled) {
@@ -154,7 +163,9 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
             data,
             loading: false,
             source: "demo",
-            notice: "Live data is unavailable; showing a synthetic demonstration dataset.",
+            notice: "Live data is unavailable, so this is a synthetic demonstration dataset.",
+            dataWindow: DEFAULT_WINDOW,
+            dataUrl: null,
           });
         }
       } finally {
@@ -170,14 +181,20 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
 
   const setWindow = useCallback(
     (days: AnalysisWindow) => {
-      if (days === windowRef.current || !DATA_URL) return;
+      if (!DATA_URL) return;
+
+      // Every choice supersedes the request in flight, including returning to
+      // the current or a cached window while another window is still loading.
+      pending$.current?.abort();
+      pending$.current = null;
+      const seq = ++requestSeq.current;
+      setSwitching(false);
+      if (days === windowRef.current) return;
 
       // Pending windows have no published file. Select it so the button reads
       // as chosen and the map can explain itself, but do not request anything.
       const pending = state.data?.pendingWindows ?? [];
       if (pending.includes(days)) {
-        pending$.current?.abort();
-        requestSeq.current += 1;
         windowRef.current = days;
         setActiveWindow(days);
         setSwitching(false);
@@ -189,7 +206,13 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
       if (cached) {
         windowRef.current = days;
         setActiveWindow(days);
-        setState((prev) => ({ ...prev, data: cached, notice: null }));
+        setState((prev) => ({
+          ...prev,
+          data: cached,
+          notice: null,
+          dataWindow: days,
+          dataUrl: windowedDataUrl(DATA_URL, days) ?? DATA_URL,
+        }));
         return;
       }
 
@@ -200,10 +223,8 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
       // fetches in flight. Without this, whichever resolves last wins rather
       // than whichever was clicked last, so a slow 14d response could land on
       // top of a 90d the viewer picked afterwards.
-      pending$.current?.abort();
       const controller = new AbortController();
       pending$.current = controller;
-      const seq = ++requestSeq.current;
       const isStale = () => seq !== requestSeq.current;
 
       const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
@@ -216,7 +237,7 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
           if (isStale()) return;
           windowRef.current = days;
           setActiveWindow(days);
-          setState((prev) => ({ ...prev, data, notice: null }));
+          setState((prev) => ({ ...prev, data, notice: null, dataWindow: days, dataUrl: url }));
         })
         .catch((err) => {
           if (isStale()) return;
@@ -225,7 +246,7 @@ export function AtlasDataProvider({ children }: { children: ReactNode }) {
           console.warn(`The ${days}-day window could not be loaded.`, err);
           setState((prev) => ({
             ...prev,
-            notice: `The ${days}-day window is unavailable; showing ${windowRef.current} days.`,
+            notice: `The ${days}-day window couldn't be loaded, so this is still the ${prev.dataWindow}-day window.`,
           }));
         })
         .finally(() => {

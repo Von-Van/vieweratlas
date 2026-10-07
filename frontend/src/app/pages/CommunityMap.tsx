@@ -1,631 +1,324 @@
-import { useState, useMemo } from "react";
-import { useNavigate } from "react-router";
-import { X, Search, SlidersHorizontal, Info, ExternalLink } from "lucide-react";
-import { NetworkGraph } from "../components/NetworkGraph";
-import { useAtlasData, type AnalysisWindow } from "../data/useAtlasData";
-import { LoadingSkeleton } from "../components/LoadingSkeleton";
+import { useEffect, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { Link, useSearchParams } from "react-router";
+import { CommunityFigure } from "../components/CommunityFigure";
+import { Loading } from "../components/Loading";
+import { NotReady, PageFooter, usePageTitle } from "../components/Page";
+import { useAtlasData, type AnalysisWindow, type AtlasData } from "../data/useAtlasData";
+import { atlasIndex, communityName } from "../lib/atlas";
+import { fmt, formatPeriod } from "../lib/format";
+import { isSmall, SMALL_COLOR } from "../lib/palette";
+import { LINK_CAP } from "../lib/snapshot";
 
 export function CommunityMap() {
-  const navigate = useNavigate();
+  usePageTitle("Community map");
+  const { data, loading } = useAtlasData();
+  if (loading || !data) return <Loading />;
+  return <MapView data={data} />;
+}
+
+function MapView({ data }: { data: AtlasData }) {
   const {
-    data, loading, window: activeWindow, setWindow,
-    windowAvailable, availableWindows, pendingWindows, windowPending, switching,
+    source,
+    window: activeWindow,
+    dataWindow,
+    dataUrl,
+    setWindow,
+    windowAvailable,
+    availableWindows,
+    pendingWindows,
+    windowPending,
+    switching,
   } = useAtlasData();
-  const [selectedCommunities, setSelectedCommunities] = useState<Set<string>>(new Set());
-  const [searchQuery, setSearchQuery] = useState("");
-  const [minViewers, setMinViewers] = useState(0);
-  const [selectedLanguage, setSelectedLanguage] = useState("All");
-  const [selectedNode, setSelectedNode] = useState<string | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const index = atlasIndex(data);
+  const [params, setParams] = useSearchParams();
+  const focusedCommunity = params.get("community");
 
-  const channels = data?.channels ?? [];
-  const edges = data?.edges ?? [];
-  const communities = data?.communities ?? [];
-  const languageOptions = useMemo(() => {
-    const languages = Array.from(
-      new Set(channels.map((channel) => channel.language).filter(Boolean)),
-    ).sort((a, b) => a.localeCompare(b));
-    return ["All", ...languages];
-  }, [channels]);
-  const maxViewerFilter = useMemo(() => {
-    const maxViewers = Math.max(0, ...channels.map((channel) => channel.viewers));
-    return Math.max(500, Math.ceil(maxViewers / 500) * 500);
-  }, [channels]);
+  // ?community=<id> opens with only that community shown; ?channel=<id>
+  // opens with that channel selected. Both are how other pages link here.
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(() => {
+    const only = focusedCommunity;
+    if (!only || !index.community.has(only)) return new Set();
+    return new Set(data.communities.filter((c) => c.id !== only).map((c) => c.id));
+  });
+  const [query, setQuery] = useState("");
 
-  const toggleCommunity = (id: string) => {
-    setSelectedCommunities((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+  useEffect(() => {
+    setHidden(
+      focusedCommunity && index.community.has(focusedCommunity)
+        ? new Set(data.communities.filter((c) => c.id !== focusedCommunity).map((c) => c.id))
+        : new Set(),
+    );
+  }, [focusedCommunity, data, index]);
+
+  // Read selection from the URL so links and browser history restore it.
+  const picked = params.get("channel")?.toLowerCase()
+    ?? (focusedCommunity ? index.members.get(focusedCommunity)?.[0]?.id ?? null : null);
+
+  // A channel picked in one window may not exist in the next; fall back to
+  // the best-connected channel rather than an empty panel.
+  const selected = picked && index.channel.has(picked) ? picked : index.mostConnected[0]?.id ?? null;
+
+  const select = (id: string) => {
+    setParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("channel", id);
       return next;
-    });
+    }, { replace: true, preventScrollReset: true });
   };
 
-  const filteredChannels = useMemo(() => {
-    return channels.filter((ch) => {
-      if (selectedCommunities.size > 0 && !selectedCommunities.has(ch.communityId)) return false;
-      if (ch.viewers < minViewers) return false;
-      if (selectedLanguage !== "All" && ch.language !== selectedLanguage) return false;
-      if (searchQuery && !ch.displayName.toLowerCase().includes(searchQuery.toLowerCase()) && !ch.game.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-      return true;
+  const toggle = (ids: string[], show: boolean) =>
+    setHidden((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (show) next.delete(id);
+        else next.add(id);
+      }
+      return next;
     });
-  }, [channels, selectedCommunities, minViewers, selectedLanguage, searchQuery]);
 
-  const filteredEdges = useMemo(() => {
-    const ids = new Set(filteredChannels.map((c) => c.id));
-    return edges.filter((e) => ids.has(e.source) && ids.has(e.target));
-  }, [edges, filteredChannels]);
+  const q = query.trim().toLowerCase();
+  const matches = q
+    ? data.channels.filter(
+        (c) =>
+          !hidden.has(c.communityId) &&
+          (c.id.includes(q) || c.displayName.toLowerCase().includes(q)),
+      )
+    : [];
+  const onSearchKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    // Channels arrive most-watched first, so the first match is the biggest.
+    if (e.key === "Enter" && matches[0]) select(matches[0].id);
+  };
 
-  const selectedChannel = selectedNode ? channels.find((c) => c.id === selectedNode) : null;
-  const selectedChannelCommunity = selectedChannel
-    ? communities.find((c) => c.id === selectedChannel.communityId)
-    : null;
+  const big = index.communities.filter((c) => !isSmall(c));
+  const small = index.communities.filter(isSmall);
+  const empty = data.channels.length === 0;
+  const fallback = availableWindows[availableWindows.length - 1];
+  const windows = [...availableWindows, ...pendingWindows].sort((a, b) => a - b);
 
-  const communityChannelCounts = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const ch of filteredChannels) {
-      map[ch.communityId] = (map[ch.communityId] || 0) + 1;
-    }
-    return map;
-  }, [filteredChannels]);
+  const channel = selected ? index.channel.get(selected) : undefined;
+  const community = channel ? index.community.get(channel.communityId) : undefined;
+  const neighbours = channel ? index.neighbours.get(channel.id) ?? [] : [];
+  const inside = channel ? index.inside.get(channel.id) ?? 0 : 0;
 
-  if (loading || !data) return <LoadingSkeleton />;
+  const pickFromTable = (id: string) => (e: MouseEvent<HTMLAnchorElement>) => {
+    // A plain click moves the selection; a modified click still opens the page.
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    select(id);
+  };
 
   return (
-    <div
-      className="flex"
-      style={{
-        height: "calc(100vh - 64px)",
-        background: "#0E0E10",
-        fontFamily: "'Space Grotesk', sans-serif",
-      }}
-    >
-      {sidebarOpen && (
-        <div
-          className="flex-shrink-0 flex flex-col overflow-hidden"
-          style={{
-            width: 300,
-            background: "#18181B",
-            borderRight: "1px solid #2A2A2E",
-            overflowY: "auto",
-          }}
-        >
-          <div
-            className="px-4 py-4 flex items-center justify-between flex-shrink-0"
-            style={{ borderBottom: "1px solid #2A2A2E" }}
+    <div className="body body--tight">
+      <div className="row row--wide">
+        <div className="col" style={{ gap: 10 }}>
+          <div className="selection-head" style={{ justifyContent: "space-between", gap: 16 }}>
+            <h1 style={{ fontWeight: 600, fontSize: 24, lineHeight: 1.3 }}>Community map</h1>
+            {!empty && !windowPending && (
+              <span className="mono" style={{ fontSize: 13, color: "var(--muted)" }}>
+                {fmt(data.channels.length)} channels · {fmt(data.edges.length)} links · ≤{LINK_CAP} per
+                channel
+              </span>
+            )}
+          </div>
+          <CommunityFigure
+            channels={data.channels}
+            edges={data.edges}
+            index={index}
+            label={`Interactive community map of ${fmt(data.channels.length)} channels. Use the search box to find a channel.`}
+            interactive
+            hidden={hidden}
+            selected={selected}
+            query={query}
+            onSelect={select}
           >
-            <div>
-              <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 15 }}>Community Map</div>
-              <div style={{ color: "#848494", fontSize: 12, marginTop: 2 }}>
-                {windowPending
-                  ? `${activeWindow}-day window pending`
-                  : `${filteredChannels.length} channels · ${filteredEdges.length} edges`}
-              </div>
-            </div>
-            <button
-              aria-label="Close filters"
-              onClick={() => setSidebarOpen(false)}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "#848494",
-                cursor: "pointer",
-                padding: 4,
-                borderRadius: 6,
-              }}
-            >
-              <X size={16} />
-            </button>
-          </div>
-
-          <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: "1px solid #2A2A2E" }}>
-            <div className="relative">
-              <Search
-                size={14}
-                className="absolute left-3 top-1/2 -translate-y-1/2"
-                style={{ color: "#848494" }}
+            {windowPending ? (
+              <NotReady
+                days={activeWindow}
+                fallback={fallback}
+                onFallback={fallback ? () => setWindow(fallback) : undefined}
               />
-              <input
-                type="text"
-                placeholder="Search channels..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full pl-9 pr-3 py-2 rounded-lg text-sm"
-                style={{
-                  background: "#0E0E10",
-                  border: "1px solid #2A2A2E",
-                  color: "#EFEFF1",
-                  outline: "none",
-                  fontFamily: "'Space Grotesk', sans-serif",
-                }}
-              />
-            </div>
-          </div>
+            ) : empty ? (
+              <NotReady days={null} />
+            ) : null}
+          </CommunityFigure>
+          <p className="caption">
+            <strong>Figure 2.</strong> Same data as <Link to="/">Figure 1</Link>. Hover for a name, click
+            to select a channel, and untick a community to hide it.
+          </p>
+        </div>
 
-          {/* Filters */}
-          <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: "1px solid #2A2A2E" }}>
-            <button
-              className="flex items-center gap-2 w-full text-left"
-              onClick={() => setFiltersExpanded(!filtersExpanded)}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: "#848494",
-                cursor: "pointer",
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: 13,
-                fontWeight: 600,
-                letterSpacing: "0.05em",
-                padding: 0,
-              }}
-            >
-              <SlidersHorizontal size={13} />
-              FILTERS
-              <span style={{ marginLeft: "auto", fontSize: 11 }}>{filtersExpanded ? "▲" : "▼"}</span>
-            </button>
-
-            {filtersExpanded && (
-              <div className="mt-3 flex flex-col gap-3">
-                {/* Time window */}
-                {windowAvailable && (
-                  <div>
-                    <div style={{ color: "#848494", fontSize: 11, marginBottom: 6, letterSpacing: "0.04em" }}>
-                      TIME WINDOW
-                    </div>
-                    <div className="flex gap-1.5">
-                      {[...availableWindows, ...pendingWindows]
-                        .sort((a, b) => a - b)
-                        .map((days: AnalysisWindow) => {
-                          const active = activeWindow === days;
-                          const pending = pendingWindows.includes(days);
-                          return (
-                            <button
-                              key={days}
-                              onClick={() => setWindow(days)}
-                              disabled={switching}
-                              aria-pressed={active}
-                              title={
-                                pending
-                                  ? `Not enough survey history for a ${days}-day window yet`
-                                  : `Last ${days} days`
-                              }
-                              style={{
-                                flex: 1,
-                                background: active
-                                  ? pending ? "rgba(132,132,148,0.18)" : "rgba(145,71,255,0.2)"
-                                  : "#0E0E10",
-                                border: `1px solid ${
-                                  active ? (pending ? "#848494" : "#9147FF") : "#2A2A2E"
-                                }`,
-                                color: active
-                                  ? pending ? "#B9B9C6" : "#9147FF"
-                                  : pending ? "#5C5C68" : "#848494",
-                                borderRadius: 6,
-                                padding: "4px 0",
-                                fontSize: 12,
-                                cursor: switching ? "wait" : "pointer",
-                                opacity: switching && !active ? 0.5 : 1,
-                                fontFamily: "'Space Grotesk', sans-serif",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {days}d
-                            </button>
-                          );
-                        })}
-                    </div>
-                    {/* The pipeline anchors this to the newest snapshot, so it
-                        reports the range actually analysed rather than the
-                        nominal window length. */}
-                    <div style={{ color: "#848494", fontSize: 11, marginTop: 6 }}>
-                      {windowPending
-                        ? `Pending — needs ${activeWindow} days of surveys`
-                        : data?.overallStats.collectionPeriod}
-                    </div>
-                  </div>
-                )}
-
-                {/* Language */}
-                <div>
-                  <div style={{ color: "#848494", fontSize: 11, marginBottom: 6, letterSpacing: "0.04em" }}>
-                    LANGUAGE
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {languageOptions.map((l) => (
-                      <button
-                        key={l}
-                        onClick={() => setSelectedLanguage(l)}
-                        style={{
-                          background: selectedLanguage === l ? "rgba(145,71,255,0.2)" : "#0E0E10",
-                          border: `1px solid ${selectedLanguage === l ? "#9147FF" : "#2A2A2E"}`,
-                          color: selectedLanguage === l ? "#9147FF" : "#848494",
-                          borderRadius: 6,
-                          padding: "3px 10px",
-                          fontSize: 12,
-                          cursor: "pointer",
-                          fontFamily: "'Space Grotesk', sans-serif",
-                          fontWeight: 500,
-                        }}
-                      >
-                        {l}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Min viewers */}
-                <div>
-                  <div
-                    className="flex items-center justify-between"
-                    style={{ marginBottom: 6 }}
-                  >
-                    <div style={{ color: "#848494", fontSize: 11, letterSpacing: "0.04em" }}>
-                      MIN VIEWERS
-                    </div>
-                    <div style={{ color: "#9147FF", fontSize: 12, fontWeight: 600 }}>
-                      {minViewers.toLocaleString()}
-                    </div>
-                  </div>
-                  <input
-                    type="range"
-                    min={0}
-                    max={maxViewerFilter}
-                    step={500}
-                    value={minViewers}
-                    onChange={(e) => setMinViewers(Number(e.target.value))}
-                    className="w-full"
-                    style={{ accentColor: "#9147FF" }}
-                  />
-                </div>
-
-                {minViewers > 0 || selectedLanguage !== "All" ? (
-                  <button
-                    // The window is left alone: it selects which dataset is
-                    // loaded, not which of the loaded channels are shown.
-                    onClick={() => { setMinViewers(0); setSelectedLanguage("All"); }}
-                    style={{
-                      background: "transparent",
-                      border: "1px solid #2A2A2E",
-                      color: "#848494",
-                      borderRadius: 6,
-                      padding: "4px 10px",
-                      fontSize: 12,
-                      cursor: "pointer",
-                      fontFamily: "'Space Grotesk', sans-serif",
-                      alignSelf: "flex-start",
-                    }}
-                  >
-                    Reset filters
-                  </button>
-                ) : null}
-              </div>
-            )}
-          </div>
-
-          {/* Community Legend */}
-          <div className="px-4 py-3 flex-shrink-0" style={{ borderBottom: "1px solid #2A2A2E" }}>
-            <div
-              style={{
-                color: "#848494",
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: "0.05em",
-                marginBottom: 10,
-              }}
-            >
-              COMMUNITIES
-            </div>
-            <div className="flex flex-col gap-1.5">
-              {communities.map((comm) => {
-                const count = communityChannelCounts[comm.id] || 0;
-                const active = selectedCommunities.size === 0 || selectedCommunities.has(comm.id);
-                return (
-                  <button
-                    key={comm.id}
-                    onClick={() => toggleCommunity(comm.id)}
-                    className="flex items-center gap-2.5 px-2.5 py-2 rounded-lg w-full text-left transition-all"
-                    style={{
-                      background: selectedCommunities.has(comm.id)
-                        ? `${comm.color}18`
-                        : "transparent",
-                      border: `1px solid ${selectedCommunities.has(comm.id) ? comm.color + "44" : "transparent"}`,
-                      opacity: active ? 1 : 0.45,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <div
-                      className="rounded-full flex-shrink-0"
-                      style={{
-                        width: 10,
-                        height: 10,
-                        background: comm.color,
-                        boxShadow: `0 0 6px ${comm.color}88`,
-                      }}
-                    />
-                    <span style={{ color: "#EFEFF1", fontSize: 13, flex: 1 }}>
-                      {comm.label}
-                    </span>
-                    <span
-                      className="rounded-full px-1.5 py-0.5"
-                      style={{
-                        background: "#0E0E10",
-                        color: "#848494",
-                        fontSize: 11,
-                        fontWeight: 600,
-                      }}
-                    >
-                      {count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-            {selectedCommunities.size > 0 && (
-              <button
-                onClick={() => setSelectedCommunities(new Set())}
-                style={{
-                  marginTop: 8,
-                  background: "transparent",
-                  border: "none",
-                  color: "#848494",
-                  fontSize: 12,
-                  cursor: "pointer",
-                  fontFamily: "'Space Grotesk', sans-serif",
-                  padding: "2px 0",
-                  textDecoration: "underline",
-                }}
+        <div className="controls">
+          <fieldset className="control">
+            <legend>window</legend>
+            {windowAvailable ? (
+              <select
+                aria-label="Time window"
+                value={activeWindow}
+                onChange={(e) => setWindow(Number(e.target.value) as AnalysisWindow)}
               >
-                Show all communities
-              </button>
-            )}
-          </div>
-
-          {/* Selected node detail */}
-          {selectedChannel && selectedChannelCommunity && (
-            <div className="px-4 py-4 flex-shrink-0" style={{ borderBottom: "1px solid #2A2A2E" }}>
-              <div
-                style={{
-                  color: "#848494",
-                  fontSize: 11,
-                  fontWeight: 600,
-                  letterSpacing: "0.05em",
-                  marginBottom: 10,
-                }}
-              >
-                SELECTED CHANNEL
-              </div>
-              <div
-                className="p-3 rounded-xl"
-                style={{
-                  background: "#0E0E10",
-                  border: `1px solid ${selectedChannelCommunity.color}44`,
-                }}
-              >
-                <div className="flex items-start justify-between mb-2">
-                  <div>
-                    <div style={{ color: selectedChannelCommunity.color, fontWeight: 700, fontSize: 15 }}>
-                      {selectedChannel.displayName}
-                    </div>
-                    <div style={{ color: "#848494", fontSize: 12 }}>{selectedChannel.game}</div>
-                  </div>
-                  <button
-                    aria-label="Clear selection"
-                    onClick={() => setSelectedNode(null)}
-                    style={{ background: "transparent", border: "none", color: "#848494", cursor: "pointer", padding: 2 }}
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-                <div className="flex items-center gap-3 mb-3">
-                  <div>
-                    <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 16 }}>
-                      {selectedChannel.viewers.toLocaleString()}
-                    </div>
-                    <div style={{ color: "#848494", fontSize: 11 }}>viewers</div>
-                  </div>
-                  <div>
-                    <div style={{ color: "#EFEFF1", fontWeight: 700, fontSize: 16 }}>
-                      {selectedChannel.edgeCount}
-                    </div>
-                    <div style={{ color: "#848494", fontSize: 11 }}>connections</div>
-                  </div>
-                </div>
-                <div
-                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded-full text-xs mb-3"
-                  style={{
-                    background: selectedChannelCommunity.color + "18",
-                    color: selectedChannelCommunity.color,
-                    fontWeight: 600,
-                  }}
-                >
-                  <div
-                    className="rounded-full"
-                    style={{ width: 6, height: 6, background: selectedChannelCommunity.color }}
-                  />
-                  {selectedChannelCommunity.label}
-                </div>
-
-                <div style={{ marginBottom: 8 }}>
-                  <div style={{ color: "#848494", fontSize: 11, marginBottom: 6 }}>TOP OVERLAPS</div>
-                  {selectedChannel.topOverlaps.slice(0, 5).map((ov) => (
-                    <div
-                      key={ov.channelId}
-                      className="flex items-center justify-between py-1"
-                    >
-                      <span style={{ color: "#EFEFF1", fontSize: 13 }}>{ov.channelName}</span>
-                      <span
-                        className="px-1.5 py-0.5 rounded text-xs"
-                        style={{ background: "#18181B", color: "#00E5CC", fontWeight: 600 }}
-                      >
-                        {/* Shared chatters, not viewers: a thousands format
-                            rendered every one of these as "0.1k". */}
-                        {ov.shared.toLocaleString()}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-
-                <button
-                  onClick={() => navigate(`/channel/${selectedChannel.id}`)}
-                  className="w-full flex items-center justify-center gap-2 py-2 rounded-lg text-sm transition-all"
-                  style={{
-                    background: selectedChannelCommunity.color,
-                    color: "#fff",
-                    border: "none",
-                    cursor: "pointer",
-                    fontFamily: "'Space Grotesk', sans-serif",
-                    fontWeight: 600,
-                  }}
-                >
-                  <ExternalLink size={13} />
-                  View Full Profile
-                </button>
-              </div>
-            </div>
-          )}
-
-          <div className="px-4 py-4 mt-auto">
-            <div
-              className="flex items-start gap-2 p-3 rounded-lg"
-              style={{ background: "#0E0E10", border: "1px solid #2A2A2E" }}
-            >
-              <Info size={14} style={{ color: "#848494", marginTop: 1, flexShrink: 0 }} />
-              <p style={{ color: "#848494", fontSize: 12, lineHeight: 1.6 }}>
-                <strong style={{ color: "#EFEFF1" }}>Click</strong> a node to inspect,{" "}
-                again to clear. <strong style={{ color: "#EFEFF1" }}>Drag</strong> to pan.{" "}
-                <strong style={{ color: "#EFEFF1" }}>Scroll</strong> to zoom.
+                {windows.map((days) => (
+                  <option key={days} value={days}>
+                    {days} days{pendingWindows.includes(days) ? " · pending" : ""}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <p className="note" style={{ marginTop: 0, color: "var(--ink)" }}>
+                {source === "demo" ? "demo dataset" : `${dataWindow} days`}
               </p>
+            )}
+            <p className="note">
+              {windowPending
+                ? `needs ${activeWindow} days of surveys`
+                : switching
+                  ? "loading…"
+                  : formatPeriod(data.overallStats.collectionPeriod)}
+            </p>
+          </fieldset>
+
+          <fieldset className="control">
+            <legend>find a channel</legend>
+            <input
+              type="search"
+              aria-label="Find a channel"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={onSearchKey}
+              placeholder={`e.g. ${index.mostConnected[0]?.id ?? "a channel"}`}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {q && (
+              <p className="note" aria-live="polite">
+                {matches.length === 0
+                  ? "no matches"
+                  : `${fmt(matches.length)} match${matches.length === 1 ? "" : "es"} · enter selects ${matches.length === 1 ? "it" : "the biggest"}`}
+              </p>
+            )}
+          </fieldset>
+
+          <fieldset className="control" style={{ paddingBottom: 10 }}>
+            <legend>communities</legend>
+            <div className="legend">
+              {big.map((c) => (
+                <label key={c.id}>
+                  <input
+                    type="checkbox"
+                    checked={!hidden.has(c.id)}
+                    onChange={(e) => toggle([c.id], e.target.checked)}
+                  />
+                  <span className="swatch" style={{ background: index.color.get(c.id) }} />
+                  <span style={{ lineHeight: 1.3 }}>{c.label}</span>
+                  <span className="count">{c.nodeCount}</span>
+                </label>
+              ))}
+              {small.length > 0 && (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={small.some((c) => !hidden.has(c.id))}
+                    onChange={(e) =>
+                      toggle(
+                        small.map((c) => c.id),
+                        e.target.checked,
+                      )
+                    }
+                  />
+                  <span className="swatch" style={{ background: SMALL_COLOR }} />
+                  <span style={{ lineHeight: 1.3 }}>
+                    {small.length} smaller communit{small.length === 1 ? "y" : "ies"}
+                  </span>
+                  <span className="count">{small.reduce((sum, c) => sum + c.nodeCount, 0)}</span>
+                </label>
+              )}
+            </div>
+            <p className="legend-actions">
+              <button type="button" className="linklike" onClick={() => setHidden(new Set())}>
+                all
+              </button>
+              <button
+                type="button"
+                className="linklike"
+                onClick={() => setHidden(new Set(data.communities.map((c) => c.id)))}
+              >
+                none
+              </button>
+            </p>
+          </fieldset>
+        </div>
+      </div>
+
+      {channel && community && !windowPending && (
+        <div className="row row--wide" style={{ marginTop: 28 }}>
+          <div className="col" style={{ gap: 10 }}>
+            <div className="selection-head">
+              <h2 className="section">{channel.displayName}</h2>
+              <span style={{ fontSize: 16, color: "var(--muted)" }}>{communityName(community)}</span>
+              <Link className="to-page" to={`/channel/${channel.id}`}>
+                channel page →
+              </Link>
+            </div>
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Shares the most chatters with</th>
+                    <th>Community</th>
+                    <th className="num">Shared chatters</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {neighbours.slice(0, 6).map((n) => {
+                    const other = index.channel.get(n.id);
+                    if (!other) return null;
+                    return (
+                      <tr key={n.id}>
+                        <td>
+                          <a href={`/channel/${n.id}`} onClick={pickFromTable(n.id)}>
+                            {other.displayName}
+                          </a>
+                        </td>
+                        <td className="sub">
+                          {other.communityId === channel.communityId
+                            ? "same"
+                            : communityName(index.community.get(other.communityId))}
+                        </td>
+                        <td className="num">{fmt(n.weight)}</td>
+                      </tr>
+                    );
+                  })}
+                  {neighbours.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="sub">
+                        No links on the map.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
+          <dl className="facts" style={{ paddingTop: 46 }}>
+            <dt>mean viewers</dt>
+            <dd>{fmt(channel.viewers)}</dd>
+            <dt>links on map</dt>
+            <dd>{neighbours.length}</dd>
+            <dt>inside community</dt>
+            <dd>
+              {(inside / Math.max(1, neighbours.length)).toFixed(2)} ({inside} of {neighbours.length})
+            </dd>
+          </dl>
         </div>
       )}
 
-      <div className="flex-1 relative">
-        {!sidebarOpen && (
-          <button
-            onClick={() => setSidebarOpen(true)}
-            className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-2 rounded-lg text-sm"
-            style={{
-              background: "#18181B",
-              border: "1px solid #2A2A2E",
-              color: "#848494",
-              cursor: "pointer",
-              fontFamily: "'Space Grotesk', sans-serif",
-              fontWeight: 500,
-            }}
-          >
-            <SlidersHorizontal size={14} />
-            Show Panel
-          </button>
-        )}
-
-        <div
-          className="absolute top-4 right-4 z-10 flex flex-col gap-2 items-end"
-          style={{ pointerEvents: "none" }}
-        >
-          {!windowPending && (
-            <div
-              className="px-3 py-1.5 rounded-lg text-xs"
-              style={{
-                background: "rgba(24,24,27,0.85)",
-                border: "1px solid #2A2A2E",
-                color: "#848494",
-                backdropFilter: "blur(8px)",
-                pointerEvents: "auto",
-              }}
-            >
-              {filteredChannels.length} nodes · {filteredEdges.length} edges
-            </div>
-          )}
-        </div>
-
-        {windowPending ? (
-          <div
-            // Above the graph canvas, which is painted later in the DOM and
-            // would otherwise cover this panel.
-            className="absolute inset-0 z-20 flex flex-col items-center justify-center px-6"
-            role="status"
-            aria-live="polite"
-            style={{ background: "#0E0E10", textAlign: "center" }}
-          >
-            <div
-              style={{
-                color: "#848494",
-                fontFamily: "'Space Grotesk', sans-serif",
-                fontSize: 34,
-                fontWeight: 700,
-                letterSpacing: "0.18em",
-              }}
-            >
-              PENDING
-            </div>
-            <p
-              style={{
-                color: "#848494",
-                fontSize: 13,
-                lineHeight: 1.7,
-                marginTop: 14,
-                maxWidth: 380,
-              }}
-            >
-              Collection has not run long enough for a {activeWindow}-day window.
-              It appears here automatically once {activeWindow} days of surveys
-              have accumulated — nothing needs to be redeployed.
-            </p>
-            {availableWindows.length > 0 && (
-              <button
-                onClick={() => setWindow(availableWindows[availableWindows.length - 1])}
-                style={{
-                  marginTop: 20,
-                  background: "transparent",
-                  border: "1px solid #2A2A2E",
-                  color: "#EFEFF1",
-                  borderRadius: 8,
-                  padding: "8px 16px",
-                  fontSize: 13,
-                  cursor: "pointer",
-                  fontFamily: "'Space Grotesk', sans-serif",
-                  fontWeight: 600,
-                }}
-              >
-                Show the {availableWindows[availableWindows.length - 1]}-day window
-              </button>
-            )}
-          </div>
-        ) : null}
-
-        {!windowPending && filteredChannels.length === 0 && (
-          <div
-            className="absolute inset-0 z-10 flex items-center justify-center"
-            style={{ pointerEvents: "none" }}
-          >
-            <div
-              className="px-4 py-3 rounded-lg text-sm"
-              style={{
-                background: "rgba(24,24,27,0.9)",
-                border: "1px solid #2A2A2E",
-                color: "#848494",
-              }}
-            >
-              No channels match the current filters.
-            </div>
-          </div>
-        )}
-
-        <NetworkGraph
-          channels={windowPending ? [] : filteredChannels}
-          edges={windowPending ? [] : filteredEdges}
-          communities={communities}
-          className="w-full h-full"
-          onNodeClick={(id) =>
-            // Selecting dims the rest of the map, which reads as a filter, so
-            // clicking the selected channel again is the obvious way out of it.
-            setSelectedNode((prev) => (prev === id ? null : id))
-          }
-          highlightedNode={selectedNode}
-        />
-      </div>
+      <PageFooter>
+        <span>layout precomputed by the pipeline (spring layout inside each community)</span>
+        <span>
+          data:{" "}
+          {dataUrl ? <a href={dataUrl}>{dataUrl.split("/").pop()}</a> : "bundled synthetic demo"}
+        </span>
+        <span>not affiliated with Twitch Interactive, Inc.</span>
+      </PageFooter>
     </div>
   );
 }

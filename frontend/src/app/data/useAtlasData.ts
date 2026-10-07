@@ -56,6 +56,8 @@ export interface ConnectedChannel {
 }
 
 export interface AtlasData {
+  /** ISO timestamp of the export. */
+  generatedAt?: string;
   /**
    * Windows the pipeline actually published alongside this file. Absent for a
    * single-window export, which is the signal to hide the time filter.
@@ -88,6 +90,14 @@ export interface AtlasDataState {
   notice: string | null;
   /** Active rolling window. Global, so every page describes the same dataset. */
   window: AnalysisWindow;
+  /**
+   * The window `data` describes. Differs from `window` only while a pending
+   * window is selected: there is nothing to show for it, so the previous
+   * window's data stays loaded and is labelled with this.
+   */
+  dataWindow: AnalysisWindow;
+  /** Same-origin URL `data` came from; null for the bundled demo. */
+  dataUrl: string | null;
   setWindow: (days: AnalysisWindow) => void;
   /**
    * False when only one window can be served — the bundled demo dataset, or a
@@ -114,6 +124,8 @@ export const AtlasDataContext = createContext<AtlasDataState>({
   source: "loading",
   notice: null,
   window: DEFAULT_WINDOW,
+  dataWindow: DEFAULT_WINDOW,
+  dataUrl: null,
   setWindow: () => {},
   windowAvailable: false,
   availableWindows: [],

@@ -1,5 +1,4 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite'
-import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 
 /**
@@ -27,7 +26,6 @@ function siteUrlMeta(siteUrl: string): Plugin {
 export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
-    tailwindcss(),
     siteUrlMeta(loadEnv(mode, process.cwd(), 'VITE_').VITE_SITE_URL?.trim() ?? ''),
   ],
 }))
