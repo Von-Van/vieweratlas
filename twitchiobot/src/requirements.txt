@@ -11,4 +11,4 @@ boto3==1.34.0
 pyarrow==24.0.0
 matplotlib>=3.8.0
 # networkx.spring_layout needs scipy once a graph reaches 500 nodes.
-scipy>=1.11.0
+scipy>=1.18.1
