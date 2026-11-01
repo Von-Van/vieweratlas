@@ -8,7 +8,7 @@ pyyaml==6.0.1
 pandas==3.0.3
 boto3==1.34.0
 # Parquet engine for pandas (surveys and analysis); never imported by name.
-pyarrow==24.0.0
+pyarrow==26.0.0
 matplotlib>=3.8.0
 # networkx.spring_layout needs scipy once a graph reaches 500 nodes.
 scipy>=1.11.0
