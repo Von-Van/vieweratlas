@@ -120,7 +120,7 @@ nodes are public, and only channel-level aggregates cross into them.
 | `aws/cloudfront-setup.sh` | One-time S3 and CloudFront setup: Origin Access Control, security headers, SPA error routing. Run manually. |
 | `aws/enable-access-logs.sh`, `analytics-schema.sql` | Optional CloudFront access logs with no viewer identifiers, plus an Athena table over them |
 | `aws/promote.sh` | Promotes a staging image tag to the production cluster |
-| `aws/ecs-task-*.json` | Fargate task definitions: collector 0.5 vCPU / 1 GB, analysis 1 vCPU / 2 GB |
+| `aws/ecs-task-*.json` | Fargate task definitions: collector 0.5 vCPU / 1 GB, analysis 1 vCPU / 4 GB |
 
 [DEPLOYMENT.md](../twitchiobot/docs/DEPLOYMENT.md) and
 [DAILY_OPERATIONS.md](../twitchiobot/docs/DAILY_OPERATIONS.md) are the
